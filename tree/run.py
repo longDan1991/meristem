@@ -15,7 +15,8 @@
   ③ 一次最多一个门槛；门槛不成立，其余子任务不启动
   ④ 判定"满足"却指不出证据 → 降级为"未满足"
 
-PROMPT 是可变层：自优化只允许改它。
+提示词在 `prompts/*.md`（可变层，自优化只允许改它）——
+改提示词不用碰代码，但改完要回来对一遍上面那四件事。
 """
 
 import json
@@ -25,15 +26,15 @@ import threading
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from .effects import (EXTERNAL_CLASSES, contract_of, contract_problems,
-                      effects_of)
+from .effects import contract_of, contract_problems, effects_of
 
 # 哪些产出物必须给契约（要么给契约，要么明确声明它属于内部）。
 # 日志/缓存这类副产物不在里面。
 ARTIFACT_EXT = (".py", ".sh", ".js", ".ts", ".rb", ".json",
                 ".yaml", ".yml", ".toml", ".csv", ".sql")
 from .llm import parse_json
-from .node import LIMITS, Budget, Node, Trace, norm
+from .node import EXTERNAL_CLASSES, Budget, Node, Trace, norm
+from .prompts import ALLOC_SYS, LEAF_SYS, PROMPT
 from .tools import TOOLS
 
 TOOL_LOCK = threading.Lock()
@@ -55,81 +56,8 @@ def inherits(parent_accept, child_accept):
     return any(x in (child_accept or "") for x in a)
 
 
-ALLOC_SYS = """你是一个分配节点。根据事实，决定"再做一次分配"还是"出结论"。
-
-形式字段（上层下发，只读，不许改）：
-  任务名 ≤20字 ／ 任务详情 ≤240字 ／ 注意事项 ≤120字 ／ 验收标准 ≤140字
-
-只输出一个 JSON，二选一：
-
-0) 想看以往有没有做过类似的事（大任务在第一次拆之前，建议先看一次）：
-{"先例":{"查询":["2026-12-31 权益翻倍 的判据","A股 回测 扣费后正期望","开户 入金 实盘"]}}
-   可以同时给多组查询（不同说法、不同侧面）。程序一次扫遍**所有老树**，
-   返回从根到命中节点的**判据链**和它的工作目录。
-   满足的先例可以照抄判据和拆法；阻塞的是死路——直接省掉重撞一遍。
-   它是参考，不是事实：判据和环境都可能已经变了，要自己复核。
-   看完了再拆，也不影响。
-
-1) 再做一次分配：
-{"再做一次":[{"任务名":"...","任务详情":"...","注意事项":"...","验收标准":"...","类型":"分配|叶子","门槛":true}]}
-   硬性要求一：子任务的验收标准要比你的更接近"能直接观测"，做不到就不要拆。
-   硬性要求二：子任务的验收标准里必须原样出现你验收标准里的可测物理量
-   （日期、两位以上数字、标识符如 CSV/MA5/hello.txt）。换成下游指标不算，
-   会被代码拒掉。
-   硬性要求三：最多一个 门槛 —— 这一堆里哪一条不成立，整个分支就作废？
-   它会被第一个做，且在它通过之前其余子任务一律不启动。想不出作废条件就别标。
-    次数不限。但你已经试过的都记在"本层已有尝试"里 —— 别重复撞同一堵墙。
-
-2) 出结论：
-{"结论":{"判定":"满足|未满足|阻塞","内容":"≤160字","证据":["..."]}}
-   判定"满足"必须指得出具体证据，指不出来会被降级为"未满足"。
-   **分配节点自己没有观测**，所以你的证据只能填两种：
-     ・子任务的**任务名**（原样照抄一个）
-     ・磁盘上真存在的产物路径
-   写"第几次观测"是无效的 —— 观测只属于叶子。
-   反复失败、或需要的动作不在工具里（比如开户/入金/留痕需要人到场），
-   就用"阻塞"，并把原因写清楚 —— 不要编一个你能做的假版本来代替做不到的事。
-"""
-
-LEAF_SYS = """你是一个叶子。判断自由，但动作必须形式化。
-
-形式字段（上层下发，只读，不许改）：
-  任务名 ≤20字 ／ 任务详情 ≤240字 ／ 注意事项 ≤120字 ／ 验收标准 ≤140字
-
-只输出一个 JSON，二选一：
-
-1) 做一个动作（唯一能改变世界的东西，一次一个，次数不限）：
-{"动作":{"工具":"bash|read|write|need","参数":{...}}}
-   · bash:  {"cmd":"..."}         —— 随你写。跑完由**代码**记下它碰了什么。
-   · read:  {"path":"..."}
-   · write: {"path":"...","content":"..."}
-     —— 内容完全自由，**过程中不用填任何形式化的东西**，专心把活干好。
-   · need:  {"query":"用 IMAP 读邮箱并落成 JSON"}
-     不知道怎么做时先问一次。返回的是以往真实成功过的做法，仅供参考。
-
-2) 出结论（这是唯一需要交付形式的地方）：
-{"结论":{"判定":"满足|未满足|阻塞","内容":"≤160字","证据":["第几次观测 / 产物路径"],
-          "外部需求":"需要人到场|需要真实账户|需要真实资金|需要现实设备",
-          "工件":[{"path":"...","type":"程序|配置|数据|脚本|内部",
-                   "name":"干什么用的",
-                   "func":"**能直接粘上就执行的一条命令**，如 `bash sum.sh`、`python3 main.py --flag x`；\
-不要写句子（写错了会被退回来）",
-                   "args":"参数","return":"返回/写出什么","external":[]}]}}
-
-   两条硬性要求（由代码核对，对不上会被退回来重出）：
-   ① 判定"满足"必须指得出具体证据（第几次观测 / 产物路径 / 子节点名）。
-   ② **你这次产出的每一个代码/配置/数据文件，都要在「工件」里交代**：
-      能跑起来的入口给完整契约（type/name/func/args/return，func 必须是一条命令）；
-      只给自己用、或只是产出的数据/日志，写 {"path":"...","type":"内部"} 就行。
-      （数据文件如果想留个说明，写 type="数据" 也可以。）
-   日志/缓存这类副产物不用管。
-
-   反复失败、或需要的动作不在工具里，就用"阻塞"，说清为什么，并指明外部需求是哪一类。
-   不要编一个你能做的假版本来代替做不到的事。
-"""
-
-# 可变层：自优化唯一被允许修改的东西。
-PROMPT = {"alloc": ALLOC_SYS, "leaf": LEAF_SYS}
+# 两套系统提示词在 `prompts/alloc.md` / `prompts/leaf.md` —— 它们是协议的一部分，
+# 每一条硬性要求都对应下面的一处代码检查。`PROMPT` 是自优化唯一允许改的可变层。
 
 
 # ---------------------------------------------------------------- 日志
@@ -164,25 +92,57 @@ def _ask(llm, trace, node, which, budget):
 
 
 # ---------------------------------------------------------------- 形式校验
-def _clean_spec(spec, trace, parent):
-    """规范化字段（压空白），并如实记下超长的。**不切。**
+def _clean_spec(spec):
+    """规范化一个子任务的形式字段。**没有任何长度检查**（提示词里的字数只是建议）。
 
-    上限由提示词承诺（20/240/120/140）—— 提示词已经限过的，代码不再偷偷砍。
-    超长只是一条事实，记进 trace 供 report 统计。
+    必填：name / detail / accept / kind / keywords / conc_range。
+    选填：notes —— 而且它**不参与老树检索**（§5.2：检索键要用可执行形状，
+    自由发挥的判断依据放进去只会污染词法匹配）。gate 是个开关，默认 false。
     """
-    out, over = {}, []
-    for k_src, k_lbl, k_lim in (("任务名", "name", LIMITS["name"]),
-                                ("任务详情", "detail", LIMITS["detail"]),
-                                ("注意事项", "notes", LIMITS["notes"]),
-                                ("验收标准", "accept", LIMITS["accept"])):
-        v, was = norm(spec.get(k_src, ""), k_lim)
-        if was:
-            over.append(k_src)
-        out[k_lbl] = v
-    if over:
-        trace.add(parent.id, "field_over",
-                  {"字段": over, "子任务": out["name"]})
+    out = {"name": norm(spec.get("name")),
+           "detail": norm(spec.get("detail")),
+           "notes": norm(spec.get("notes")),
+           "accept": norm(spec.get("accept")),
+           "kind": "leaf" if norm(spec.get("kind")) == "leaf" else "dispatch",
+           "gate": bool(spec.get("gate")),
+           "keywords": _parse_keywords(spec.get("keywords")),
+           "conc_range": _parse_range(spec.get("conc_range"))}
+    why = []
+    missing = [k for k in ("name", "detail", "accept") if not out[k]]
+    if missing:
+        why.append("缺必填项: " + ", ".join(missing))
+    if not out["keywords"]:
+        why.append("keywords 必须是非空数组（它是下层自己去查老树的检索键）")
+    if not out["conc_range"]:
+        why.append("conc_range 必须是 [下限, 上限] 两个正整数，如 [100,500]")
+    return out, ("; ".join(why) or None)
+
+
+def _parse_keywords(v):
+    """检索键。键用可执行形状（包名/命令动词/数字/脚本名），不是形容词。"""
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return []
+    out = []
+    for x in v:
+        s = norm(x)
+        if s and s not in out:
+            out.append(s)
     return out
+
+
+def _parse_range(v):
+    """结论字数区间 [下限, 上限]。它是上层对下层回复粒度的要求，不是字数警察。"""
+    if not isinstance(v, (list, tuple)) or len(v) != 2:
+        return None
+    try:
+        lo, hi = int(v[0]), int(v[1])
+    except Exception:
+        return None
+    if lo < 1 or hi < lo:
+        return None
+    return [lo, hi]
 
 
 def _evidence_ok(node, ev):
@@ -198,7 +158,7 @@ def _evidence_ok(node, ev):
     obs_idx = set(range(1, len(node.observations) + 1))
     kids = []
     if node.attempts:
-        kids = [c.get("任务名", "") for c in node.attempts[-1].get("下层结论", [])]
+        kids = [c.get("name", "") for c in node.attempts[-1].get("results", [])]
     for x in ev:
         s = str(x).strip()
         hit = False
@@ -225,17 +185,17 @@ def _clean_conclusion(concl, trace, node, st=None):
       ① 产出的每一个文件都必须在结论里交代（要么契约，要么声明内部）
       ② 判定"满足"得指得出真证据
     """
-    verdict, _ = norm(concl.get("判定", ""))
-    content, _ = norm(concl.get("内容", ""), LIMITS["conclusion"])
-    ev = concl.get("证据") or []
+    verdict = norm(concl.get("verdict", ""))
+    content = norm(concl.get("text", ""))
+    ev = concl.get("evidence") or []
     if isinstance(ev, str):
         ev = [ev]
-    ev = [norm(x)[0] for x in ev if str(x).strip()]
-    ext = concl.get("外部需求") or []
+    ev = [norm(x) for x in ev if str(x).strip()]
+    ext = concl.get("external") or []
     if isinstance(ext, str):
         ext = [ext]
     ext = [x for x in (str(x).strip() for x in ext) if x in EXTERNAL_CLASSES]
-    artifacts = concl.get("工件")
+    artifacts = concl.get("artifacts")
     if not isinstance(artifacts, list):
         artifacts = []
     if verdict not in ("满足", "未满足", "阻塞"):
@@ -244,14 +204,14 @@ def _clean_conclusion(concl, trace, node, st=None):
     # ① 强制措施，放在这最后一步 —— 过程中完全不打扰它
     unacct = _unaccounted(st, artifacts)
     if unacct:
-        trace.add(node.id, "contract_missing", {"没交代的产出": unacct})
+        trace.add(node.id, "contract_missing", {"missing": unacct})
         return None, (
             "你这次工作产出了这些文件：%s\n"
-            "结论里必须逐个交代它们（放在 \"工件\" 里）：\n"
-            "  {\"工件\":[{\"path\":\"a.sh\",\"type\":\"脚本\","
+            "结论里必须逐个交代它们（放在 \"artifacts\" 里）：\n"
+            "  {\"artifacts\":[{\"path\":\"a.sh\",\"type\":\"脚本\","
             "\"name\":\"干什么用的\",\"func\":\"怎么跑\","
             "\"args\":\"\",\"return\":\"写什么\"},\n"
-            "           {\"path\":\"b.py\",\"type\":\"内部\"}]}\n"
+            "                 {\"path\":\"b.py\",\"type\":\"内部\"}]}\n"
             "能跑起来的那个（入口）要给完整契约；其余只给自己用的写 type=内部 就行。"
             % ", ".join(unacct))
 
@@ -267,7 +227,7 @@ def _clean_conclusion(concl, trace, node, st=None):
             bad_contracts.append("%s: %s" % (os.path.basename(str(a["path"])),
                                             "; ".join(probs)))
     if bad_contracts:
-        trace.add(node.id, "contract_bad", {"问题": bad_contracts})
+        trace.add(node.id, "contract_bad", {"problems": bad_contracts})
         return None, ("这些工件的契约有问题，请修正后重新出结论：\n  - %s\n"
                       "func 要写成**能直接粘上就执行**的一条命令，比如 "
                       "`bash sum.sh` 或 `python3 main.py --flag x`，"
@@ -278,13 +238,13 @@ def _clean_conclusion(concl, trace, node, st=None):
         valid, bad = _evidence_ok(node, ev)
         if not valid:
             trace.add(node.id, "verdict_downgraded",
-                      {"原判定": "满足", "原因": "证据指不到任何真实存在的东西",
-                       "原本写的证据": bad})
+                      {"was": "满足", "reason": "证据指不到任何真实存在的东西",
+                       "evidence": bad})
             return {"verdict": "未满足", "content": content +
                     "（原判「满足」但证据指不到真实的东西，已降级）",
                     "evidence": [], "external": []}, None
         if bad:
-            trace.add(node.id, "evidence_trimmed", {"丢掉": bad, "留下": valid})
+            trace.add(node.id, "evidence_trimmed", {"dropped": bad, "kept": valid})
         ev = valid
     _accept_artifacts(node, artifacts, trace, st)
     return {"verdict": verdict, "content": content, "evidence": ev,
@@ -321,9 +281,9 @@ def _accept_artifacts(node, artifacts, trace, st):
         internal = contract.get("type") == "内部"
         eff, pre = (st or {}).get("art_effects", {}).get(rp, (None, None))
         problems = [] if internal else contract_problems(path, contract)
-        trace.add(node.id, "contract", {"path": path, "契约": contract,
-                                        "问题": problems, "来源": "结论",
-                                        "effects": eff, "前置条件": pre})
+        trace.add(node.id, "contract", {"path": path, "contract": contract,
+                                        "problems": problems, "source": "conclusion",
+                                        "effects": eff, "preconditions": pre})
         st.setdefault("contracts", []).append({"path": path, "契约": contract,
                                                "effects": eff, "前置条件": pre})
         if not internal and contract and not problems:
@@ -358,33 +318,75 @@ def _sig(tool, args, obs):
 
     这不是轮次上限：只要观测变了（比如轮询一个正在启动的服务），
     指纹就不同，永远不会触发。它检测的是**没有新信息**，不是"做得太多"。
+
+    观测**整段参与哈希**：截掉尾巴会让"只在 400 字之后不一样"的两次观测
+    看起来一样，于是真的进展被当成原地打转。哈希再长的字符串也不贵。
     """
     import hashlib
-    a = json.dumps({"工具": tool, "参数": args}, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha1((a + "\x00" + str(obs)[:400]).encode()).hexdigest()[:12]
+    a = json.dumps({"tool": tool, "args": args}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1((a + "\x00" + str(obs)).encode()).hexdigest()
+
+
+def _bump(seen, sig, trace, node, what):
+    """同一份东西重复出现 ≥3 次就显式告警，≥5 次就自己停下。
+
+    不是轮次上限：换一个动作、或者世界回话变了，指纹就不同（§2.4）。
+    它检测的是**没有新信息**。这里既用于"重复同一个动作"，也用于
+    "重复同一份看不懂的输出" —— 后者根本没有动作，所以更隐蔽
+    （实测撞过一次：mock 还在说旧协议的键，同一回合无限重复）。
+    """
+    seen[sig] = seen.get(sig, 0) + 1
+    n = seen[sig]
+    if n < 3:
+        return n, ""
+    trace.add(node.id, "no_progress", {"times": n, "action": what})
+    return n, ("\n[停止] 已经有 %d 次是同样的东西了：%s —— 再重复不会带来新信息。\n"
+               "换一个动作，或者出结论（阻塞就写清为什么）。" % (n, what))
+
+
+def _balk(node, why, trace, st, kids=None):
+    """把"这次给的东西用不了"变成一条可见的事实，并且**按重复次数处理**。
+
+    四个地方都要走它：看不懂的输出、被代码拒的分配、不合规的结论。
+    没有它，模型一直给同样的东西，这一回合就原地无限重复 ——
+    实测撞过两次（旧协议的键；总缺 accept 的子任务）。那两种情况下
+    根本没有动作，所以"重复动作"那个信号永远不会触发：这里必须自己数。
+
+    这不是轮次上限：换一种拆法、换一个错，指纹就不同（§2.4）。
+    """
+    if node.kind == "leaf":
+        node.observations.append({"action": "(用不了)", "obs": why})
+    else:
+        node.attempts.append({"children": kids or [], "rejected": why})
+    n, note = _bump(st.setdefault("seen_actions", {}),
+                    _sig("(balk)", why, ""), trace, node, "(用不了的输出)")
+    if n >= 5:
+        node.close("未满足", "同一份用不了的东西连续 %d 次，没有新信息：%s"
+                   % (n, why), [])
+        return {"kind": "finished"}
+    if note:
+        if node.kind == "leaf":
+            node.observations[-1]["obs"] += note
+        else:
+            node.attempts[-1]["rejected"] += note
+    return {"kind": "again"}
 
 
 def _do_action(node, act, trace, caps, st):
     """执行一个形式化动作。返回观测文本。动作是唯一能改变世界的东西。"""
-    tool = str(act.get("工具", ""))
-    args = act.get("参数") or {}
+    tool = str(act.get("tool", ""))
+    args = act.get("args") or {}
     if not isinstance(args, dict):
         return "参数必须是一个 JSON 对象"
-    if tool == "need":
-        if caps is None:
-            return "能力库不可用"
-        picked, text = caps.search(str(args.get("query", "")))
-        st["_caps"] = picked
-        trace.add(node.id, "cap_need", {"query": str(args.get("query", "")),
-                                        "hits": [e["id"] for e in picked],
-                                        "chars": len(text)})
-        if not text:
-            return "没有现成做法。用 bash 自己做；这次做成了，做法会被自动记下来。"
-        return ("现成做法（以往真实成功过的，仅供参考，仍要自己跑一遍验证）:\n" + text)
     fn = TOOLS.get(tool)
-    if not fn:
-        return "没有这个工具：%s（只有 bash / read / write / need）" % tool
-    call_args = {k: args[k] for k in ("path", "content", "cmd") if k in args}
+    if fn is None:
+        return ("没有这个工具：%s（只有 bash / read / write）\n"
+                "现成做法已经在上面的「现成做法」里了，直接用 bash 跑。" % tool)
+    # offset/limit 必须传下去 —— read 的返回里就写着
+    # "read(offset=2000) 取下一段"，不传的话模型照做了也拿不到下一段，
+    # 它就只能反复重读（这正是当年读了 25 次的那个坑）。
+    call_args = {k: args[k] for k in ("path", "content", "cmd", "timeout",
+                                      "offset", "limit") if k in args}
     # write 必须在动作**之前**记下文件存不存在，否则 create 永远被记成 modify
     existed = None
     if tool == "write":
@@ -399,12 +401,16 @@ def _do_action(node, act, trace, caps, st):
         else:
             obs = fn(**call_args)
     except Exception as e:
-        return "工具出错: %r" % e
+        # 工具报错**也是一次真实观测**（世界说"不行"），不能提前 return ——
+        # 提前 return 会让它绕过调用方的重复计数，于是同一个报错无限重试。
+        obs = "工具出错: %r" % e
 
     # 动作之后统一记账：effects 由代码抽，不给模型自报的机会。
     # bash 和 write 共用这一套 —— 它们本来就是同一件事的两个壳。
     eff, pre = effects_of(tool, args, cwd=os.getcwd(), existed_before=existed)
-    trace.add(node.id, "effects", {"工具": tool, "effects": eff, "前置条件": pre})
+    # effects / 前置条件 是 effects.py 自己的词表（能力库、sidecar 也用它），
+    # 跟形式字段不是一套；这里只把协议那个键写成英文。
+    trace.add(node.id, "effects", {"tool": tool, "effects": eff, "前置条件": pre})
     # 产出物由代码记账（模型只管干活）。effects 留着，结论时给契约用。
     made = []
     for p in eff["fs"]["create"] + eff["fs"]["modify"]:
@@ -429,21 +435,11 @@ def _do_action(node, act, trace, caps, st):
                 trace.add(node.id, "cap_outcome", {"cap": e["id"], "ok": ok})
                 break
         st["_caps"] = []
-    # 无进展检测：同一动作 + 同一观测重复多次 = 再重复不会带来新信息。
+    # 无进展检测：同一动作 + 同一结果重复多次 = 再重复不会带来新信息。
     # 实测：一个叶子把同一个文件读了 25 次，光摆着历史它停不下来。
     # 所以把"重复"这个事实显式化（内容信号，不是轮次预算）。
-    sig = _sig(tool, args, obs)
-    seen = st.setdefault("seen_actions", {})
-    seen[sig] = seen.get(sig, 0) + 1
-    if seen[sig] >= 3:
-        note += ("\n[停止] 这个动作你已经做过 %d 次，观测**完全一样** —— "
-                 "再重复不会带来新信息。换一个动作，或者出结论"
-                 "（阻塞就写清为什么）。" % seen[sig])
-        trace.add(node.id, "no_progress",
-                  {"重复次数": seen[sig], "动作": str(tool)})
-        if seen[sig] >= 5:
-            st["stalled"] = ("同一动作重复 %d 次、观测完全一样，没有新信息"
-                             % seen[sig])
+    # 计数**不在这里做** —— 这里有好几个 return，漏掉一个就是死循环。
+    # 收口在 _step：每一回合的动作都在那里计数，一条路也漏不了。
     return str(obs) + note
 
 
@@ -465,62 +461,47 @@ def _step(nid, ctx):
 
     if d.get("_bad"):
         # 把非法输出当成一条事实喂回去，让它自己纠正（不加计数器）
-        if node.kind == "leaf":
-            node.observations.append({"动作": "(非法输出)", "观测": d["_bad"]})
-        else:
-            node.attempts.append({"分配": [], "被拒": d["_bad"]})
         trace.add(node.id, "bad_output", d["_bad"])
-        return {"kind": "again"}
+        return _balk(node, d["_bad"], trace, st)
 
-    # ── 先例：分配节点的一个"读"动作。懒加载，只在它想看时才检索。 ──
-    prec = d.get("先例")
-    if isinstance(prec, dict) and node.kind != "leaf":
-        qs = prec.get("查询") or prec.get("queries") or []
-        if isinstance(qs, str):
-            qs = [qs]
-        qs = [str(q) for q in qs if str(q).strip()]
-        idx = ctx.get("index")
-        if idx is None:
-            node.precedents.append("（这次没有可检索的老树）")
-            trace.add(node.id, "precedent", {"查询": qs, "命中": [], "chars": 0})
-        else:
-            picked, text = idx.search(qs)
-            trace.add(node.id, "precedent",
-                      {"查询": qs, "命中": [p.id for p in picked],
-                       "chars": len(text)})
-            node.precedents.append(text or "（没有找到类似的先例）")
-        return {"kind": "again"}
-
-    concl = d.get("结论")
+    concl = d.get("conclusion")
     if isinstance(concl, dict):
         got, err = _clean_conclusion(concl, trace, node, st)
         if err:
-            if node.kind == "leaf":
-                node.observations.append({"动作": "(结论不合规)", "观测": err})
-            else:
-                node.attempts.append({"分配": [], "被拒": err})
             trace.add(node.id, "bad_conclusion", err)
-            return {"kind": "again"}
+            return _balk(node, err, trace, st)
         node.close(got["verdict"], got["content"], got["evidence"], got["external"])
         trace.add(node.id, "concluded",
-                  {"判定": got["verdict"], "内容": got["content"],
-                   "证据": got["evidence"], "外部需求": got["external"]})
+                  {"verdict": got["verdict"], "text": got["content"],
+                   "evidence": got["evidence"], "external": got["external"]})
         return {"kind": "finished"}
 
     if node.kind == "leaf":
-        act = d.get("动作")
+        act = d.get("action")
         if not isinstance(act, dict):
-            node.observations.append({"动作": "(无法识别)", "观测": str(d)})
-            return {"kind": "again"}
+            return _balk(
+                node,
+                "输出里没有能识别的顶层键（你只能给 action 或 conclusion）。"
+                "你给的键是: %s" % (", ".join(sorted(d)) or "(空)"),
+                trace, st)
         obs = _do_action(node, act, trace, caps, st)
-        label = "%s %s" % (act.get("工具", ""),
-                           json.dumps(act.get("参数") or {}, ensure_ascii=False))
-        node.observations.append({"动作": label, "观测": obs})
-        st["calls"].append((act.get("工具"), act.get("参数") or {}, obs))
+        label = "%s %s" % (act.get("tool", ""),
+                           json.dumps(act.get("args") or {}, ensure_ascii=False))
+        # 每一回合的动作只在这一处计数：动作成没成、工具报不报错，都得过这里，
+        # 所以"同一动作 + 同一结果 ≥3 告警 / ≥5 停下"没有漏网的路。
+        n, note = _bump(st.setdefault("seen_actions", {}),
+                        _sig(act.get("tool"), act.get("args") or {}, obs),
+                        trace, node, str(act.get("tool")))
+        if n >= 5:
+            st["stalled"] = ("同一动作重复 %d 次、结果完全一样，没有新信息" % n)
+        if note:
+            obs = str(obs) + note
+        node.observations.append({"action": label, "obs": obs})
+        st["calls"].append((act.get("tool"), act.get("args") or {}, obs))
         # 存结构化参数：挖掘器要能直接读，不该去反解一个拼出来的字符串
-        trace.add(node.id, "action", {"工具": act.get("工具"),
-                                      "参数": act.get("参数") or {},
-                                      "观测": obs})
+        trace.add(node.id, "action", {"tool": act.get("tool"),
+                                      "args": act.get("args") or {},
+                                      "obs": obs})
         stalled = st.pop("stalled", None)
         if stalled:
             trace.add(node.id, "stalled", stalled)
@@ -528,17 +509,21 @@ def _step(nid, ctx):
             return {"kind": "finished"}
         return {"kind": "again"}
 
-    # ── 分配节点：再做一次分配 ──
-    specs = d.get("再做一次")
+    # ── 分配节点：再拆一层 ──
+    specs = d.get("children")
     if not isinstance(specs, list) or not specs:
-        node.attempts.append({"分配": [], "被拒": "「再做一次」必须是非空数组"})
-        return {"kind": "again"}
+        return _balk(
+            node,
+            "输出里没有能识别的顶层键（你只能给 children 或 conclusion）。"
+            "你给的键是: %s" % (", ".join(sorted(d)) or "(空)"),
+            trace, st)
 
     kids_spec, reject = [], None
     for raw in specs:                         # 不砍：拆几个是模型的决定
-        s = _clean_spec(raw if isinstance(raw, dict) else {}, trace, node)
-        s["kind"] = "leaf" if raw.get("类型") == "叶子" else "dispatch"
-        s["gate"] = bool(raw.get("门槛"))
+        s, why = _clean_spec(raw if isinstance(raw, dict) else {})
+        if why:
+            reject = why
+            break
         # ② 子任务的验收标准必须携带父/根的可测物理量
         ra = ctx["root_anchors"]
         ok_parent = inherits(node.accept, s["accept"])
@@ -547,23 +532,19 @@ def _step(nid, ctx):
             reject = ("子任务的验收标准丢了可测物理量（缺 %s）—— 这是把任务换成了别的东西"
                       % ", ".join(sorted(ra or anchors(node.accept))))
             trace.add(node.id, "criterion_drift",
-                      {"子任务": s["name"], "验收标准": s["accept"],
-                       "父锚点": sorted(anchors(node.accept)), "根锚点": sorted(ra)})
-            break
-        if not s["name"] or not s["accept"]:
-            reject = "子任务必须有 任务名 和 验收标准"
+                      {"child": s["name"], "accept": s["accept"],
+                       "parent_anchors": sorted(anchors(node.accept)),
+                       "root_anchors": sorted(ra)})
             break
         kids_spec.append(s)
 
     if reject:
         # 把被拒这件事变成一条可见的事实（而不是丢弃或加计数器）
-        node.attempts.append({"分配": kids_spec, "被拒": reject})
-        return {"kind": "again"}
+        return _balk(node, reject, trace, st, kids=kids_spec)
 
     gates = [s for s in kids_spec if s["gate"]]
     if len(gates) > 1:
-        node.attempts.append({"分配": kids_spec, "被拒": "一次分配最多一个门槛"})
-        return {"kind": "again"}
+        return _balk(node, "一次分配最多一个门槛", trace, st, kids=kids_spec)
     gate = gates[0] if gates else None
     if gate:
         first = [gate]
@@ -572,12 +553,11 @@ def _step(nid, ctx):
         first, rest = kids_spec, []          # 没有门槛就没有“暂缓”，不能把全部当成暂缓
 
     if not budget.take_nodes(len(kids_spec)):
-        node.attempts.append({"分配": kids_spec, "被拒": "节点预算不足"})
-        return {"kind": "again"}
-    node.attempts.append({"分配": kids_spec, "下层结论": [], "结局": "等下层"})
+        return _balk(node, "节点预算不足", trace, st, kids=kids_spec)
+    node.attempts.append({"children": kids_spec, "results": [], "outcome": "等下层"})
     trace.add(node.id, "allocated",
-              {"第几次": len(node.attempts), "门槛": gate["name"] if gate else None,
-               "暂缓": [s["name"] for s in rest] if gate else []})
+              {"round": len(node.attempts), "gate": gate["name"] if gate else None,
+               "deferred": [s["name"] for s in rest] if gate else []})
     return {"kind": "children", "first": first, "rest": rest,
             "gate_name": gate["name"] if gate else None}
 
@@ -598,10 +578,40 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
                           "seen_actions": {}}
         registry[node.id] = node
         trace.add(node.id, "open", {
-            "任务名": node.name, "任务详情": node.detail, "注意事项": node.notes,
-            "验收标准": node.accept, "类型": node.kind, "门槛": node.gate,
-            "深度": node.depth, "parent": node.parent,
-            "工作目录": os.path.abspath(os.getcwd())})
+            "name": node.name, "detail": node.detail, "notes": node.notes,
+            "accept": node.accept, "kind": node.kind, "gate": node.gate,
+            "depth": node.depth, "parent": node.parent,
+            "keywords": node.keywords, "conc_range": node.conc_range,
+            "workspace": os.path.abspath(os.getcwd())})
+        # 出生即检索：键是**上层给的**（根没有上层，就用它自己的名字+验收标准）。
+        # 检索不花 LLM 调用，也不问模型要不要查 —— 实测它没有理由去查，
+        # 而真正贵的恰恰是大事（DESIGN §5.4）。
+        if index is not None:
+            qs = node.keywords or ["%s %s" % (node.name, node.accept)]
+            try:
+                picked, text = index.search(qs)
+                if text:
+                    node.precedents.append(text)
+                trace.add(node.id, "precedent",
+                          {"queries": qs, "auto": True,
+                           "hits": [p.id for p in picked], "chars": len(text)})
+            except Exception as ex:
+                trace.add(node.id, "precedent_failed", "%r" % ex)
+        # 现成做法也在出生时塞进来：模型没有动机去主动找工具（它觉得自己都会，§4.3），
+        # 所以没有 need 这个动作 —— 程序按同一组检索键查能力库，直接给它。
+        if caps is not None:
+            q = " ".join(str(x) for x in
+                         (node.keywords or [node.name, node.accept]))
+            try:
+                picked, text = caps.search(q)
+                if text:
+                    node.caps.append(text)
+                state[node.id]["_caps"] = picked
+                trace.add(node.id, "caps_injected",
+                          {"queries": node.keywords or [node.name],
+                           "hits": [e["id"] for e in picked], "chars": len(text)})
+            except Exception as ex:
+                trace.add(node.id, "caps_failed", "%r" % ex)
         pending.append(node.id)
 
     def learn(node, calls, contracts=None):
@@ -634,21 +644,21 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
                 pst = state[parent]
                 pn = pst["node"]
                 if pn.attempts:
-                    pn.attempts[-1].setdefault("下层结论", []).append(node.record())
+                    pn.attempts[-1].setdefault("results", []).append(node.record())
                 # 门槛不成立 → 整个分支作废，其余子任务永不启动
                 if pst.get("gate_id") == nid and node.verdict != "满足":
                     skipped = [s["name"] for s in pst.get("rest") or []]
                     pst["rest"], pst["gate_id"] = [], None
                     if pn.attempts:
-                        pn.attempts[-1]["结局"] = "门槛不成立（%s）: %s" % (
+                        pn.attempts[-1]["outcome"] = "门槛不成立（%s）: %s" % (
                             node.name, node.conclusion)
                         if skipped:
-                            pn.attempts[-1]["下层结论"].append(
-                                {"任务名": "（以下子任务被跳过）", "结局": "未启动",
-                                 "内容": ", ".join(skipped), "证据": []})
+                            pn.attempts[-1]["results"].append(
+                                {"name": "（以下子任务被跳过）", "outcome": "未启动",
+                                 "text": ", ".join(skipped), "evidence": []})
                     trace.add(parent, "gate_failed",
-                              {"门槛": node.name, "原因": node.conclusion,
-                               "被跳过的子任务": skipped})
+                              {"gate": node.name, "reason": node.conclusion,
+                               "skipped": skipped})
                     if not pst["finished"]:
                         pst["ready"] = True
                         pending.append(parent)
@@ -656,11 +666,11 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
                 pst["waiting"] -= 1
                 if pst["waiting"] <= 0 and not pst["finished"]:
                     if pn.attempts:
-                        pn.attempts[-1]["结局"] = "下层已全部返回"
+                        pn.attempts[-1]["outcome"] = "下层已全部返回"
                     if pst.get("rest"):
                         rest, pst["rest"], pst["gate_id"] = pst["rest"], [], None
                         trace.add(parent, "gate_passed",
-                                  {"已启动": [s["name"] for s in rest]})
+                                  {"started": [s["name"] for s in rest]})
                         kids = _spawn(pn, rest, budget, trace)
                         for k in kids:
                             register(k)
@@ -684,27 +694,13 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
         for s in specs:
             kids.append(Node(name=s["name"], detail=s["detail"], notes=s["notes"],
                              accept=s["accept"], kind=s["kind"], gate=s["gate"],
+                             keywords=s["keywords"], conc_range=s["conc_range"],
                              parent=parent.id, depth=parent.depth + 1))
         parent.children += [k.id for k in kids]
         return kids
 
     ctx = {"state": state, "llm": llm, "trace": trace, "budget": budget,
            "root_anchors": anchors(root.accept), "caps": caps, "index": index}
-
-    # 根节点：自动检索一次先例。检索不花 LLM 调用，只有根付一次性封顶注入。
-    # 不交给模型判断 —— 实测它会觉得"这么小的活不用查"，而真正贵的
-    # 恰恰是大事（一个大任务里 40% 的算力花在一个本来就不该开工的分支上）。
-    # 子孙节点仍然是选填的（它们自己调「先例」动作），因为它们的查询不一样。
-    if index is not None:
-        try:
-            picked, text = index.search(["%s %s" % (root.name, root.accept)])
-            if text:
-                root.precedents.append(text)
-                trace.add(root.id, "precedent", {"查询": [root.name], "自动": True,
-                                                 "命中": [p.id for p in picked],
-                                                 "chars": len(text)})
-        except Exception as ex:
-            trace.add(root.id, "precedent_failed", "%r" % ex)
 
     register(root)
 

@@ -9,6 +9,10 @@
   F. 不搜自己那棵树
   G. 结局加权：满足的先例排在前面
   H. 工作目录从根节点继承下来，检索结果带着它
+  I. 阻塞枝带回可复核的东西：证据 / 外部需求 / 卡在哪条命令 / 卡住时间
+     （DESIGN §2.7：阻塞不是死路。只给一句"做不了"，模型只能照抄）
+  J. 老格式的 leaf_tool 也算观测，否则昨晚那棵树答不出"卡在哪"
+  K. `notes` 不参与检索（它是自由发挥的判断依据，不是检索键）
 """
 
 import json
@@ -20,8 +24,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tree.index import TreeIndex                      # noqa: E402
 
 
-def build(spec, workspace="/tmp/ws-x", old_format=False):
-    """spec: [(id, parent, 任务名, 验收标准, 结局, 内容)]"""
+def build(spec, workspace="/tmp/ws-x", old_format=False,
+          actions=None, ext=None, evid=None, notes=None, t=1789568177.102):
+    """spec: [(id, parent, 任务名, 验收标准, 结局, 内容)]
+
+    actions: {节点id: [(工具, 参数, 观测)]} —— 叶子的动作历史。
+    ext / evid: {节点id: [...]} —— 阻塞时的外部需求 / 证据。
+    notes: {节点id: "..."} —— 注意事项（不参与检索）。
+    """
+    actions = actions or {}
+    ext, evid, notes = ext or {}, evid or {}, notes or {}
     d = tempfile.mkdtemp()
     p = os.path.join(d, "trace.jsonl")
     with open(p, "w") as f:
@@ -29,19 +41,34 @@ def build(spec, workspace="/tmp/ws-x", old_format=False):
             if old_format:
                 f.write(json.dumps({"node": nid, "kind": "open", "payload": {
                     "task": name, "criteria": accept, "depth": depth,
-                    "parent": parent}}, ensure_ascii=False) + "\n")
-                if verdict:
-                    f.write(json.dumps({"node": nid, "kind": "done",
-                                        "payload": {"result": concl}},
+                    "parent": parent}, "t": t}, ensure_ascii=False) + "\n")
+                # 老格式没有 判定 字段，只能近似：done → 满足，failed → 阻塞
+                for tool, args, obs in actions.get(nid, []):
+                    f.write(json.dumps({"node": nid, "kind": "leaf_tool",
+                                        "payload": {"tool": tool, "args": args,
+                                                    "obs": obs}, "t": t},
                                        ensure_ascii=False) + "\n")
+                if verdict:
+                    f.write(json.dumps({
+                        "node": nid,
+                        "kind": "failed" if verdict == "阻塞" else "done",
+                        "payload": {"result": concl}, "t": t},
+                        ensure_ascii=False) + "\n")
             else:
                 f.write(json.dumps({"node": nid, "kind": "open", "payload": {
-                    "任务名": name, "验收标准": accept, "类型": "dispatch",
-                    "深度": depth, "parent": parent,
-                    "工作目录": workspace}}, ensure_ascii=False) + "\n")
+                    "name": name, "accept": accept, "kind": "dispatch",
+                    "depth": depth, "parent": parent,
+                    "notes": notes.get(nid, ""),
+                    "workspace": workspace}, "t": t}, ensure_ascii=False) + "\n")
+                for tool, args, obs in actions.get(nid, []):
+                    f.write(json.dumps({"node": nid, "kind": "action", "payload": {
+                        "tool": tool, "args": args, "obs": obs}, "t": t},
+                        ensure_ascii=False) + "\n")
                 if verdict:
                     f.write(json.dumps({"node": nid, "kind": "concluded", "payload": {
-                        "判定": verdict, "内容": concl, "证据": []}},
+                        "verdict": verdict, "text": concl,
+                        "evidence": evid.get(nid, []),
+                        "external": ext.get(nid, [])}, "t": t},
                         ensure_ascii=False) + "\n")
     return p
 
@@ -53,6 +80,20 @@ SPEC = [
     ("b", "r", "开户并入金", "账户已入金且可查询", "阻塞", "开户需要人到场"),
     ("c", "r", "构建币种名称到的映射表", "映射表包含至少100种币种", "满足", "建好了"),
 ]
+
+# I/J 用：一条阻塞枝 + 它卡住的命令历史（4 次，比回放窗口多一次）
+SPEC_BLOCK = [
+    ("r", None, "给公司做一个能赚钱的量化系统", "账户权益在2026-12-31 >= 本金 x 2", "阻塞", "账户没开"),
+    ("b", "r", "开户并入金", "账户已入金且可查询", "阻塞", "开户需要人到场"),
+]
+ACTIONS = {"b": [
+    ("bash", {"cmd": "ls ~/.broker"}, "No such file or directory"),
+    ("bash", {"cmd": "python3 account_query.py --open"}, "需要本人到柜台办理"),
+    ("bash", {"cmd": "python3 account_query.py --status"}, "{'本金': None, '币种': None}"),
+    ("bash", {"cmd": "python3 account_query.py --status"}, "{'本金': None, '币种': None}"),
+]}
+EXT = {"b": ["需要人到场", "需要真实账户"]}
+EVID = {"b": ["第2次观测"]}
 
 
 def line(tag, cond, detail=""):
@@ -111,6 +152,36 @@ def main():
     picked, text = idx3.search(["开户并入金"])
     print("  %s" % text.replace("\n", " ⏎ "))
     ok &= line("检索结果带着工作目录", "工作目录: /tmp/ws" in text)
+
+    print("=" * 80)
+    print("I. 阻塞枝带回可复核的东西（证据 / 外部需求 / 卡在哪条命令）")
+    p_blk = build(SPEC_BLOCK, actions=ACTIONS, ext=EXT, evid=EVID)
+    _, text = TreeIndex([p_blk]).search(["开户并入金"])
+    print(text)
+    ok &= line("外部需求带回来了", "外部需求: 需要人到场、需要真实账户" in text)
+    ok &= line("证据带回来了", "证据: 第2次观测" in text)
+    ok &= line("卡住时间带回来了", "卡住时间: " in text)
+    ok &= line("说了卡在哪条命令", "account_query.py --status" in text)
+    ok &= line("说了当时世界回了什么", "币种" in text)
+    ok &= line("截断可见（共 4 次，只列最近 3 次）",
+               "共 4 次动作" in text and "只列最近 3 次" in text)
+
+    print("=" * 80)
+    print("J. 老格式的 leaf_tool 也算观测")
+    p_old_blk = build(SPEC_BLOCK, old_format=True, actions=ACTIONS)
+    _, text = TreeIndex([p_old_blk]).search(["开户并入金"])
+    ok &= line("老格式也说得出来卡在哪条命令", "account_query.py --open" in text)
+
+    print("=" * 80)
+    print("K. notes 不参与检索")
+    SECRET = "紫色的犀牛在跳舞"
+    p_note = build(SPEC, notes={"c": SECRET})
+    idx_note = TreeIndex([p_note])
+    hit_by_note, _ = idx_note.search([SECRET])
+    print("  拿注意事项当查询: 命中 %d 条" % len(hit_by_note))
+    ok &= line("notes 里的字不进索引", not hit_by_note)
+    hit_named, _ = idx_note.search(["构建币种名称到的映射表"])
+    ok &= line("但名字/判据照常检索", bool(hit_named))
 
     print("=" * 80)
     print("全部通过" if ok else "有失败项")

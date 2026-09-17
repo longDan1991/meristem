@@ -3,7 +3,7 @@
 
 结构上只有两半：
 
-  可变层  PROMPT（tree/run.py 里的 decide/work 提示词）  —— 允许被改
+  可变层  PROMPT（prompts/*.md，由 tree/prompts.py 读进来）  —— 允许被改
   判据层  CASES 里的 check() + holdout 划分             —— 不允许被改
 
 代码上，"让另一个系统来构建它"和"让它自己优化自己"完全一样：都是 LLM 在改提示词。
@@ -152,7 +152,7 @@ def main():
     from tree import run as R
 
     llm = LLM()
-    best_prompt = R.PROMPT["decide"]
+    best_prompt = R.PROMPT["alloc"]
     best_recs = (recs if a.split == "train"
                  else evaluate([c for c in CASES if c["split"] == "train"], **kw))
     best = score(best_recs)
@@ -165,7 +165,8 @@ def main():
                                for r in failures] or best_recs, ensure_ascii=False)
         ask = ("下面是一个递归 LLM 树的节点提示词，它在这些用例上表现如下。\n"
                "请只改进提示词本身，让它更少出错、更少无谓拆分、更少假装完成。\n"
-               "不要改变输出 JSON 的格式（action/children/kind/done 的字段名不能变）。\n"
+               "不要改变输出 JSON 的格式（children/conclusion/action/name/accept/"
+               "keywords/conc_range 这些字段名，以及满足|未满足|阻塞 这些取值，都不能变）。\n"
                "直接输出新的提示词全文，不要任何解释、不要 markdown 代码块。\n\n"
                "=== 当前提示词 ===\n%s\n\n=== 用例表现 ===\n%s" % (best_prompt, critique))
         try:
@@ -173,11 +174,11 @@ def main():
         except Exception as e:
             print("  第 %d 轮：模型调用失败 %r" % (gen, e))
             continue
-        if len(cand) < 400 or "action" not in cand:
+        if len(cand) < 400 or ("children" not in cand and "conclusion" not in cand):
             print("  第 %d 轮：候选提示词不合格（长度 %d），丢弃" % (gen, len(cand)))
             continue
 
-        R.PROMPT["decide"] = cand
+        R.PROMPT["alloc"] = cand
         cand_recs = evaluate([c for c in CASES if c["split"] == "train"], **kw)
         s = score(cand_recs)
         tag = "接受" if s["fitness"] > best["fitness"] else "丢弃"
@@ -187,11 +188,11 @@ def main():
             best, best_recs, best_prompt = s, cand_recs, cand
             open(os.path.join(HERE, "prompt_gen%d.txt" % gen), "w").write(cand)
         else:
-            R.PROMPT["decide"] = best_prompt
+            R.PROMPT["alloc"] = best_prompt
 
     # holdout 只在最后看一眼，绝不参与选择
     print("\n=== 最终验收：holdout ===")
-    R.PROMPT["decide"] = best_prompt
+    R.PROMPT["alloc"] = best_prompt
     hold = evaluate([c for c in CASES if c["split"] == "holdout"], **kw)
     table(hold)
     print("  训练集: %s" % json.dumps(best, ensure_ascii=False))

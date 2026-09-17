@@ -24,9 +24,28 @@ from tree.node import Budget, Node, Trace
 from tree.run import render_tree, run
 
 
+def _ws_from_precedent(a, index):
+    """没显式指定工作目录时，先问老树：同一件事上次是在哪个目录干的。
+
+    这是 DESIGN §5.5 的第一条判据落到实处 —— **证据还指不指得动**：
+    只认磁盘上还在的目录，否则就用默认工作区。
+    不猜、不新建、不退回半个：目录没了就是证据指不动了。
+    """
+    try:
+        picked, _ = index.search(["%s %s" % (a.task, a.criteria)])
+    except Exception:
+        return None
+    for n in picked:                      # 按分数从高到低
+        if n.workspace and os.path.isdir(n.workspace):
+            print("[工作目录] 命中先例 %s#%s，沿用它的目录"
+                  % (os.path.basename(n.tree), n.id), flush=True)
+            return n.workspace
+    return None
+
+
 def main():
     cfg.load_env()
-    ws = cfg.workspace()
+    ws_default = cfg.workspace()
     ap = argparse.ArgumentParser()
     ap.add_argument("task", nargs="?", default="给我一个能赚大钱的A股量化系统")
     ap.add_argument("--criteria", "-c", default="期末账户权益 >= 本金 x 2",
@@ -39,15 +58,23 @@ def main():
                     help="默认 <工作区>/runs/<时间>-<任务>/trace.jsonl")
     ap.add_argument("--caps", default=cfg.caps_path(),
                     help="能力库（TREE_CAPS）。放工作区里，所以跨 session 复用")
-    ap.add_argument("--workspace", "-w", default=ws,
-                    help="持久工作目录（TREE_WORKSPACE）。同一个任务族共用它"
-                         "，上次写的代码和数据就还在")
+    ap.add_argument("--workspace", "-w", default=None,
+                    help="持久工作目录。不给就自己定：命中了先例就沿用先例的目录"
+                         "（TREE_WORKSPACE 里的代码和数据就还在），否则用 TREE_WORKSPACE")
     ap.add_argument("--index", default=cfg.index_glob(),
                     help="要索引的老树（TREE_INDEX）。执行树就是成果树")
     ap.add_argument("--progress", type=int, default=60, help="每多少秒打一行进度，0=关闭")
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--mock-depth", type=int, default=2)
+    ap.add_argument("--intake", action="store_true",
+                    help="先过一遍入口：和用户把预期谈定，再交给根节点（用一次就退场）")
     a = ap.parse_args()
+    # 索引先建：选工作目录要用它（命中先例 → 沿用它的目录，DESIGN §5.5）。
+    # exclude 只对显式 --trace 有意义 —— 那时它可能指向一棵已经存在的树。
+    index = TreeIndex(sorted(glob.glob(a.index)),
+                      exclude=[a.trace] if a.trace else [])
+    if a.workspace is None:
+        a.workspace = _ws_from_precedent(a, index) or ws_default
     if not a.trace:
         slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"),
                           hashlib.sha1(a.task.encode("utf-8")).hexdigest()[:6])
@@ -62,6 +89,28 @@ def main():
 
     trace = Trace(a.trace)
     root = Node(name=a.task, accept=a.criteria, kind="dispatch")
+
+    # 入口（可选）：根节点的"上层"只被用一次 —— 把用户的一句话谈成
+    # 一个能过同一台闸门的根任务形式，然后退场。它的对话不用留：
+    # 结论已经落成根节点的形式字段了，而树就是记忆（DESIGN §2.1、§2.8）。
+    if a.intake and not a.mock:
+        from tree.intake import intake
+        print("[入口] 先把预期谈定，再交给根节点\n", flush=True)
+        r = intake(llm,
+                   "用户的任务: %s\n用户给的验收标准: %s" % (a.task, a.criteria),
+                   ask=lambda q: input("> "),
+                   on_say=lambda t: print(t, flush=True))
+        if "blocked" in r:
+            print("\n[入口判定] %s：%s"
+                  % (r["blocked"]["verdict"], r["blocked"]["text"]), flush=True)
+            return 1
+        s = r["root"]
+        print("\n[入口交棒] %s ｜ %s ｜ 检索键 %s ｜ 结论规模 %s"
+              % (s["name"], s["accept"], s["keywords"], s["conc_range"]),
+              flush=True)
+        root = Node(name=s["name"], detail=s["detail"], notes=s["notes"],
+                    accept=s["accept"], kind=s["kind"],
+                    keywords=s["keywords"], conc_range=s["conc_range"])
     registry = {}
     budget = Budget(max_nodes=a.max_nodes or None, max_tokens=a.max_tokens or None,
                     max_hours=a.max_hours or None)
@@ -73,11 +122,9 @@ def main():
     ws = os.path.abspath(a.workspace)
     os.makedirs(ws, exist_ok=True)
     os.chdir(ws)
-    print("[工作目录] %s  (TREE_WORKSPACE)" % ws, flush=True)
+    print("[工作目录] %s" % ws, flush=True)
 
     # 老树索引：把所有历史 trace 当成成果树
-    traces = sorted(glob.glob(a.index))
-    index = TreeIndex(traces, exclude=[os.path.abspath(a.trace)])
     print("[索引] %d 棵老树，%d 个节点 %s"
           % (len(index.trees), index.stats["节点"],
              dict((k, v) for k, v in index.stats.items() if k != "节点")), flush=True)

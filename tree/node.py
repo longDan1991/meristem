@@ -18,34 +18,41 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-# 形式化字段的边界。"形式化的是格子，不是格子里的字"——
-# 格子要少而固定，格子里的字要给足空间。
-LIMITS = {"name": 20, "detail": 240, "notes": 120, "accept": 140,
-          "conclusion": 160,
-          # 上面六个是**提示词明文承诺**的上限，代码只用它们判断"有没有超"
-          # （如实记进 trace），**绝不拿它们切内容**。
-          #
-          # 下面三个是观测历史的**可见预算** —— 必须截断的地方，截了就当面说。
-          # 不设它的话，一个叶子 50 次动作 × 每次 4000 字输出就会把上下文撞爆，
-          # 那不是"撒谎"而是"跑不起来"。
-          "max_attempts_shown": 4, "max_obs_shown": 10,
-          "max_obs_chars": 6000, "obs_entry": 1500}
+# 形式字段的词表是**英文键 + 中文取值**：键是机器词汇（模型输出 / trace / 索引
+# 共用同一套，中间没有翻译层可以漂移），取值和渲染标签保持中文。
+#
+# 这里**没有任何长度限制**。提示词里的字数只是建议 ——
+# 判一个字段"超了"没用（模型不会突然写 10000 字），却要在每次写入时多一道检查。
+#
+# VIEW 是另一回事：它是"一次给模型看多少历史"，不是"限制模型写多少"。
+# 单次工具输出可能有 1GB、观测历史会一直涨 —— 这两处不截就根本跑不起来。
+# 所以它们是**必须截断**的地方，按 §2.5 的纪律：截了就要当面说。
+VIEW = {"max_attempts_shown": 4, "max_obs_shown": 10,
+        "max_obs_chars": 6000, "obs_entry": 1500}
 
 
-def norm(text, limit=None):
-    """形式字段的规范化：压掉换行和多余空白。**不切长度。**
+# `外部需求` 这个形式字段的词表：bash 根本做不到的事。
+# 代码抽不出来，只能由模型**提议** —— 所以它是词表，不是判据：
+# 人确认之后才算事实（DESIGN §2.8），而且它只该用来"先探测再决定"（§2.7）。
+EXTERNAL_CLASSES = ("需要人到场", "需要真实账户", "需要真实资金", "需要现实设备")
 
-    长度上限由提示词明文承诺（任务名≤20／任务详情≤240／注意事项≤120／
-    验收标准≤140／结论≤160）。提示词已经限过的东西，代码再偷偷砍一刀
-    就是对模型撒谎 —— 它不知道自己被切了，看到的是断在半句的判据
-    （实测：先例的判据被砍到 52 字，35% 的先例判据是残缺的）。
 
-    超长只**如实记下来**（report 里的"字段超长"），不改内容。
-    返回 (规范化的字, 是否超过承诺的上限)。
+def norm(text):
+    """形式字段的规范化：压掉换行和多余空白。**不管长度。**
+
+    提示词里写的字数（名字 ≤20 之类）只是建议 —— 代码不校、不记、更不切。
+    §2.5 那条纪律的原话是"要么可见要么别截"；既然决定了不截，就什么也不用做。
     """
     s = ("" if text is None else str(text)).strip().replace("\n", " ")
-    s = " ".join(s.split())
-    return s, (limit is not None and len(s) > limit)
+    return " ".join(s.split())
+
+
+def range_txt(rng):
+    """结论字数区间的中文展示，如 [100, 500]。"""
+    try:
+        return "[%d, %d]" % (int(rng[0]), int(rng[1]))
+    except Exception:
+        return str(rng)
 
 
 @dataclass
@@ -57,6 +64,8 @@ class Node:
     accept: str = ""                  # 验收标准：必须可被观测
     kind: str = "dispatch"            # dispatch | leaf
     gate: bool = False                # 轻重缓急：它不成立，整个分支作废
+    keywords: list = field(default_factory=list)   # 上层给的检索键 → 出生时自动查老树
+    conc_range: list = field(default_factory=list)  # 上层要求的结论字数区间，如 [100,500]
     # ── 结构 ──
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     parent: str = None
@@ -64,7 +73,8 @@ class Node:
     # ── 看得见的历史（程序填，模型只读）──
     attempts: list = field(default_factory=list)     # 分配节点：每次分配 + 下层结论
     observations: list = field(default_factory=list)  # 叶子：每次动作的真实返回
-    precedents: list = field(default_factory=list)   # 从老树里检索出来的先例
+    precedents: list = field(default_factory=list)   # 出生时按检索键查到的老树先例
+    caps: list = field(default_factory=list)         # 出生时按同一组键查到的现成做法
     # ── 结局 ──
     children: list = field(default_factory=list)
     verdict: str = ""                 # 满足 | 未满足 | 阻塞
@@ -75,16 +85,23 @@ class Node:
 
     # ---------------------------------------------------------------- 视图
     def header(self):
-        return ("任务名: %s\n任务详情: %s\n注意事项: %s\n验收标准: %s"
-                % (self.name or "(无)", self.detail or "(无)",
-                   self.notes or "(无)", self.accept or "(无)"))
+        out = ["任务名: %s" % (self.name or "(无)"),
+               "任务详情: %s" % (self.detail or "(无)"),
+               "注意事项: %s" % (self.notes or "(无)"),
+               "验收标准: %s" % (self.accept or "(无)")]
+        if self.conc_range:
+            out.append("结论字数要求（上层给的）: %s" % range_txt(self.conc_range))
+        if self.keywords:
+            out.append("检索键（上层给的，已据此查过老树）: %s"
+                       % ", ".join(str(k) for k in self.keywords))
+        return "\n".join(out)
 
     def render_attempts(self):
         if not self.attempts:
             return "本层已有尝试: (还没有)"
         # 注：只列最近几次尝试（这是**条数**上的截断，会明说）；
-        # 但每条里的判据和结论**全文给出** —— 它们的长度上限已由提示词承诺。
-        lim = LIMITS["max_attempts_shown"]
+        # 但每条里的判据和结论全文给出 —— 字数是模型自己的决定，代码不管。
+        lim = VIEW["max_attempts_shown"]
         shown = self.attempts[-lim:]
         head = "本层已有尝试: 共 %d 次" % len(self.attempts)
         if len(self.attempts) > lim:
@@ -92,25 +109,28 @@ class Node:
         lines = [head]
         for i, a in enumerate(shown, start=len(self.attempts) - len(shown) + 1):
             lines.append("  第 %d 次分配:" % i)
-            for c in a.get("分配", []):
-                # 不截：子任务的验收标准上限已由提示词承诺为 140 字
-                lines.append("    - %s%s｜验收标准: %s"
-                             % (c.get("任务名", ""),
-                                "｜[门槛]" if c.get("门槛") else "",
-                                c.get("验收标准", ""))) 
-            if a.get("被拒"):
-                lines.append("    → 这次分配被代码拒了: %s" % a["被拒"])
+            for c in a.get("children", []):
+                bits = [c.get("name", "")]
+                if c.get("gate"):
+                    bits.append("[门槛]")
+                if c.get("conc_range"):
+                    bits.append("结论 %s" % range_txt(c["conc_range"]))
+                if c.get("keywords"):
+                    bits.append("检索键 %s" % ",".join(str(k) for k in c["keywords"]))
+                lines.append("    - %s｜验收标准: %s"
+                             % ("｜".join(bits), c.get("accept", "")))
+            if a.get("rejected"):
+                lines.append("    → 这次分配被代码拒了: %s" % a["rejected"])
                 continue
-            for r in a.get("下层结论", []):
-                # 不截：结论上限已由提示词承诺为 160 字
+            for r in a.get("results", []):
                 lines.append("    ← %s｜%s｜%s"
-                             % (r.get("任务名", ""), r.get("判定", ""),
-                                r.get("内容", "")))
-                if r.get("证据"):
+                             % (r.get("name", ""), r.get("outcome", ""),
+                                r.get("text", "")))
+                if r.get("evidence"):
                     lines.append("       证据: %s"
-                                 % "; ".join(str(x) for x in r["证据"]))
-            if a.get("结局"):
-                lines.append("    → %s" % a["结局"])
+                                 % "; ".join(str(x) for x in r["evidence"]))
+            if a.get("outcome"):
+                lines.append("    → %s" % a["outcome"])
         return "\n".join(lines)
 
     def render_observations(self):
@@ -124,16 +144,16 @@ class Node:
         """
         if not self.observations:
             return "观测历史: (还没有)"
-        shown = self.observations[-LIMITS["max_obs_shown"]:]
+        shown = self.observations[-VIEW["max_obs_shown"]:]
         first = len(self.observations) - len(shown) + 1
-        budget = LIMITS["max_obs_chars"]
+        budget = VIEW["max_obs_chars"]
         rows = []
         for i in range(len(shown) - 1, -1, -1):
             o = shown[i]
-            cap = max(200, min(LIMITS["obs_entry"], budget))
+            cap = max(200, min(VIEW["obs_entry"], budget))
             budget -= cap
             # 动作和观测一起算额度：否则一个很长的 write 参数会把观测挤没
-            row = "%s → %s" % (str(o.get("动作", "")), str(o.get("观测", "")))
+            row = "%s → %s" % (str(o.get("action", "")), str(o.get("obs", "")))
             if len(row) > cap:
                 row = row[:cap] + "…[截断：这一次共 %d 字]" % len(row)
             rows.append("  [%d] %s" % (first + i, row))
@@ -146,15 +166,26 @@ class Node:
     def render_precedents(self):
         if not self.precedents:
             return ""
-        return ("\n\n先例（从以往真实的树里检索出来的，仅供参考，不是事实 —— "
+        return ("\n\n先例（上层给的检索键自动查出来的老树，仅供参考，不是事实 —— "
                 "判据和环境都可能已经变了）:\n" + "\n\n".join(self.precedents))
+
+    def render_caps(self):
+        """出生时按检索键查到的现成做法。
+
+        **没有 need 这个动作**：模型不会主动去找工具（它觉得自己都会），
+        所以由程序直接塞给它 —— 和先例同理（DESIGN §4.3、§5.4）。
+        """
+        if not self.caps:
+            return ""
+        return ("\n\n现成做法（以往真实成功过的，仅供参考 —— 仍要自己跑一遍验证）:\n"
+                + "\n".join(self.caps))
 
     def render(self):
         if self.kind == "leaf":
-            return "%s\n\n可用工具: bash / read / write / need\n%s" % (
-                self.header(), self.render_observations())
-        return "%s%s\n\n%s" % (self.header(), self.render_precedents(),
-                                self.render_attempts())
+            return "%s%s\n\n可用工具: bash / read / write\n%s" % (
+                self.header(), self.render_caps(), self.render_observations())
+        return "%s%s%s\n\n%s" % (self.header(), self.render_precedents(),
+                                   self.render_caps(), self.render_attempts())
 
     # ---------------------------------------------------------------- 结局
     def close(self, verdict, conclusion, evidence, external=None):
@@ -166,11 +197,11 @@ class Node:
 
     def record(self):
         """回给上层的形式化记录。上层据此复核，不采信自报。"""
-        r = {"任务名": self.name, "验收标准": self.accept, "结局": self.verdict,
-             "内容": self.conclusion, "证据": self.evidence,
-             "id": self.id, "类型": self.kind}
+        r = {"name": self.name, "accept": self.accept, "outcome": self.verdict,
+             "text": self.conclusion, "evidence": self.evidence,
+             "id": self.id, "kind": self.kind}
         if self.external:
-            r["外部需求"] = self.external
+            r["external"] = self.external
         return r
 
 

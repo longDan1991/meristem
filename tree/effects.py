@@ -12,6 +12,8 @@ bash 和 write 是同一件事的两个壳：`echo hi > a.txt` 就是 write("a.t
 import os
 import re
 
+from .node import EXTERNAL_CLASSES
+
 URL_RE = re.compile(r"\b(?:https?|ftp)://([\w.\-]+)(?::(\d+))?")
 REDIR_RE = re.compile(r"(>>?)\s*([A-Za-z0-9_][A-Za-z0-9_./\-]*)")
 READ_RE = re.compile(r"<\s*([A-Za-z0-9_][A-Za-z0-9_./\-]*)")
@@ -22,8 +24,7 @@ PKG_RE = re.compile(r"\b(?:pip3?|npm|apt-get|brew)\s+install\s+(?:-[\w-]+\s+)*([
 NOHUP_RE = re.compile(r"\bnohup\b")
 TAILBG_RE = re.compile(r"&\s*$")
 
-# 需要人到场 / 真实账户 / 真实资金 —— bash 根本做不到的。模型必填，代码抽不出来。
-EXTERNAL_CLASSES = ("需要人到场", "需要真实账户", "需要真实资金", "需要现实设备")
+# `外部需求` 的词表在 node.py（它是形式字段的边界，跟 LIMITS 放一起）
 
 
 def _abs(p, cwd):

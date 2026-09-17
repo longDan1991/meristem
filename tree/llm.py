@@ -82,19 +82,23 @@ class MockLLM:
 
         if "可用工具" in user:                      # 叶子
             if fresh:
-                return json.dumps({"动作": {"工具": "bash",
-                                            "参数": {"cmd": "echo mock"}}},
+                return json.dumps({"action": {"tool": "bash",
+                                               "args": {"cmd": "echo mock"}}},
                                   ensure_ascii=False)
-            return json.dumps({"结论": {"判定": "满足",
-                                        "内容": "叶子做完了（mock）",
-                                        "证据": ["第1次观测"]}}, ensure_ascii=False)
+            return json.dumps({"conclusion": {"verdict": "满足",
+                                               "text": "叶子做完了（mock）",
+                                               "evidence": ["第1次观测"]}},
+                              ensure_ascii=False)
 
         if fresh:                                   # 分配节点：拆一次
-            return json.dumps({"再做一次": [
-                {"任务名": "子任务A", "任务详情": "mock 详情", "注意事项": "",
-                 "验收标准": "子任务A 的可观测结果", "类型": "叶子"},
-                {"任务名": "子任务B", "任务详情": "mock 详情", "注意事项": "",
-                 "验收标准": "子任务B 的可观测结果", "类型": "叶子"},
-            ]}, ensure_ascii=False)
-        return json.dumps({"结论": {"判定": "满足", "内容": "下层都回来了（mock）",
-                                    "证据": ["子任务A 的结论"]}}, ensure_ascii=False)
+            def kid(n):
+                return {"name": n, "detail": "mock 详情", "notes": "",
+                        "accept": "%s 的可观测结果" % n, "kind": "leaf",
+                        "gate": False, "keywords": ["mock", "echo"],
+                        "conc_range": [50, 200]}
+            return json.dumps({"children": [kid("子任务A"), kid("子任务B")]},
+                              ensure_ascii=False)
+        return json.dumps({"conclusion": {"verdict": "满足",
+                                           "text": "下层都回来了（mock）",
+                                           "evidence": ["子任务A 的结论"]}},
+                          ensure_ascii=False)

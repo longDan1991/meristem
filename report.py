@@ -28,16 +28,19 @@ def rebuild(path):
             continue          # 最后一行可能是被 kill 时的半行
         k, p, nid = r["kind"], r["payload"], r["node"]
         if k == "open":
-            nodes[nid] = Node(name=p.get("任务名", ""), accept=p.get("验收标准", ""),
-                              detail=p.get("任务详情", ""), notes=p.get("注意事项", ""),
-                              kind=p.get("类型", "dispatch"),
-                              gate=bool(p.get("门槛")), id=nid,
-                              parent=p.get("parent"), depth=p.get("深度", 0))
+            nodes[nid] = Node(name=p.get("name") or p.get("任务名", ""),
+                              accept=p.get("accept") or p.get("验收标准", ""),
+                              detail=p.get("detail") or p.get("任务详情", ""),
+                              notes=p.get("notes") or p.get("注意事项", ""),
+                              kind=p.get("kind") or p.get("类型", "dispatch"),
+                              gate=bool(p.get("gate") or p.get("门槛")), id=nid,
+                              parent=p.get("parent"),
+                              depth=p.get("depth", p.get("深度", 0)))
             order.append(nid)
         elif k == "concluded" and nid in nodes:
-            nodes[nid].verdict = p.get("判定", "")
-            nodes[nid].conclusion = p.get("内容", "")
-            nodes[nid].evidence = p.get("证据") or []
+            nodes[nid].verdict = p.get("verdict") or p.get("判定", "")
+            nodes[nid].conclusion = p.get("text") or p.get("内容", "")
+            nodes[nid].evidence = p.get("evidence") or p.get("证据") or []
             nodes[nid].status = "done"
         elif k in ("failed", "budget_exhausted", "crashed") and nid in nodes:
             nodes[nid].status = "failed"
