@@ -22,6 +22,7 @@ from tree.index import TreeIndex
 from tree.llm import LLM, MockLLM
 from tree.node import Budget, Node, Trace
 from tree.run import render_tree, run
+from terminal.chat import converse
 
 
 def main():
@@ -71,20 +72,11 @@ def main():
     # 一个能过同一台闸门的根任务形式，然后退场。它的对话不用留：
     # 结论已经落成根节点的形式字段了，而树就是记忆（DESIGN §2.1、§2.8）。
     if a.intake and not a.mock:
-        from tree.intake import intake
-        print("[入口] 先把预期谈定，再交给根节点\n", flush=True)
-        r = intake(llm,
-                   "用户的任务: %s\n用户给的验收标准: %s" % (a.task, a.criteria),
-                   ask=lambda q: input("> "),
-                   on_say=lambda t: print(t, flush=True))
+        r = converse(llm,
+                     "用户的任务: %s\n用户给的验收标准: %s" % (a.task, a.criteria))
         if "blocked" in r:
-            print("\n[入口判定] %s：%s"
-                  % (r["blocked"]["verdict"], r["blocked"]["text"]), flush=True)
             return 1
         s = r["root"]
-        print("\n[入口交棒] %s ｜ %s ｜ 检索键 %s ｜ 结论规模 %s"
-              % (s["name"], s["accept"], s["keywords"], s["conc_range"]),
-              flush=True)
         root = Node(name=s["name"], detail=s["detail"], notes=s["notes"],
                     accept=s["accept"], kind=s["kind"],
                     keywords=s["keywords"], conc_range=s["conc_range"])

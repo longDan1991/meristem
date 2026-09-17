@@ -27,7 +27,7 @@
 > 无法建立权益基线；2026-12-31尚未到来，时间流逝不可由工具触发。
 > 模拟账户或历史回测不能作为该验收标准的证据，故任务阻塞。
 
-测试：**139 个断言，全离线，不调模型**（见 §6）。
+测试：**159 个断言，全离线，不调模型**（见 §6）。
 
 ---
 
@@ -80,7 +80,8 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 143 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；`--intake` 走入口 |
+| `main.py` | 135 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
+| `terminal/` | 93 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里 |
 | `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。改提示词不用碰代码 |
 | `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
 | `tree/intake.py` | 101 | **入口**：只用一次，把用户的话谈成根节点的形式字段，然后退场 |
@@ -123,6 +124,11 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
   它没有手（没有 bash/read/write），产物过 `validate_root`（= `_clean_spec` +
   "accept 必须有可测物理量"）：缺字段、没有可测物理量都当场打回并说清为什么；
   同一份错或同一个问题重复 5 次就收手。交谈记录不存 —— 结论已落成根节点的形式字段。
+- **✅ 终端会话**（`terminal/`）：`python3 main.py "..." -c "..." --intake`
+  就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由走旁白，
+  Ctrl-D / Ctrl-C 干净收手（返回一条正式的 `blocked`，不抛 traceback）。
+  边界：`main.py` 不再自己 `input()`，`tree/intake.py` 不知道自己是 tty 还是脚本 ——
+  由 `tests/test_tty.py` F 段守门。
 - **✅ bash 永远带超时且可见**（`tree/tools.py`）：默认 120 秒 / 上限 3600 秒，
   可写 `args.timeout`；超时明说"这是超时不是出错"、把**已产生的输出**交回去、
   告诉它怎么跑更久，并且 `killpg` 连子进程一起杀（不留孤儿）。
@@ -174,13 +180,16 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | "你这样分还不如那样分" | 追加一次 `attempts`：`人工否决｜理由`，作废该层子分支重分配 |
 | 暂停某分支 | 记 `人工暂停｜理由`（合法，但必须带理由） |
 
-- **落点**：新的 `tree/control.py` + `main.py` 里加子命令（比如 `main.py control <trace>`）。
+- **落点**：`terminal/control.py`，**不是** `tree/`。控制面换的是"介质与话轮"
+  （人怎么插话、怎么看见树），不是树的规矩 —— 它的变因和 `terminal/chat.py`
+  完全相同，所以共享同一个包，不另开模块。装配那天在 `main.py` 加子命令即可。
   动作不要直接改内存里的 `Node` —— 写 trace 事件，再由调度器在下一个决策点读进去。
 - **不要做"有树在跑就拒绝"这类锁**：正在跑的叶子看不见字段变更，
   正确做法是走 `observations` 通道 —— 人的话变成一条外部观测，下一个决策点就可见。
 - **不要先做 LLM 视图**：先做一个筛选（阻塞 > 被拒 > 门槛不过 > 其余折叠），
-  人会自然告诉你他想看什么。节点寻址用路径或名字前缀，
-  先把"从 trace 重建整棵树"这一步补回来（原来在 `report.py` 里，已随根目录清理删掉）。
+  人会自然告诉你他想看什么。节点寻址用路径或名字前缀。
+- **顺手要补的**：从 trace 重建整棵树的视图（原来在 `report.py` 里，
+  已随根目录清理删掉）—— 控制面要用它。
 - **测试**：`tests/test_control.py`，五类动作各一条断言，
   尤其"人工加分支要过和模型同一套校验"。
 
@@ -224,7 +233,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 ---
 
-## 6. 测试（139 个断言，全离线）
+## 6. 测试（159 个断言，全离线）
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
@@ -233,6 +242,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
 | `tests/test_intake.py` | 20 | 入口：没可测物理量的根被打回、问的同时必须给建议、交合规根、不该开工就交 blocked、重复 5 次收手、闸门逐条说不 |
+| `tests/test_tty.py` | 20 | 终端会话：问→答→交棒、问题只显示一遍、Ctrl-D/Ctrl-C 干净收手、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 
 ```bash
 for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
@@ -328,6 +338,19 @@ for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
     而最后一轮常常是**被拒的一次分配**（`_balk` 写的 attempt 里根本没有 `results` 键），
     于是上面一轮真跑过的子任务名被判成"编出来的"，一次本该满足的结论被降级成未满足。
     → 规矩：证据引自**任何一轮**分配出来的子节点都算数。
+
+23. **同一个问题在终端上显示两遍。** `intake` 原来把"问什么 / 建议什么"同时交给
+    `on_say`（旁白）和 `ask`（问用户），于是终端里出现"问：X / 我建议：Y / X /
+    （我的建议：Y）/ › "。加一句注释提醒"这两条别重复显示"是守不住的 ——
+    这是边界错位（两条通道传了同一份东西），不是记性问题。
+    正确动作是移边界：**问题与建议只走 `ask`，旁白（打回理由、重复计数）只走 `on_say`**。
+
+24. **终端交互不能塞进 `main.py` 或 `tree/`。** 一个是装配层（参数/`.env`/cwd），
+    一个是树的规矩 —— 它们的变因都不是"人怎么在 tty 上说话"。
+    塞进去的后果：改一句提示语要动 `main.py`，`tree/` 里多出一堆 `input()/print()`
+    （`tree/intake.py` 因此变得只能跑在真终端上，测试不了）。
+    → 落点 `terminal/`，变因清单见 `terminal/__init__.py`；
+    依赖方向单向（`main.py` → `terminal` → `tree.intake`），由 `tests/test_tty.py` F 段守门。
 
 ---
 

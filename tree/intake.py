@@ -38,7 +38,9 @@ def intake(llm, msg, ask, on_say=None):
     """和用户把预期谈定。返回 {"root": {...}} 或 {"blocked": {...}}。
 
     ask(question) -> 用户的回答（真跑时就是 input()，测试里换成脚本）。
-    on_say(text)   -> 可选的旁白回调（把入口说的话打出来）。
+    on_say(text)   -> 可选的**旁白**回调：打回理由、"这个问题问过 3 次了" 这类。
+                      问题与建议只走 ask 通道 —— 两条通道分开，
+                      终端才不会把同一个问题显示两遍。
     """
     def say(t):
         if on_say:
@@ -72,8 +74,6 @@ def intake(llm, msg, ask, on_say=None):
                 if not why:
                     asked[q] = asked.get(q, 0) + 1
                     n = asked[q]
-                    say("问：%s" % q)
-                    say("我建议：%s" % sug)
                     if n >= 3:
                         say("（这个问题你已经问过 %d 次了 —— 用户答不上来，"
                             "说明这件事现在还不成立，该给 blocked 了。）" % n)

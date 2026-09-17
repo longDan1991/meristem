@@ -67,7 +67,7 @@ def main():
     print("  交出来的根: %s" % json.dumps(r.get("root", r), ensure_ascii=False)[:120])
     line("打了回去，并说了为什么", any("可测物理量" in s for s in said))
     line("问了用户（一次一个问题）", len(asked) == 1)
-    line("问的同时给了建议", any("我建议" in s for s in said))
+    line("问的同时给了建议", bool(asked) and "我建议" in asked[0])
     line("建议跟着问题一起送到用户面前", bool(asked) and "我的建议" in asked[0])
     line("用户的话进了下一轮上下文", any("2026-12-31 收盘前" in s for s in llm.said))
     line("最终交出的根过了闸门", "root" in r and r["root"]["accept"] ==

@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""终端会话的定向测试。零成本、确定性（脚本化模型 + 脚本化终端）。
+
+这一层只管"介质与话轮"：把用户敲的一行交回去、把入口说的话显示出来、
+Ctrl-D/Ctrl-C 干净收手。判断 / 打回 / 收手都是 `tree/intake.py` 的事。
+
+  A. 谈定：问 → 答 → 交出合规的根；问题和建议只显示一遍
+  B. Ctrl-D（EOF）→ 不抛 traceback，返回 blocked，并说清是用户中止
+  C. Ctrl-C（KeyboardInterrupt）→ 同上
+  D. 旁白（打回理由）真的显示到了终端
+  E. blocked 结论原样交回，并在终端上说清判定
+  F. 边界：terminal 不许碰树的决策层；tree 不许反过来 import terminal
+"""
+
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
+from terminal.chat import converse, _read_line             # noqa: E402
+
+OK = []
+
+
+def line(tag, cond, detail=""):
+    print("  %s %-50s %s" % ("✓" if cond else "✗", tag, detail))
+    OK.append(bool(cond))
+
+
+class FakeLLM:
+    """按脚本回话的入口模型，并记下每一轮它看见了什么。"""
+
+    def __init__(self, replies):
+        self.replies, self.last_usage, self.seen = list(replies), {}, []
+
+    def chat(self, messages, temperature=0.2):
+        self.seen.append(messages[-1]["content"])
+        return self.replies.pop(0) if self.replies else "{}"
+
+
+class Screen:
+    """脚本化的终端：read 按顺序吐行，out 把显示过的都收起来。
+
+    它同时是"没有绕过终端"的证明 —— converse 只能通过这个 read 拿到输入。
+    """
+
+    def __init__(self, lines):
+        self.lines, self.shown, self.prompts = list(lines), [], []
+
+    def read(self, prompt):
+        self.prompts.append(prompt)
+        if not self.lines:
+            raise EOFError()
+        return self.lines.pop(0)
+
+    def out(self, text):
+        self.shown.append(str(text))
+
+    def text(self):
+        return "\n".join(self.shown)
+
+
+def root(**over):
+    r = {"name": "做一个能赚钱的量化系统", "detail": "先拆再干", "notes": "",
+         "accept": "账户权益在2026-12-31收盘 >= 本金 x 2", "kind": "dispatch",
+         "keywords": ["A股", "回测", "2026-12-31"], "conc_range": [100, 500]}
+    r.update(over)
+    return {"root": r}
+
+
+def ask_reply(question, suggest):
+    return json.dumps({"ask": {"question": question, "suggest": suggest}})
+
+
+def main():
+    print("=" * 80)
+    print("A. 谈定：问 → 答 → 交出合规的根")
+    Q, S = "你说的「赚大钱」按哪个数字判定？", "账户权益 >= 本金 x 2"
+    llm = FakeLLM([ask_reply(Q, S), json.dumps(root())])
+    scr = Screen(["2026-12-31 收盘"])
+    r = converse(llm, "帮我赚大钱", read=scr.read, out=scr.out)
+    print("  终端上显示的：\n%s" % "\n".join("    " + x for x in scr.shown))
+    line("交出了合规的根", "root" in r
+         and r["root"]["accept"] == "账户权益在2026-12-31收盘 >= 本金 x 2")
+    line("问题送到了终端", Q in scr.text())
+    line("建议跟着问题一起送到", S in scr.text())
+    line("同一个问题只显示一遍", scr.text().count(Q) == 1)
+    line("用户敲的那一行进了下一轮上下文",
+         any("2026-12-31 收盘" in s for s in llm.seen))
+    line("读输入一定经过终端（一次问题一次读）", len(scr.prompts) == 1)
+    line("交棒时说清了根长什么样", "入口交棒" in scr.text())
+
+    print("=" * 80)
+    print("B. Ctrl-D（EOF）→ 干净收手，不是 traceback")
+    scr = Screen([])                       # 一行都没有：read 直接 EOF
+    r = converse(FakeLLM([ask_reply(Q, S)]), "帮我赚大钱",
+                 read=scr.read, out=scr.out)
+    print("  %s" % r["blocked"])
+    line("返回的是 blocked，不是异常", "blocked" in r and "root" not in r)
+    line("说清是用户中止的", "中止" in r["blocked"]["text"])
+    line("终端上也交代了", "中止" in scr.text())
+
+    print("=" * 80)
+    print("C. Ctrl-C（KeyboardInterrupt）→ 同 B")
+
+    def interrupted(prompt):
+        raise KeyboardInterrupt()
+
+    r = converse(FakeLLM([ask_reply(Q, S)]), "帮我赚大钱",
+                 read=interrupted, out=lambda t: None)
+    line("Ctrl-C 也收手", "blocked" in r and "中止" in r["blocked"]["text"])
+
+    print("=" * 80)
+    print("D. 旁白（打回理由）显示到终端")
+    llm = FakeLLM([json.dumps(root(accept="系统做好了")),   # 没有可测物理量
+                   json.dumps(root())])
+    scr = Screen([])
+    r = converse(llm, "帮我赚大钱", read=scr.read, out=scr.out)
+    print("  终端上显示的：\n%s" % "\n".join("    " + x for x in scr.shown))
+    line("打回理由走了旁白通道", "可测物理量" in scr.text())
+    line("打回后照样能谈成", "root" in r)
+
+    print("=" * 80)
+    print("E. blocked 结论原样交回")
+    b = {"verdict": "阻塞", "text": "开户入金需要本人到柜台", "evidence": ["需要人到场"]}
+    scr = Screen([])
+    r = converse(FakeLLM([json.dumps({"blocked": b})]), "帮我开户",
+                 read=scr.read, out=scr.out)
+    line("原样交回，没被包一层", r["blocked"] == b)
+    line("终端上给出了判定", "入口判定" in scr.text() and "柜台" in scr.text())
+
+    print("=" * 80)
+    print("F. 边界：依赖单向（terminal→tree.intake，tree 不认识 terminal）")
+    src = open(os.path.join(ROOT, "terminal", "chat.py"), encoding="utf-8").read()
+    line("终端层不碰树的决策层（tree.run / tree.node）",
+         "tree.run" not in src and "tree.node" not in src)
+    back = []
+    for dirpath, _, names in os.walk(os.path.join(ROOT, "tree")):
+        for n in names:
+            if n.endswith(".py"):
+                p = os.path.join(dirpath, n)
+                if "terminal" in open(p, encoding="utf-8").read():
+                    back.append(os.path.relpath(p, ROOT))
+    line("tree 不许反过来 import terminal", not back, str(back))
+    main_src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    line("终端读取只在一个地方（main.py 不再自己读输入）",
+         "input(" not in main_src)
+
+    print("=" * 80)
+    print("G. 不是真终端（管道 / 重定向）→ 提示符自己收尾")
+    import contextlib
+    import io
+
+    class NotATty(io.StringIO):
+        def isatty(self):
+            return False
+
+    old, sys.stdin = sys.stdin, NotATty("答案\n")
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            got = _read_line("› ")
+    finally:
+        sys.stdin = old
+    line("读到了那一行", got == "答案")
+    line("提示符后面补了换行（否则下一句会挂到同一行）",
+         buf.getvalue() == "› \n", repr(buf.getvalue()))
+
+    print("=" * 80)
+    print("全部通过" if all(OK) else "有失败项")
+    return 0 if all(OK) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
