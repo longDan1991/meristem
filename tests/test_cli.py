@@ -3,7 +3,8 @@
 
   A. 给了任务没给验收标准 → 报错（不是悄悄用一个默认值）
   B. 什么都没给 → 报错：**没有默认任务，也没有默认验收标准**
-  C. `--intake` 和 `--mock` 一起用 → 报错（入口就是一次真对话）
+  C. `--intake` 必须配真模型：和 `--mock` 一起用、或没有 API key，都报错
+     （否则入口会拿 MockLLM 的 JSON 去和用户说话）
   D. 守门：伪造的"用户的话"不许回来 —— 源码里不许再有硬编码的默认任务/标准
 """
 
@@ -47,10 +48,12 @@ def main():
     line("提示了 --intake 这条替代路", "--intake" in out)
 
     print("=" * 80)
-    print("C. --intake 和 --mock 一起用 → 报错")
+    print("C. --intake 必须配真模型")
     code, out = run(["做视频", "-c", "有一条成片", "--intake", "--mock"])
-    line("退出码 = 2", code == 2)
-    line("说清入口要真模型", "mock" in out and "真模型" in out)
+    line("配 --mock → 报错", code == 2 and "真模型" in out)
+    code, out = run(["做视频", "--intake"])      # 测试环境里没有 API key
+    line("没有 API key → 也报错（不许拿 MockLLM 去和用户聊）",
+         code == 2 and "TREE_API_KEY" in out, out.strip().splitlines()[-1] if out else "")
 
     print("=" * 80)
     print("D. 守门：伪造的「用户的话」不许回来")

@@ -49,8 +49,9 @@ def main():
     ap.add_argument("--intake", action="store_true",
                     help="先过一遍入口：和用户把预期谈定，再交给根节点（用一次就退场）")
     a = ap.parse_args()
-    if a.intake and a.mock:
-        ap.error("--intake 要真模型（入口就是一次对话），和 --mock 不能一起用")
+    if a.intake and (a.mock or not os.environ.get("TREE_API_KEY")):
+        ap.error("--intake 要真模型（入口就是一次对话）："
+                 "别加 --mock，也要有 TREE_API_KEY")
     # 没有默认任务、也没有默认验收标准。默认值就是**伪造用户的话**：
     # 入口拿到一条用户从没提过的验收标准，就只能围着它编 ——
     # 实测一句“帮我自动做视频赚钱”被谈成了 A 股回测 / 模拟盘。

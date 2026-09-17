@@ -126,8 +126,9 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
   代码不认识"回合数"，也不数"同一个问题问了几次"（这些曾经都有，全是看模型犯错后
   焊上去的，已删）。代码只认识出口：产物过 `validate_root`（= `_clean_spec` +
   "accept 必须有可测物理量"），缺字段、没有可测物理量都当场打回**并把原因说给它**，
-  让它自己改。交流走 `{"ask":{"content":"..."}}`，`content` 原样送到用户面前
-  （不过 `norm()` —— 那是形式字段的规范化，会压掉换行）。
+  让它自己改。**模型要么说话（纯文本），要么交形式（`{"root": …}`）** ——
+  识别规则只有一条：只有带 `root` 键的 JSON 算形式，其余一律当"话"原样送到
+  用户面前（不过 `norm()` —— 那是形式字段的规范化，会压掉换行）。
   **用户不会给你验收标准**：那是入口的使命，不是用户的任务。
   交谈记录不存 —— 结论已落成根节点的形式字段。
 - **✅ 终端会话**（`terminal/`）：`python3 main.py "..." -c "..." --intake`
@@ -249,9 +250,9 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tests/test_caps.py` | 46 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
 | `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_intake.py` | 22 | 入口：没可测物理量的根被打回、`content` 原样送到用户面前、对话形式自由（不带建议／一次问几件事／ask 直接是一句话）、**没有回合数与重复次数限制**、**只有一个出口（模型给 blocked 被打回）**、闸门逐条说不 |
+| `tests/test_intake.py` | 22 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因、**没有回合数限制**、**只有一个出口**、闸门逐条说不 |
 | `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
-| `tests/test_tty.py` | 29 | 终端会话：问→答→交棒、问题只显示一遍、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
+| `tests/test_tty.py` | 27 | 终端会话：问→答→交棒、问题只显示一遍、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 
 ```bash
 for t in protocol caps index tools intake; do python3 tests/test_$t.py; done

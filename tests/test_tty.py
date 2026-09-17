@@ -72,9 +72,9 @@ def root(**over):
     return {"root": r}
 
 
-def ask_reply(content):
-    """入口只说一句 content（问题、建议都在里面）。"""
-    return json.dumps({"ask": {"content": content}})
+def talk(text):
+    """入口"说话"就是一段纯文本（形式那条才是 JSON）。"""
+    return text
 
 
 def main():
@@ -82,7 +82,7 @@ def main():
     print("A. 谈定：问 → 答 → 交出合规的根")
     Q = "你说的「赚大钱」按哪个数字判定？"
     S = "我建议写成：账户权益 >= 本金 x 2"
-    llm = FakeLLM([ask_reply(Q + "\n" + S), json.dumps(root())])
+    llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
     scr = Screen(["2026-12-31 收盘", ""])          # 一行回答 + 空行表示说完
     r = converse(llm, "帮我赚大钱", read=scr.read, out=scr.out)
     print("  终端上显示的：\n%s" % "\n".join("    " + x for x in scr.shown))
@@ -100,7 +100,7 @@ def main():
 
     print("=" * 80)
     print("B. 回车不发送：分几行写的回答拼成一条（半句话不会被提前发出去）")
-    llm = FakeLLM([ask_reply(Q + "\n" + S), json.dumps(root())])
+    llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
     scr = Screen(["我要一个", "能跑通这个仓库所有测试的", "任务", ""])
     r = converse(llm, "帮我赚大钱", read=scr.read, out=scr.out)
     print("  模型看见的那一条：%r" % llm.seen[1][-40:])
@@ -116,7 +116,7 @@ def main():
 
     print("=" * 80)
     print("C. 写了东西再按 Ctrl-D = 说完了（不丢）")
-    llm = FakeLLM([ask_reply(Q + "\n" + S), json.dumps(root())])
+    llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
     scr = Screen(["就按你说的办"])                    # 之后 EOF
     r = converse(llm, "帮我赚大钱", read=scr.read, out=scr.out)
     line("写了的内容照样发出去", any("就按你说的办" in s for s in llm.seen))
@@ -126,7 +126,7 @@ def main():
     print("=" * 80)
     print("D. 什么都没写按 Ctrl-D / Ctrl-C → 干净收手")
     scr = Screen([])                       # 一行都没有：read 直接 EOF
-    r = converse(FakeLLM([ask_reply(Q + "\n" + S)]), "帮我赚大钱",
+    r = converse(FakeLLM([talk(Q + "\n" + S)]), "帮我赚大钱",
                  read=scr.read, out=scr.out)
     line("返回 None（中止不是结论）", r is None)
     line("终端上说清了是中止", "中止" in scr.text())
@@ -134,7 +134,7 @@ def main():
     def interrupted(prompt):
         raise KeyboardInterrupt()
 
-    r = converse(FakeLLM([ask_reply(Q + "\n" + S)]), "帮我赚大钱",
+    r = converse(FakeLLM([talk(Q + "\n" + S)]), "帮我赚大钱",
                  read=interrupted, out=lambda t: None)
     line("Ctrl-C 也收手", r is None)
 
