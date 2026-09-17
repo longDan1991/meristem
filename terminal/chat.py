@@ -1,24 +1,29 @@
 """和入口在终端上把预期谈定。
 
-这里只做两件事：把用户敲的一行交回去、把入口说的话显示出来。
+这里只做两件事：把用户敲的字交回去、把入口说的话显示出来。
 判断、打回、收手全在 `tree/intake.py` 里 —— 不在这里再实现一遍，
 否则"什么算合规"就有了两个事实。
 
 两条通道分开，终端才不会把同一个问题显示两遍：
   - 问题与建议走 `ask` 通道，由这里的提示符呈现；
   - 旁白（打回理由、"这个问题你已经问过 3 次了"）走 `on_say` 通道。
+
+一条硬纪律：**回车永远不发送。** 发送是一个不含糊的独立动作（空行）。
+理由是中文字输入法：回车是用来确认候选词的，那一下回车如果当成"发送"，
+用户还没写完的话就被传进去了（实测）。同理，粘贴里带换行的多行文本
+也不该被当成一串回答。所以：回车换行，空行表示说完了。
 """
 
 import sys
 
 from tree.intake import intake
 
-
-PROMPT = "› "
+PROMPT = "› "          # 第一行
+CONT = "  "            # 续行：看得出来还在同一条回答里
 
 
 class _Quit(Exception):
-    """用户在终端上按了 Ctrl-D / Ctrl-C。
+    """用户在终端上按了 Ctrl-D / Ctrl-C，而且什么都没写。
 
     这是终端上的常态，不是错误 —— 所以不往上抛，就地收手。
     """
@@ -39,6 +44,29 @@ def _read_line(prompt):
     return input(prompt)
 
 
+def _read_answer(read, out):
+    """收一条回答：回车换行，**空行**（或 Ctrl-D）表示说完了。
+
+    Ctrl-D 在已经写了东西时等于"我说完了"，什么都没写时才当中止 ——
+    Ctrl-D 打了半天字再按一下就全丢掉，是另一种"没输完就没了"。
+    """
+    lines = []
+    while True:
+        try:
+            ln = read(PROMPT if not lines else CONT)
+        except (EOFError, KeyboardInterrupt):
+            if not lines:
+                raise _Quit()
+            out("  ↳ 收到 Ctrl-D：当你写完了")
+            break
+        if not ln.strip():
+            break
+        lines.append(ln.rstrip())
+    text = "\n".join(lines)
+    out("  ↳ 发出（%d 行）" % len(lines) if lines else "  ↳ 发出（空的）")
+    return text
+
+
 def converse(llm, seed, read=None, out=None):
     """把预期谈定。返回 `tree.intake.intake()` 的原样结果：
     `{"root": {...}}` 或 `{"blocked": {...}}`。
@@ -50,14 +78,12 @@ def converse(llm, seed, read=None, out=None):
     out = out or print
 
     out("\n[入口] 先把预期谈定，再交给根节点。")
-    out("       拿不准就直说；不想聊了按 Ctrl-D。\n")
+    out("       回车只换行，不会发送；单独一个空行表示说完了。")
+    out("       不想聊了按 Ctrl-D。\n")
 
     def ask(question):
         out(question)
-        try:
-            return read(PROMPT)
-        except (EOFError, KeyboardInterrupt):
-            raise _Quit()
+        return _read_answer(read, out)
 
     try:
         r = intake(llm, seed, ask=ask, on_say=lambda t: out("  " + str(t)))

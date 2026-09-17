@@ -28,9 +28,11 @@ from terminal.chat import converse
 def main():
     cfg.load_env()
     ap = argparse.ArgumentParser()
-    ap.add_argument("task", nargs="?", default="给我一个能赚大钱的A股量化系统")
-    ap.add_argument("--criteria", "-c", default="期末账户权益 >= 本金 x 2",
-                    help="根任务的验收标准（必须可被观测）")
+    ap.add_argument("task", nargs="?",
+                    help="要做的这件事（一句话）。不给就得靠 --intake 谈出来")
+    ap.add_argument("--criteria", "-c",
+                    help="根任务的验收标准（必须可被观测）。"
+                         "这是唯一能判定整棵树做没做完的东西：不给就得靠 --intake 谈出来")
     ap.add_argument("--workers", type=int, default=6, help="并发节点数")
     ap.add_argument("--max-nodes", type=int, default=0, help="0=不限")
     ap.add_argument("--max-tokens", type=int, default=0, help="0=不限")
@@ -47,12 +49,25 @@ def main():
     ap.add_argument("--intake", action="store_true",
                     help="先过一遍入口：和用户把预期谈定，再交给根节点（用一次就退场）")
     a = ap.parse_args()
+    if a.intake and a.mock:
+        ap.error("--intake 要真模型（入口就是一次对话），和 --mock 不能一起用")
+    # 没有默认任务、也没有默认验收标准。默认值就是**伪造用户的话**：
+    # 入口拿到一条用户从没提过的验收标准，就只能围着它编 ——
+    # 实测一句“帮我自动做视频赚钱”被谈成了 A 股回测 / 模拟盘。
+    # 想要默认值，就显式写出来；不想写，就让入口向用户问。
+    if not a.intake:
+        if not a.task:
+            ap.error('必须给任务：python3 main.py "..." -c "..."'
+                     '（或者用 --intake 让入口问你）')
+        if not a.criteria:
+            ap.error("必须给验收标准 -c：没有它，这棵树判不了自己做没做完")
     # 工作目录只有一个来源：TREE_WORKSPACE。没有默认值、没有先例可改、没有参数可绕。
     # 先例只提供“那里有什么”，不提供“你该在哪干活”。
     ws = os.path.abspath(cfg.workspace())
     if not a.trace:
         slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"),
-                          hashlib.sha1(a.task.encode("utf-8")).hexdigest()[:6])
+                          hashlib.sha1((a.task or "intake").encode("utf-8"))
+                          .hexdigest()[:6])
         a.trace = os.path.join(ws, "runs", slug, "trace.jsonl")
     # exclude 只对显式 --trace 有意义 —— 那时它可能指向一棵已经存在的树。
     index = TreeIndex(sorted(glob.glob(a.index)),
@@ -66,25 +81,30 @@ def main():
         print("[模型] %s @ %s" % (llm.model, llm.base_url), flush=True)
 
     trace = Trace(a.trace)
-    root = Node(name=a.task, accept=a.criteria, kind="dispatch")
 
     # 入口（可选）：根节点的"上层"只被用一次 —— 把用户的一句话谈成
     # 一个能过同一台闸门的根任务形式，然后退场。它的对话不用留：
     # 结论已经落成根节点的形式字段了，而树就是记忆（DESIGN §2.1、§2.8）。
-    if a.intake and not a.mock:
-        r = converse(llm,
-                     "用户的任务: %s\n用户给的验收标准: %s" % (a.task, a.criteria))
+    # 种子只写**用户真的说了什么**：没给的就是没给（入口该去问），
+    # 不许拿默认值充数。
+    if a.intake:
+        seed = "用户的任务: %s" % (a.task or "（他没说任务）")
+        seed += ("\n用户给的验收标准: %s" % a.criteria if a.criteria else
+                 "\n验收标准: 用户没有给 —— 这是唯一真正重要的一条，你要问他。")
+        r = converse(llm, seed)
         if "blocked" in r:
             return 1
         s = r["root"]
         root = Node(name=s["name"], detail=s["detail"], notes=s["notes"],
                     accept=s["accept"], kind=s["kind"],
                     keywords=s["keywords"], conc_range=s["conc_range"])
+    else:
+        root = Node(name=a.task, accept=a.criteria, kind="dispatch")
     registry = {}
     budget = Budget(max_nodes=a.max_nodes or None, max_tokens=a.max_tokens or None,
                     max_hours=a.max_hours or None)
 
-    print("[验收标准] %s" % a.criteria, flush=True)
+    print("[验收标准] %s" % root.accept, flush=True)
     print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
     print("[并发] %d" % a.workers, flush=True)
     # 持久工作目录：TREE_WORKSPACE，agent 的 cwd。上次写的代码和数据就还在。

@@ -27,7 +27,7 @@
 > 无法建立权益基线；2026-12-31尚未到来，时间流逝不可由工具触发。
 > 模拟账户或历史回测不能作为该验收标准的证据，故任务阻塞。
 
-测试：**159 个断言，全离线，不调模型**（见 §6）。
+测试：**179 个断言，全离线，不调模型**（见 §6）。
 
 ---
 
@@ -44,7 +44,8 @@ python3 main.py "帮我做一个能赚大钱的A股量化系统" \
     -c "账户权益在2026-12-31收盘 >= 本金 x 2" --workers 3 --progress 0
 
 # 让入口先把预期谈清楚再开工（会和你对话，谈完才交给根节点）
-python3 main.py "帮我赚大钱" -c "随便写，入口会重新谈" --intake
+# 不给 -c 就是「我还没定验收标准，入口去问」—— 不许拿默认值当用户的话
+python3 main.py "帮我自动做视频赚钱" --intake
 
 # 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
 
@@ -81,7 +82,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | 文件 | 行数 | 干什么 |
 |---|---|---|
 | `main.py` | 135 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
-| `terminal/` | 93 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里 |
+| `terminal/` | 119 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里 |
 | `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。改提示词不用碰代码 |
 | `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
 | `tree/intake.py` | 101 | **入口**：只用一次，把用户的话谈成根节点的形式字段，然后退场 |
@@ -126,9 +127,10 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
   同一份错或同一个问题重复 5 次就收手。交谈记录不存 —— 结论已落成根节点的形式字段。
 - **✅ 终端会话**（`terminal/`）：`python3 main.py "..." -c "..." --intake`
   就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由走旁白，
-  Ctrl-D / Ctrl-C 干净收手（返回一条正式的 `blocked`，不抛 traceback）。
+  **回车只换行，空行才发送**（按 Ctrl-D 也一样：写了东西＝说完了，什么都没写＝中止），
+  发出去时明说「发出（N 行）」。Ctrl-D / Ctrl-C 中止时返回一条正式的 `blocked`，不抛 traceback。
   边界：`main.py` 不再自己 `input()`，`tree/intake.py` 不知道自己是 tty 还是脚本 ——
-  由 `tests/test_tty.py` F 段守门。
+  由 `tests/test_tty.py` G 段守门。
 - **✅ bash 永远带超时且可见**（`tree/tools.py`）：默认 120 秒 / 上限 3600 秒，
   可写 `args.timeout`；超时明说"这是超时不是出错"、把**已产生的输出**交回去、
   告诉它怎么跑更久，并且 `killpg` 连子进程一起杀（不留孤儿）。
@@ -214,7 +216,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 ### ④ 入口在真模型上跑一次
 
-- `python3 main.py "帮我赚大钱" -c "随便写，入口会重新谈" --intake`
+- `python3 main.py "帮我自动做视频赚钱" --intake`
 - 看三件事：会不会真的问用户（而不是自己编一个目标）；
   谈出来的 `accept` 有没有可测物理量；该 `blocked` 的时候会不会硬编一个假目标。
 
@@ -233,7 +235,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 ---
 
-## 6. 测试（159 个断言，全离线）
+## 6. 测试（179 个断言，全离线）
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
@@ -242,7 +244,8 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
 | `tests/test_intake.py` | 20 | 入口：没可测物理量的根被打回、问的同时必须给建议、交合规根、不该开工就交 blocked、重复 5 次收手、闸门逐条说不 |
-| `tests/test_tty.py` | 20 | 终端会话：问→答→交棒、问题只显示一遍、Ctrl-D/Ctrl-C 干净收手、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
+| `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
+| `tests/test_tty.py` | 29 | 终端会话：问→答→交棒、问题只显示一遍、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 
 ```bash
 for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
@@ -350,7 +353,25 @@ for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
     塞进去的后果：改一句提示语要动 `main.py`，`tree/` 里多出一堆 `input()/print()`
     （`tree/intake.py` 因此变得只能跑在真终端上，测试不了）。
     → 落点 `terminal/`，变因清单见 `terminal/__init__.py`；
-    依赖方向单向（`main.py` → `terminal` → `tree.intake`），由 `tests/test_tty.py` F 段守门。
+    依赖方向单向（`main.py` → `terminal` → `tree.intake`），由 `tests/test_tty.py` G 段守门。
+
+25. **回车不能当发送键（实测，用户第一次用就撞上）。** "回车即发送"看着最自然，
+    但中文输入法里回车是用来**确认候选词**的 —— 那一下回车会当成发送，
+    用户还没写完的半句话就被传进去了（粘贴里带换行的多行文本同理）。
+    更坏的是它看起来像"有个时间限制"，让人往错的方向找。
+    → 规矩：**回车只换行，发送是一个不含糊的独立动作（空行）**；
+    未 tty 时 EOF（管道结束）也当发送；Ctrl-D 写了东西＝说完了、什么都没写＝中止；
+    发出去时明说"发出（N 行）"，让人随时知道东西在不在手上。
+
+26. **默认值就是伪造用户的话。** `-c` 原来默认为"期末账户权益 >= 本金 x 2"，
+    出口和任务默认值不是一对时，就可能把一条用户从没提过的验收标准当成
+    "用户给的验收标准"送进入口。实测：一句"帮我自动做视频赚钱"被谈成了
+    "历史回测还是模拟盘/实盘？初始资金 100 万..." —— 入口没错，它只是在
+    圆一个假事实，而且**看起来很像真的**（这类污染最难发现）。
+    → 规矩：**命令行没有默认任务、没有默认验收标准**；想要的默认值就显式
+    写出来，不想写就让入口去问用户。种子只写用户真说过的：没给的就是没给。
+    同类：提示词里的举例也是这种污染（`keywords` 举 `["akshare","回测","2026-12-31"]`
+    会把所有任务往量化上带），举例要让形状清楚、不携带领域。
 
 ---
 
