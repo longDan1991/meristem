@@ -15,7 +15,7 @@
   ③ 一次最多一个门槛；门槛不成立，其余子任务不启动
   ④ 判定"满足"却指不出证据 → 降级为"未满足"
 
-提示词在 `prompts/*.md`（可变层，自优化只允许改它）——
+提示词在 `prompts/*.md` ——
 改提示词不用碰代码，但改完要回来对一遍上面那四件事。
 """
 
@@ -34,7 +34,7 @@ ARTIFACT_EXT = (".py", ".sh", ".js", ".ts", ".rb", ".json",
                 ".yaml", ".yml", ".toml", ".csv", ".sql")
 from .llm import parse_json
 from .node import EXTERNAL_CLASSES, Budget, Node, Trace, norm
-from .prompts import ALLOC_SYS, LEAF_SYS, PROMPT
+from .prompts import PROMPT
 from .tools import TOOLS
 
 TOOL_LOCK = threading.Lock()
@@ -57,7 +57,7 @@ def inherits(parent_accept, child_accept):
 
 
 # 两套系统提示词在 `prompts/alloc.md` / `prompts/leaf.md` —— 它们是协议的一部分，
-# 每一条硬性要求都对应下面的一处代码检查。`PROMPT` 是自优化唯一允许改的可变层。
+# 每一条硬性要求都对应下面的一处代码检查。
 
 
 # ---------------------------------------------------------------- 日志
@@ -156,9 +156,12 @@ def _evidence_ok(node, ev):
     """
     valid, bad = [], []
     obs_idx = set(range(1, len(node.observations) + 1))
+    # 证据引自**任何一轮**分配出来的子节点都算数。只看最后一轮会误杀：
+    # 末轮是"不再拆、直接出结论"那次，results 是空的，于是上一轮真跑过的
+    # 子任务名被判成"编出来的"，一次本该满足的结论被降级成未满足。
     kids = []
-    if node.attempts:
-        kids = [c.get("name", "") for c in node.attempts[-1].get("results", [])]
+    for a in node.attempts:
+        kids += [c.get("name", "") for c in a.get("results", [])]
     for x in ev:
         s = str(x).strip()
         hit = False
@@ -589,7 +592,7 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
         if index is not None:
             qs = node.keywords or ["%s %s" % (node.name, node.accept)]
             try:
-                picked, text = index.search(qs)
+                picked, text = index.search(qs, workspace=os.getcwd())
                 if text:
                     node.precedents.append(text)
                 trace.add(node.id, "precedent",

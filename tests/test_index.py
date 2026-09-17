@@ -8,7 +8,9 @@
   E. 老格式的 trace（task/criteria/done）也能读，否则昨晚那棵树就是死数据
   F. 不搜自己那棵树
   G. 结局加权：满足的先例排在前面
-  H. 工作目录从根节点继承下来，检索结果带着它
+  H. 工作目录：只有跟**当前**工作目录相同时才写"工作目录"，
+     否则只能写"先例的数据在"（实测：写"工作目录: <老树>"会让模型把
+     一个死目录抄进子任务，产出落到老树里去了）
   I. 阻塞枝带回可复核的东西：证据 / 外部需求 / 卡在哪条命令 / 卡住时间
      （DESIGN §2.7：阻塞不是死路。只给一句"做不了"，模型只能照抄）
   J. 老格式的 leaf_tool 也算观测，否则昨晚那棵树答不出"卡在哪"
@@ -147,11 +149,17 @@ def main():
     ok &= line("被排除的树不在索引里", all(n.tree != p1 for n in idx2.nodes.values()))
 
     print("=" * 80)
-    print("G/H. 结局加权 + 工作目录")
+    print("G/H. 结局加权 + 工作目录只在是当前目录时才这么叫")
     idx3 = TreeIndex([p1, build(SPEC, workspace="/tmp/ws-other")])
-    picked, text = idx3.search(["开户并入金"])
+    picked, text = idx3.search(["开户并入金"], workspace="/tmp/ws-other")
     print("  %s" % text.replace("\n", " ⏎ "))
-    ok &= line("检索结果带着工作目录", "工作目录: /tmp/ws" in text)
+    ok &= line("是当前工作目录 → 写成工作目录", "工作目录: /tmp/ws" in text)
+    _, text_else = idx3.search(["开户并入金"], workspace="/tmp/somewhere-else")
+    print("  %s" % text_else.replace("\n", " ⏎ "))
+    ok &= line("不是当前目录 → 不许写成工作目录",
+               "工作目录: /tmp/ws" not in text_else)
+    ok &= line("但要说清数据在那边、只读",
+               "先例的数据在: /tmp/ws" in text_else and "只读" in text_else)
 
     print("=" * 80)
     print("I. 阻塞枝带回可复核的东西（证据 / 外部需求 / 卡在哪条命令）")

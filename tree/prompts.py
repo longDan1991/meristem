@@ -15,7 +15,6 @@
  `_clean_spec` 加"验收标准必须有可测物理量"，所以它不可能塞进树检查不了的东西。
 
 所以改提示词不用碰代码：直接改 `prompts/*.md`。
-**自优化回路允许改的也只有这里** —— `PROMPT` 是可变层（见 evolve.py）。
 
 设计与不变量的完整版在 `docs/DESIGN.md`；进度与交接在 `docs/HANDOVER.md`。
 """
@@ -35,5 +34,4 @@ ALLOC_SYS = load("alloc")
 LEAF_SYS = load("leaf")
 INTAKE_SYS = load("intake")      # 根节点的上层：只用一次，谈定预期就退场
 
-# 可变层：自优化唯一被允许修改的东西。
 PROMPT = {"alloc": ALLOC_SYS, "leaf": LEAF_SYS, "intake": INTAKE_SYS}

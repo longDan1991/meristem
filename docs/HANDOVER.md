@@ -27,7 +27,7 @@
 > 无法建立权益基线；2026-12-31尚未到来，时间流逝不可由工具触发。
 > 模拟账户或历史回测不能作为该验收标准的证据，故任务阻塞。
 
-测试：**129 个断言，全离线，不调模型**（见 §6）。
+测试：**139 个断言，全离线，不调模型**（见 §6）。
 
 ---
 
@@ -46,8 +46,7 @@ python3 main.py "帮我做一个能赚大钱的A股量化系统" \
 # 让入口先把预期谈清楚再开工（会和你对话，谈完才交给根节点）
 python3 main.py "帮我赚大钱" -c "随便写，入口会重新谈" --intake
 
-# 看结果（进程挂了也能重建整棵树）
-python3 report.py $TREE_WORKSPACE/runs/<那次>/trace.jsonl
+# 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
 
 # 测试
 for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
@@ -69,8 +68,9 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 - 不设 `--trace` 时，自动写 `<工作区>/runs/<月日-时分秒>-<任务哈希>/trace.jsonl`
 - `TREE_INDEX` 默认扫 `<工作区>/runs/*/trace.jsonl`，所以**新跑完的树立刻能被下次检索到**
-- 不给 `-w` 时，`main.py` 先问老树（`_ws_from_precedent`）：命中先例、且**那个目录还在磁盘上**，
-  就沿用它的；目录没了就退回 `TREE_WORKSPACE`。所以"第二次能直接用上次的代码和数据"。
+- **工作目录只有 `TREE_WORKSPACE` 一个来源**。没有 `-w`、没有默认值、没有先例可改。
+  先例只提供"那里有过什么"（而且只在它等于当前 cwd 时才叫"工作目录"），
+  不提供"你该在哪干活"。
 
 ---
 
@@ -80,9 +80,9 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 167 | 入口/CLI。路径来自 `.env`；不给 `-w` 时自己选工作目录；`--intake` 走入口 |
+| `main.py` | 143 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；`--intake` 走入口 |
 | `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。改提示词不用碰代码 |
-| `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来（`PROMPT` 是自优化唯一允许改的可变层） |
+| `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
 | `tree/intake.py` | 101 | **入口**：只用一次，把用户的话谈成根节点的形式字段，然后退场 |
 | `tree/run.py` | 765 | **调度器 + 代码检查**。改行为先看这里，再看 `prompts/` |
 | `tree/node.py` | 280 | `Node`/`Trace`/`Budget`/`norm`/`VIEW`/`EXTERNAL_CLASSES` + 所有渲染 |
@@ -93,9 +93,6 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tree/effects.py` | 148 | 从 bash/write **机械**抽 effects（`fs/pkg/proc/net/data/cwd` + 前置条件） |
 | `tree/config.py` | 59 | `.env` + 路径规则 |
 | `tree/llm.py` | 104 | LLM + MockLLM |
-| `report.py` | 124 | 从 trace 重建整棵树（进程挂了也能重建） |
-| `bench.py` / `evolve.py` | | 自优化的眼睛 / 回路（**没跑过真验证**，见 §5⑥） |
-| `regress.py` / `sim_caps.py` / `mine.py` | | 拿真实 trace 离线回归、算"回路闭合值多少钱"、批量挖能力 |
 | `docs/DESIGN.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
@@ -104,7 +101,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 ```
 /Users/wxlong/output/humanoid/
 ├── runs/night_quant/          ← 最值钱的那棵树：11.5 小时 / 2443 节点 / 35.7M tokens
-│   ├── trace.jsonl            （13M，report.py / mine.py / regress.py 都吃它）
+│   ├── trace.jsonl            （13M，能力库就是拿它挖出来的）
 │   └── ...                    （那次跑出来的 workspace：fulltext.txt、char_index.pkl…）
 ├── runs/verify{2,3,4}/        ← 校验跑
 ├── runs/mock*/ runs/sum/ ...  ← 小实验
@@ -133,7 +130,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
   但 `offset`/`limit` 从来没传下去 —— 模型照做了也拿不到下一段。
   现在 `offset`/`limit`/`timeout` 都透传。
 - **✅ 形式化协议换成英文键**（`node.py` / `run.py` / `prompts/`）。
-  老 trace 的中文键照样能读（`index.py` / `mine.py` / `report.py` 都做了兼容），
+  老 trace 的中文键照样能读（`index.py` 做了兼容），
   否则 `night_quant` 那棵树就变成死数据了。
 - **✅ `keywords` 出生即检索**：`先例` 动作和 `need` 动作都没了，
   老树先例 + 能力库现成做法在同一时刻由程序塞进提示词（`register`）。
@@ -182,7 +179,8 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 - **不要做"有树在跑就拒绝"这类锁**：正在跑的叶子看不见字段变更，
   正确做法是走 `observations` 通道 —— 人的话变成一条外部观测，下一个决策点就可见。
 - **不要先做 LLM 视图**：先做一个筛选（阻塞 > 被拒 > 门槛不过 > 其余折叠），
-  人会自然告诉你他想看什么。节点寻址用路径或名字前缀，`report.py` 已经能重建整棵树。
+  人会自然告诉你他想看什么。节点寻址用路径或名字前缀，
+  先把"从 trace 重建整棵树"这一步补回来（原来在 `report.py` 里，已随根目录清理删掉）。
 - **测试**：`tests/test_control.py`，五类动作各一条断言，
   尤其"人工加分支要过和模型同一套校验"。
 
@@ -202,7 +200,6 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
   树形按设计应该恒定，但**没有长样本证明**。
 - **怎么测**：真跑一个 30 分钟以上的任务，从 trace 的 `alloc_in` / `leaf_in`
   payload 里量每次 prompt 的长度，看它随深度/节点数怎么变。
-  `bench.py` 有骨架，没跑过。
 - ⚠️ **唯一可能让它涨的地方**：先例/能力注入现在随命中数增长
   （实测一次检索命中 7–23 条、1.4K–4.4K 字）。这个必须实测。
 
@@ -212,15 +209,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 - 看三件事：会不会真的问用户（而不是自己编一个目标）；
   谈出来的 `accept` 有没有可测物理量；该 `blocked` 的时候会不会硬编一个假目标。
 
-### ⑤ `evolve.py` 的持久化决策（我给不出答案，留给你）
-
-- 它现在把变异出来的提示词写成**项目根目录**的 `prompt_gen%d.txt`，
-  **没有落回 `prompts/alloc.md`**。它是唯一改提示词的地方，
-  所以"接受一个候选"到底该不该直接改 `prompts/` 下的文件，是个需要你定的策略。
-- 它还很旧：已经被我修掉的（`PROMPT["decide"]` 的 KeyError、老协议的字段名守卫）
-  只是让它别一跑就崩；**它本身仍然没跑过一次真验证**。
-
-### ⑥ 小项
+### ⑤ 小项
 
 - 无进展检测的阈值 3 / 5 是**拍的**，没有依据
 - `EXTERNAL_CLASSES` 是硬编码的四类（在 `tree/node.py`，和 `VIEW` 放一起）；
@@ -230,18 +219,18 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 - **检索的语义局限**：现在是词重叠（中文 2-gram + 拉丁前缀 + 数字），噪音还在。
   实测：查询"回测 扣费后 正期望"命中了"从任务配置或上下文中获取**期望**余额A的具体数值"。
   出路已定（偏召回 + `cap_outcome` 反馈 + 模型判断一次），但没做成一个可度量的东西。
-- **兼容代码的清理窗口**：`index.py` / `mine.py` / `report.py` 为了读 2026-09 之前的老 trace，
-  都双读中英文键。哪天确定不再需要读老 trace，这三处可以删掉一半。
+- **兼容代码的清理窗口**：`index.py` 为了读 2026-09 之前的老 trace，
+  双读中英文键。哪天确定不再需要读老 trace，这里可以删掉一半。
 
 ---
 
-## 6. 测试（129 个断言，全离线）
+## 6. 测试（139 个断言，全离线）
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
-| `tests/test_protocol.py` | 31 | 拆/不拆、门槛、证据降级、必填项与 `conc_range` 形状被拒、长字段原样通过、`keywords` 出生即检索、无进展停下、分配节点没有 execute |
-| `tests/test_caps.py` | 41 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来 |
-| `tests/test_index.py` | 18 | 返回路径、同脉去重、老格式兼容、排除自己、带出工作目录、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
+| `tests/test_protocol.py` | 34 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、长字段原样通过、`keywords` 出生即检索、无进展停下、分配节点没有 execute |
+| `tests/test_caps.py` | 46 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
+| `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
 | `tests/test_intake.py` | 20 | 入口：没可测物理量的根被打回、问的同时必须给建议、交合规根、不该开工就交 blocked、重复 5 次收手、闸门逐条说不 |
 
@@ -318,6 +307,27 @@ for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
 
 19. **文档要分离。** `docs/DESIGN.md` 只写设计与不变量（不讲进度），
     `docs/HANDOVER.md`（本文）只写进度与交接（不讲设计）。混在一起两边都读不下去。
+
+20. **先例的"工作目录"是个陷阱（实测，一次真实跑）。** 渲染里写
+    `工作目录: <老树目录>`，模型会把它抄进子任务的详情当"当前工作目录"，
+    于是 `hello.py` 被写进了一棵早就不该再写的老树里，而进程 cwd 其实在别处 ——
+    "产出只落工作区"这条不变量当场破了。
+    → 规矩：**先例的目录只有在等于当前 cwd 时才叫"工作目录"**；
+    否则只能说"先例的数据在那边（只读）"。工作目录只有 `TREE_WORKSPACE`
+    一个来源（`main.py` 里没有任何别的入口），提示词里不需要让模型选。
+
+21. **`contract_problems` 拿 cwd 去核对 `func` 里的文件引用，有两个洞：**
+    ① 正则只从字母数字开头，把绝对路径的前导 `/` 吃掉了，`/a/b/x.py`
+    被当成相对路径去 cwd 里找，**永远找不到**（实测 5 轮 `contract_bad`，白烧 5 万 token）；
+    ② `cd sub && python3 x.py` 被判成"不是一条能直接执行的命令"，
+    虽然它就是一条能直接粘上跑的命令。
+    → 规矩：引用文件的正则要收前导 `/`，相对路径按工作区解析，
+    `cd` 之后按 `cd` 到的目录解析；`cd` 目录不存在要单独报出来。
+
+22. **证据复核不能只看最后一轮。** `_evidence_ok` 只取 `attempts[-1].results`，
+    而最后一轮常常是**被拒的一次分配**（`_balk` 写的 attempt 里根本没有 `results` 键），
+    于是上面一轮真跑过的子任务名被判成"编出来的"，一次本该满足的结论被降级成未满足。
+    → 规矩：证据引自**任何一轮**分配出来的子节点都算数。
 
 ---
 

@@ -30,8 +30,9 @@ class FakeIndex:
     def __init__(self):
         self.qs = []
 
-    def search(self, qs):
+    def search(self, qs, workspace=None):
         self.qs.append(list(qs))
+        self.workspace = workspace
         return [], "[先例] 假的老树"
 
 
@@ -77,12 +78,31 @@ class Scripted:
                 return json.dumps({"conclusion": {"verdict": "满足",
                                                    "text": "我发誓真的做完了",
                                                    "evidence": ["凭良心说的"]}})
+            if name.startswith("EARLY"):
+                # 第一轮拆出来的孩子：真的做过、真的出过结论
+                if fresh:
+                    return json.dumps({"action": {"tool": "bash",
+                                                   "args": {"cmd": "echo early"}}})
+                return json.dumps({"conclusion": {
+                    "verdict": "满足", "text": "早期子任务干完了",
+                    "evidence": ["第1次观测"]}})
             if self.mode == "many" and fresh:
                 return json.dumps({"action": {"tool": "bash", "args": {"cmd": "echo sib"}}})
             return json.dumps({"conclusion": {"verdict": "满足", "text": "兄弟干完了",
                                                "evidence": ["第1次观测"]}})
 
         # ── 分配节点
+        if self.mode == "recite":
+            # 真跑过的孩子回来后，又发了一次用不了的分配（被代码拒），
+            # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
+            if attempts == 0:
+                return json.dumps({"children": [kid(
+                    "EARLY", "2026-12-31 的权益读数已取到")]}, ensure_ascii=False)
+            if attempts == 1:
+                return json.dumps({})          # 顶层键都没有 → 当场被拒
+            return json.dumps({"conclusion": {"verdict": "满足",
+                                               "text": "下层都回来了",
+                                               "evidence": ["EARLY"]}})
         if self.mode == "many":
             if attempts >= 3:
                 return json.dumps({"conclusion": {"verdict": "未满足",
@@ -189,6 +209,17 @@ def main():
     ok &= line("判定变成未满足", noev.verdict == "未满足")
 
     print("=" * 80)
+    print("D2. 证据引自**上一轮**的子节点，也算指到了真东西")
+    root, reg, recs, _ = go("recite")
+    early = [n for n in reg.values() if n.name == "EARLY"]
+    print("  EARLY 的判定: %s | 根的判定: %s"
+          % (early[0].verdict if early else "?", root.verdict))
+    ok &= line("早期子节点真的跑过", bool(early) and early[0].verdict == "满足")
+    ok &= line("末轮是被拒那次（没有 results）",
+               bool(root.attempts) and "results" not in root.attempts[-1])
+    ok &= line("证据引更早一轮的孩子 → 不降级", root.verdict == "满足")
+
+    print("=" * 80)
     print("E. 次数不限，但每次都看得见")
     root, reg, recs, _ = go("many")
     n_attempts = len(root.attempts)
@@ -258,7 +289,7 @@ def main():
     ok &= line("根没有上层 → 用它自己的名字+验收标准查",
                any(qs and "ROOT" in qs[0] for qs in fake.qs))
     ok &= line("每个节点一条 precedent 记录（不再有「先例」这个动作）",
-               len(pre) == len(regH) and '"先例"' not in R.ALLOC_SYS)
+               len(pre) == len(regH) and '"先例"' not in R.PROMPT["alloc"])
     # 上层给的 conc_range / keywords 必须**真的出现在下层的提示词里**。
     # 提示词里只写"如 [100,500]"是不够的 —— 那是举例，不是上层的判断。
     gin = [r["payload"] for r in recsH

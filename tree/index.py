@@ -134,8 +134,12 @@ class TreeIndex:
                     self.stats[n.verdict] += 1
 
     # ---------------------------------------------------------------- 检索
-    def search(self, queries):
+    def search(self, queries, workspace=None):
         """queries 是多组参数（LLM 自己定的不同说法/侧面）。返回 (命中, 文本)。
+
+        workspace：**当前**工作目录（就是进程 cwd）。先例自己的目录只有跟它
+        相同时才写进提示词 —— 否则模型会把一个死目录抄进子任务里当"当前
+        工作目录"，产出就落到别处去了（实测：hello.py 被写进了一棵老树里）。
 
         不设 top-k、不设总量封顶：实测词法匹配本身就很克制
         （真实查询命中 7–23 条、1.4K–4.4K 字）。命中多少就给你多少，
@@ -184,7 +188,7 @@ class TreeIndex:
                 continue
             seen_chains.add(chain)
             picked.append(n)
-        return picked, self.render(picked)
+        return picked, self.render(picked, workspace)
 
     def chain_key(self, n):
         """按"树的哪一脉"去重 —— 往上走到深度 1 的那个节点。
@@ -237,7 +241,7 @@ class TreeIndex:
                 out.append("%s  - %s" % (pad, row))
         return out
 
-    def render(self, picked):
+    def render(self, picked, workspace=None):
         out = []
         for i, n in enumerate(picked, 1):
             lines = []
@@ -255,8 +259,16 @@ class TreeIndex:
                 lines.append("%s %s｜%s｜%s" % (tag, a.name, a.accept, res))
                 if a.verdict == "阻塞":
                     lines.extend(self._blocked_detail(a, "  " * (j + 1) + "  "))
-            lines.append("  工作目录: %s   出处: %s#%s"
-                         % (n.workspace or "?", os.path.basename(n.tree), n.id))
+            # 只有先例的目录**就是当前工作目录**时才能写成"工作目录"。
+            # 不同的话只能说清"数据在那边"，并明说不能当 cwd 用 ——
+            # 否则模型会照抄，产出去到一棵早就不该再写的老树里。
+            if workspace and n.workspace and n.workspace != workspace:
+                lines.append("  先例的数据在: %s（只读，不是你的工作目录；"
+                             "产出必须落在当前工作目录）   出处: %s#%s"
+                             % (n.workspace, os.path.basename(n.tree), n.id))
+            else:
+                lines.append("  工作目录: %s   出处: %s#%s"
+                             % (n.workspace or "?", os.path.basename(n.tree), n.id))
             s = "[先例 %d] %s" % (i, "\n".join(lines))
             out.append(s)
         return "\n\n".join(out)

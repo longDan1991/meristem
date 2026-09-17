@@ -24,28 +24,8 @@ from tree.node import Budget, Node, Trace
 from tree.run import render_tree, run
 
 
-def _ws_from_precedent(a, index):
-    """没显式指定工作目录时，先问老树：同一件事上次是在哪个目录干的。
-
-    这是 DESIGN §5.5 的第一条判据落到实处 —— **证据还指不指得动**：
-    只认磁盘上还在的目录，否则就用默认工作区。
-    不猜、不新建、不退回半个：目录没了就是证据指不动了。
-    """
-    try:
-        picked, _ = index.search(["%s %s" % (a.task, a.criteria)])
-    except Exception:
-        return None
-    for n in picked:                      # 按分数从高到低
-        if n.workspace and os.path.isdir(n.workspace):
-            print("[工作目录] 命中先例 %s#%s，沿用它的目录"
-                  % (os.path.basename(n.tree), n.id), flush=True)
-            return n.workspace
-    return None
-
-
 def main():
     cfg.load_env()
-    ws_default = cfg.workspace()
     ap = argparse.ArgumentParser()
     ap.add_argument("task", nargs="?", default="给我一个能赚大钱的A股量化系统")
     ap.add_argument("--criteria", "-c", default="期末账户权益 >= 本金 x 2",
@@ -58,9 +38,6 @@ def main():
                     help="默认 <工作区>/runs/<时间>-<任务>/trace.jsonl")
     ap.add_argument("--caps", default=cfg.caps_path(),
                     help="能力库（TREE_CAPS）。放工作区里，所以跨 session 复用")
-    ap.add_argument("--workspace", "-w", default=None,
-                    help="持久工作目录。不给就自己定：命中了先例就沿用先例的目录"
-                         "（TREE_WORKSPACE 里的代码和数据就还在），否则用 TREE_WORKSPACE")
     ap.add_argument("--index", default=cfg.index_glob(),
                     help="要索引的老树（TREE_INDEX）。执行树就是成果树")
     ap.add_argument("--progress", type=int, default=60, help="每多少秒打一行进度，0=关闭")
@@ -69,16 +46,16 @@ def main():
     ap.add_argument("--intake", action="store_true",
                     help="先过一遍入口：和用户把预期谈定，再交给根节点（用一次就退场）")
     a = ap.parse_args()
-    # 索引先建：选工作目录要用它（命中先例 → 沿用它的目录，DESIGN §5.5）。
-    # exclude 只对显式 --trace 有意义 —— 那时它可能指向一棵已经存在的树。
-    index = TreeIndex(sorted(glob.glob(a.index)),
-                      exclude=[a.trace] if a.trace else [])
-    if a.workspace is None:
-        a.workspace = _ws_from_precedent(a, index) or ws_default
+    # 工作目录只有一个来源：TREE_WORKSPACE。没有默认值、没有先例可改、没有参数可绕。
+    # 先例只提供“那里有什么”，不提供“你该在哪干活”。
+    ws = os.path.abspath(cfg.workspace())
     if not a.trace:
         slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"),
                           hashlib.sha1(a.task.encode("utf-8")).hexdigest()[:6])
-        a.trace = os.path.join(a.workspace, "runs", slug, "trace.jsonl")
+        a.trace = os.path.join(ws, "runs", slug, "trace.jsonl")
+    # exclude 只对显式 --trace 有意义 —— 那时它可能指向一棵已经存在的树。
+    index = TreeIndex(sorted(glob.glob(a.index)),
+                      exclude=[a.trace] if a.trace else [])
 
     if a.mock or not os.environ.get("TREE_API_KEY"):
         llm = MockLLM(max_depth=a.mock_depth)
@@ -118,8 +95,7 @@ def main():
     print("[验收标准] %s" % a.criteria, flush=True)
     print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
     print("[并发] %d" % a.workers, flush=True)
-    # 持久工作目录：同一个任务族共用，上次写的代码和数据就还在
-    ws = os.path.abspath(a.workspace)
+    # 持久工作目录：TREE_WORKSPACE，agent 的 cwd。上次写的代码和数据就还在。
     os.makedirs(ws, exist_ok=True)
     os.chdir(ws)
     print("[工作目录] %s" % ws, flush=True)

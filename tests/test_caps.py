@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 from tree.caps import Caps                            # noqa: E402
-from tree.effects import effects_of                   # noqa: E402
+from tree.effects import contract_problems, effects_of   # noqa: E402
 from tree.mine import mine_trace as mine_caps         # noqa: E402
 from tree.node import Node, Trace                     # noqa: E402
 from tree import run as R                             # noqa: E402
@@ -339,6 +339,38 @@ def main():
         print("     %s | 用法 %s" % (e["does"], e["how"]["cmd"]))
     ok &= line("内部文件不用给完整契约也能过", n4.verdict == "满足")
     ok &= line("内部文件不进库（一个入口一条能力）", len(cs4) == 1)
+    os.chdir(ROOT)
+
+    print("=" * 78)
+    print("G. 契约核对：绝对路径、`cd` 后的相对路径、URL 不算文件")
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "sub"))
+    open(os.path.join(d, "sub", "hello.py"), "w").close()
+    open(os.path.join(d, "hello.py"), "w").close()
+    abs_func = "python3 %s/hello.py" % d
+    ok &= line("绝对路径（带前导 /）不被当成相对路径",
+               not contract_problems("hello.py",
+                                     {"type": "脚本", "name": "x",
+                                      "func": abs_func}, base=d))
+    ok &= line("cd 进子目录后的相对路径按子目录算",
+               not contract_problems("hello.py",
+                                     {"type": "脚本", "name": "x",
+                                      "func": "cd sub && python3 hello.py"},
+                                     base=d))
+    ok &= line("`cd sub && ...` 本身算一条能跑的命令",
+               not [p for p in contract_problems("hello.py",
+                                                {"type": "脚本", "name": "x",
+                                                 "func": "cd sub && python3 hello.py"},
+                                                base=d) if "不是一条能直接执行" in p])
+    bad = contract_problems("hello.py", {"type": "脚本", "name": "x",
+                                         "func": "cd nope && python3 hello.py"}, base=d)
+    ok &= line("cd 到不存在的目录 → 报出来",
+               any("cd 目录不存在" in p for p in bad), str(bad))
+    ok &= line("URL 里的主机/路径不被当文件检查",
+               not [p for p in contract_problems("hello.py",
+                                                 {"type": "脚本", "name": "x",
+                                                  "func": "curl -s https://api.example.com/v1/quote.json"},
+                                                 base=d) if "入口不存在" in p])
     os.chdir(ROOT)
 
     print("=" * 78)

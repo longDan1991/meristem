@@ -92,11 +92,21 @@ CONTRACT_KEYS = ("type", "name", "func", "args", "return", "external")
 # func 必须是一条**能直接粘上就执行**的命令，不是一句描述。
 # 实测模型会写"执行 bash sum.sh 即可运行，将结果写入 sum.txt"——那是给人看的，
 # 不是给复用者用的。
+# 允许开头的 `cd <dir> &&`：它就是一条能直接跑的命令，
+# 拦掉它会让 `cd sub && python3 x.py` 被冤枉成"不是命令"。
 RUNNABLE_RE = re.compile(
-    r"^\s*(?:sudo\s+)?(?:python3?|node|bash|sh|zsh|ruby|perl|curl|wget|make|"
+    r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)?(?:sudo\s+)?"
+    r"(?:python3?|node|bash|sh|zsh|ruby|perl|curl|wget|make|"
     r"docker|npm|npx|pip3?|uv|poetry|go|cargo|java)\b|^\s*\./|^\s*/|^\s*\$\s+")
 # type 属于这几类的，func 必须是一条命令
 RUNNABLE_TYPES = ("程序", "脚本", "工具", "服务", "命令", "库", "模块", "cli", "CLI")
+
+# func 里引用到的文件：**开头那个 / 必须收进来**。之前的写法把绝对路径的
+# 前导 / 丢了，于是 /a/b/hello.py 被当成相对路径去 cwd 里找，永远找不到 ——
+# 实测连续 5 轮报"入口不存在"，白烧 5 万 token。
+FILE_REF_RE = re.compile(r"/?[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,4}")
+URL_IN_FUNC_RE = re.compile(r"\b(?:https?|ftp)://\S+")
+CD_RE = re.compile(r"^\s*cd\s+(\S+?)\s*(?:&&|;|$)")
 
 
 def is_runnable(contract):
@@ -118,9 +128,14 @@ def contract_of(args):
     return c
 
 
-def contract_problems(path, contract):
+def contract_problems(path, contract, base=None):
     """能机械核对的那部分。不自动跑它（跑会带来副作用），
-    只核对它声称的入口真的存在、func 是不是一条能跑的命令、该填的填了。"""
+    只核对它声称的入口真的存在、func 是不是一条能跑的命令、该填的填了。
+
+    base：相对路径（含 `cd sub`）按它解析。默认进程 cwd —— 就是工作区。
+    """
+    base = base or os.getcwd()
+    root = base          # 工件本体和 path 永远按工作区算，不跟着 func 里的 cd 走
     problems = []
     ctype = contract.get("type", "")
     internal = ctype == "内部"
@@ -134,15 +149,26 @@ def contract_problems(path, contract):
                 "type 是「%s」，但 func 不是一条能直接执行的命令"
                 "（要以 python3 / bash / ./ 之类开头）：%r"
                 % (ctype, str(contract.get("func"))))
-    for ref in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,4}", 
-                          str(contract.get("func") or "")):
-        if not os.path.exists(ref):
+    func = str(contract.get("func") or "")
+    cd = CD_RE.match(func)
+    if cd:
+        here = os.path.join(base, cd.group(1))
+        if not os.path.isdir(here):
+            problems.append("func 里的 cd 目录不存在: %s" % cd.group(1))
+        else:
+            base = here          # func 里的相对路径是按 cd 后的目录算的
+    # URL 里的 host/path 不是文件，别拿它们去做存在性检查
+    scanned = URL_IN_FUNC_RE.sub(" ", func)
+    for ref in FILE_REF_RE.findall(scanned):
+        if not os.path.exists(ref if ref.startswith("/")
+                              else os.path.join(base, ref)):
             problems.append("func 里引用的入口不存在: %s" % ref)
     bad = [x for x in (contract.get("external") or [])
            if x not in EXTERNAL_CLASSES]
     if bad:
         problems.append("external 只认这几类: %s（收到 %s）"
                         % (" / ".join(EXTERNAL_CLASSES), bad))
-    if path and not os.path.exists(path):
+    if path and not os.path.exists(path if path.startswith("/")
+                                  else os.path.join(root, path)):
         problems.append("path 指向的文件不存在: %s" % path)
     return problems
