@@ -120,15 +120,20 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 ## 3. 已经做完的（留档，别重复做）
 
 - **✅ 入口**（`prompts/intake.md` + `tree/intake.py`）：根节点的"上层"只用一次 ——
-  和用户把预期谈成 `name/detail/accept/keywords/conc_range`，或交一条正式的 `blocked`。
-  问用户那一轮必须同时给建议（`{"ask":{"question","suggest"}}`），光问不给建议会被代码打回。
-  它没有手（没有 bash/read/write），产物过 `validate_root`（= `_clean_spec` +
-  "accept 必须有可测物理量"）：缺字段、没有可测物理量都当场打回并说清为什么；
-  同一份错或同一个问题重复 5 次就收手。交谈记录不存 —— 结论已落成根节点的形式字段。
+  **只有一个出口**：把用户的话谈成 `name/detail/accept/keywords/conc_range`。
+  没有 `blocked` 出口（行不行是树跑出来的事实，不是入口聊出来的判断）；
+  **对话的形式不归代码管**：一次问几件事、带不带建议、问几轮，都是模型的事 ——
+  代码不认识"回合数"，也不数"同一个问题问了几次"（这些曾经都有，全是看模型犯错后
+  焊上去的，已删）。代码只认识出口：产物过 `validate_root`（= `_clean_spec` +
+  "accept 必须有可测物理量"），缺字段、没有可测物理量都当场打回**并把原因说给它**，
+  让它自己改。交流走 `{"ask":{"content":"..."}}`，`content` 原样送到用户面前
+  （不过 `norm()` —— 那是形式字段的规范化，会压掉换行）。
+  **用户不会给你验收标准**：那是入口的使命，不是用户的任务。
+  交谈记录不存 —— 结论已落成根节点的形式字段。
 - **✅ 终端会话**（`terminal/`）：`python3 main.py "..." -c "..." --intake`
   就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由走旁白，
   **回车只换行，空行才发送**（按 Ctrl-D 也一样：写了东西＝说完了，什么都没写＝中止），
-  发出去时明说「发出（N 行）」。Ctrl-D / Ctrl-C 中止时返回一条正式的 `blocked`，不抛 traceback。
+  发出去时明说「发出（N 行）」。Ctrl-D / Ctrl-C 中止时返回 `None`（中止不是结论），不抛 traceback。
   边界：`main.py` 不再自己 `input()`，`tree/intake.py` 不知道自己是 tty 还是脚本 ——
   由 `tests/test_tty.py` G 段守门。
 - **✅ bash 永远带超时且可见**（`tree/tools.py`）：默认 120 秒 / 上限 3600 秒，
@@ -218,7 +223,8 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 - `python3 main.py "帮我自动做视频赚钱" --intake`
 - 看三件事：会不会真的问用户（而不是自己编一个目标）；
-  谈出来的 `accept` 有没有可测物理量；该 `blocked` 的时候会不会硬编一个假目标。
+  谈出来的 `accept` 有没有可测物理量；它会不会自己提一条标准（而不是问用户要）；
+  看着做不成的事，它会不会老老实实谈成一件可验收的事。
 
 ### ⑤ 小项
 
@@ -243,7 +249,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tests/test_caps.py` | 46 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
 | `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_intake.py` | 20 | 入口：没可测物理量的根被打回、问的同时必须给建议、交合规根、不该开工就交 blocked、重复 5 次收手、闸门逐条说不 |
+| `tests/test_intake.py` | 22 | 入口：没可测物理量的根被打回、`content` 原样送到用户面前、对话形式自由（不带建议／一次问几件事／ask 直接是一句话）、**没有回合数与重复次数限制**、**只有一个出口（模型给 blocked 被打回）**、闸门逐条说不 |
 | `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
 | `tests/test_tty.py` | 29 | 终端会话：问→答→交棒、问题只显示一遍、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 

@@ -57,7 +57,7 @@ def main():
     src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
     line("没有默认任务", "给我一个能赚大钱的A股量化系统" not in src)
     line("没有默认验收标准", "期末账户权益" not in src)
-    line("种子只写用户真说了什么", "用户没有给" in src and "a.criteria if a.criteria" in src)
+    line("种子只写用户真说了什么", "用户没给" in src and "a.criteria if a.criteria" in src)
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

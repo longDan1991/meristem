@@ -1,4 +1,4 @@
-"""入口：把用户的一句话变成**根节点的形式化结构**，然后退场。
+"""入口：把用户的一句话谈成**根节点的形式化结构**，然后退场。
 
 只用一次，之后不留记忆 —— 因为结论已经落成根节点的形式字段了，
 而**树就是记忆**（DESIGN §2.1、§2.8）。
@@ -7,17 +7,20 @@
 这条路只做入口，产物必须过和分配节点**同一台闸门**（`_clean_spec` +
 "验收标准必须有可测物理量"），所以它不可能偷偷塞进树检查不了的东西。
 
-它也没有手：没有 bash / read / write。只问、只交形式。四条纪律：
-  ① 只能产出两种东西：能过闸门的 `root`，或一条正式的 `blocked` 结论。
-     问用户那一轮要**同时给建议**（`{"ask":{"question","suggest"}}`）——
-     用户说"你看着办"是常态，光问不给建议，这一轮就白聊。
-  ② 不合规的东西直接打回，并把**为什么**说给它听。
-  ③ 同一份用不了的东西、或者同一个问题，重复 ≥5 次就收手
-     （和树里同一个规矩，见 DESIGN §2.4）。
+它也没有手：没有 bash / read / write。只谈、只交形式。纪律只有两条：
+
+  ① 出口只有一个：能过闸门的 `root`。**没有"这个不该开工"这一条** ——
+     行不行不是聊出来的判断，而是树跑出来的事实（根节点自己会出 `阻塞` 结论）。
+     用户不再输入，就是中止（`ask` 那边抛出来），也不是一条结论。
+  ② 用不了的东西当场打回，并把**为什么**说给它听，让它自己改 ——
+     和树里同一个规矩：摆事实，不用计数器逼停。
+
+**对话的形式不归代码管。** 问几个问题、怎么问、要不要先复述一遍，
+都是模型的事 —— 它是在和真人说话，不是在填表。代码不认识"回合数"，
+也不规定"一次只能问一个"，只在出口校验产物。
 """
 
 from .llm import parse_json
-from .node import norm
 from .prompts import INTAKE_SYS
 from .run import _clean_spec, anchors
 
@@ -35,12 +38,16 @@ def validate_root(spec):
 
 
 def intake(llm, msg, ask, on_say=None):
-    """和用户把预期谈定。返回 {"root": {...}} 或 {"blocked": {...}}。
+    """和用户把预期谈定。**只有一个出口：`{"root": {...}}`。**
 
-    ask(question) -> 用户的回答（真跑时就是 input()，测试里换成脚本）。
-    on_say(text)   -> 可选的**旁白**回调：打回理由、"这个问题问过 3 次了" 这类。
-                      问题与建议只走 ask 通道 —— 两条通道分开，
-                      终端才不会把同一个问题显示两遍。
+    ask(content)   -> 用户的回答（真跑时就是 input()，测试里换成脚本）。
+                      拿到的是模型 `ask.content` 的**原文**，代码不改写它。
+    on_say(text)   -> 可选的**旁白**回调：只有打回理由走这里。
+                      交流内容走 ask 通道 —— 两条通道分开，
+                      终端才不会把同一句话显示两遍。
+
+    用户中止（不再输入）由 ask 那边抛 EOFError/KeyboardInterrupt 出来，
+    这里不拦 —— 中止不是结论。
     """
     def say(t):
         if on_say:
@@ -48,69 +55,39 @@ def intake(llm, msg, ask, on_say=None):
 
     msgs = [{"role": "system", "content": INTAKE_SYS},
             {"role": "user", "content": msg}]
-    asked, bad = {}, {}
 
-    for _ in range(200):                  # 兜底，防止实现出错时真的转不出去
+    while True:
         text = llm.chat(msgs, temperature=0.3)
-        d, why = None, None
+
+        def again(why):
+            """交回来的东西用不了：把原因摆出来让它自己改（不是计数器）。"""
+            say("（入口交的东西用不了：%s）" % why)
+            msgs.append({"role": "assistant", "content": text})
+            msgs.append({"role": "user",
+                         "content": "这样不行：" + why + " 改一次再给。"})
+
         try:
             d = parse_json(text)
         except Exception as e:
-            why = "输出必须是一个 JSON 对象（%r）" % e
+            again("输出必须是一个 JSON 对象（%r）" % e)
+            continue
 
-        if d is not None:
-            a = d.get("ask")
-            if a is not None:
-                q, sug = "", ""
-                if isinstance(a, dict):
-                    q, sug = norm(a.get("question")), norm(a.get("suggest"))
-                    if not q or not sug:
-                        why = ("ask 里的 question 和 suggest 都必须有 —— "
-                               "问的同时要给一个能直接用的建议")
-                else:
-                    # 光问不给建议，用户只能说"你看着办"，这一轮就白聊
-                    why = ('ask 要写成 {"ask":{"question":"...","suggest":"..."}}'
-                           " —— 问的同时必须给出你的建议")
-                if not why:
-                    asked[q] = asked.get(q, 0) + 1
-                    n = asked[q]
-                    if n >= 3:
-                        say("（这个问题你已经问过 %d 次了 —— 用户答不上来，"
-                            "说明这件事现在还不成立，该给 blocked 了。）" % n)
-                    if n >= 5:
-                        return {"blocked": {
-                            "verdict": "阻塞",
-                            "text": "同一个问题问了 %d 次，用户答不上来：%s" % (n, q),
-                            "evidence": []}}
-                    # 建议要跟着问题一起送到用户面前
-                    a2 = ask("%s\n（我的建议：%s）" % (q, sug))
-                    msgs.append({"role": "assistant", "content": text})
-                    msgs.append({"role": "user", "content": str(a2)})
-                    continue
+        # 继续交流。`content` 原样送到用户面前 —— 代码不改写它、不往里添字：
+        # 说什么、带不带建议、一次说几件事，都是模型的事。
+        # 这里**不过 norm()**：那是形式字段的规范化（会压掉换行），
+        # 而这是一段说给人听的话，分行是它意思的一部分。
+        a = d.get("ask")
+        if a is not None:
+            raw = a.get("content") if isinstance(a, dict) else a
+            a2 = ask(str(raw or "").strip())
+            msgs.append({"role": "assistant", "content": text})
+            msgs.append({"role": "user", "content": str(a2)})
+            continue
 
-            # `why is None` 这个条件不能少：上面 ask 那条分支已经判过
-            # "用不了"了，这一链再走一遍会把理由覆盖成"只能给三个键之一"。
-            if why is None and isinstance(d.get("root"), dict):
-                spec, why = validate_root(d["root"])
-                if spec is not None:
-                    return {"root": spec}
-
-            elif why is None and isinstance(d.get("blocked"), dict):
-                b = d["blocked"]
-                return {"blocked": {"verdict": norm(b.get("verdict")) or "阻塞",
-                                    "text": norm(b.get("text")),
-                                    "evidence": b.get("evidence") or []}}
-            elif why is None:
-                why = "只能给 ask / root / blocked 三个键之一"
-        # 交回来的东西用不了：说清原因让它改；同一份错重复 ≥5 次就收手
-        bad[why] = bad.get(why, 0) + 1
-        say("（入口交的东西用不了：%s）" % why)
-        if bad[why] >= 5:
-            return {"blocked": {
-                "verdict": "阻塞",
-                "text": "入口连续 %d 次交不出能用的东西：%s" % (bad[why], why),
-                "evidence": []}}
-        msgs.append({"role": "assistant", "content": text})
-        msgs.append({"role": "user", "content": "这样不行：" + why + " 改一次再给。"})
-
-    return {"blocked": {"verdict": "阻塞", "text": "入口没有收敛", "evidence": []}}
+        if isinstance(d.get("root"), dict):
+            spec, why = validate_root(d["root"])
+            if spec is not None:
+                return {"root": spec}
+        else:
+            why = "只能给 ask 或 root 两个键之一"
+        again(why)

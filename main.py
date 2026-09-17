@@ -89,10 +89,12 @@ def main():
     # 不许拿默认值充数。
     if a.intake:
         seed = "用户的任务: %s" % (a.task or "（他没说任务）")
-        seed += ("\n用户给的验收标准: %s" % a.criteria if a.criteria else
-                 "\n验收标准: 用户没有给 —— 这是唯一真正重要的一条，你要问他。")
+        seed += ("\n用户顺口提了一个验收标准: %s（可以参考，但最后写成什么由你形式化）"
+                 % a.criteria if a.criteria else
+                 "\n验收标准: 用户没给 —— 正常，真用户都不会给。"
+                 "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。")
         r = converse(llm, seed)
-        if "blocked" in r:
+        if r is None:                 # 用户中止了：没开工，也没有结论
             return 1
         s = r["root"]
         root = Node(name=s["name"], detail=s["detail"], notes=s["notes"],

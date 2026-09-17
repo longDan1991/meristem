@@ -5,7 +5,7 @@
 否则"什么算合规"就有了两个事实。
 
 两条通道分开，终端才不会把同一个问题显示两遍：
-  - 问题与建议走 `ask` 通道，由这里的提示符呈现；
+  - 交流内容（`ask.content`，问题/建议/几件事都在里面）走 `ask` 通道；
   - 旁白（打回理由、"这个问题你已经问过 3 次了"）走 `on_say` 通道。
 
 一条硬纪律：**回车永远不发送。** 发送是一个不含糊的独立动作（空行）。
@@ -68,8 +68,8 @@ def _read_answer(read, out):
 
 
 def converse(llm, seed, read=None, out=None):
-    """把预期谈定。返回 `tree.intake.intake()` 的原样结果：
-    `{"root": {...}}` 或 `{"blocked": {...}}`。
+    """把预期谈定。谈成了返回 `{"root": {...}}`；用户在终端上中止则返回 `None`
+    （中止不是结论：只是没开工）。
 
     read(prompt) -> 用户敲的一行；out(text) -> 显示一行。
     默认就是真终端（提示符 + input / print），测试把脚本塞进来。
@@ -89,16 +89,10 @@ def converse(llm, seed, read=None, out=None):
         r = intake(llm, seed, ask=ask, on_say=lambda t: out("  " + str(t)))
     except _Quit:
         out("\n[入口] 你在终端上中止了，没有开工。")
-        return {"blocked": {"verdict": "阻塞",
-                            "text": "用户在终端上中止了入口对话（Ctrl-D / Ctrl-C）",
-                            "evidence": []}}
+        return None
 
-    if "root" in r:
-        s = r["root"]
-        out("\n[入口交棒] %s" % s["name"])
-        out("           验收: %s" % s["accept"])
-        out("           检索键: %s" % "、".join(s["keywords"] or []))
-    else:
-        out("\n[入口判定] %s：%s"
-            % (r["blocked"]["verdict"], r["blocked"]["text"]))
+    s = r["root"]
+    out("\n[入口交棒] %s" % s["name"])
+    out("           验收: %s" % s["accept"])
+    out("           检索键: %s" % "、".join(s["keywords"] or []))
     return r
