@@ -9,7 +9,7 @@
   F. 必填项缺一个 → 当场被拒；长字段原样通过（代码不做任何长度检查）
   G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
   H. 检索键：分配节点一出生就自动查老树，叶子只查能力库
-  I. 注入面：文档点名的段落 == 真渲染的段落；意图链两种节点都有
+  I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落
 """
 
 import json
@@ -57,7 +57,7 @@ class Scripted:
     def chat(self, messages, temperature=0.2):
         self.calls += 1
         user = messages[-1]["content"]
-        name = (re.search(r"任务名:\s*(.+?)\n", user) or [None, "?"])[1].strip()
+        name = (re.search(r"^name:\s*(.+)$", user, re.M) or [None, "?"])[1].strip()
         fresh = "(还没有)" in user
         m = re.search(r"本层已有尝试: 共 (\d+) 次", user)
         attempts = int(m.group(1)) if m else 0
@@ -337,9 +337,9 @@ def main():
     gin = [r["payload"] for r in recsH
            if r["kind"] == "leaf_in" and r.get("node") == leaf.id]
     ok &= line("上层给的 conc_range 落到了孩子提示词里（不是举例）",
-               bool(gin) and "结论字数要求（上层给的）: [100, 500]" in gin[0])
+               bool(gin) and "conc_range: [100, 500]" in gin[0])
     ok &= line("上层给的 keywords 也落到了孩子提示词里",
-               bool(gin) and "检索键（上层给的" in gin[0])
+               bool(gin) and "keywords: [" in gin[0])
     ok &= line("叶子的提示词里没有老树（它只要工具）",
                bool(gin) and "假的老树" not in gin[0])
     min_ = [r["payload"] for r in recsH
@@ -348,7 +348,9 @@ def main():
                bool(min_) and "假的老树" in min_[0])
 
     print("=" * 80)
-    print("I. 注入面：文档点名的段落 == 真渲染的段落；意图链两种节点都有")
+    print("I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
+    KEYS = ("name", "detail", "notes", "accept", "kind", "gate",
+            "keywords", "conc_range")
     # 文档承诺给模型看的段落就这几样；在这里**双向**核对：
     #   文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
     SECTIONS = ("先例", "现成做法", "上层意图链", "本层已有尝试",
@@ -366,18 +368,36 @@ def main():
         nI = filled(kind_, [["ROOT", "把量化系统做出来"],
                             ["MID", "摸清数据这条线"]])
         text = nI.render()
+        head_keys = [ln.split(":")[0] for ln in nI.header().splitlines()]
         doc = [s for s in SECTIONS if s in PROMPT[which]]
         got = [s for s in SECTIONS if s in text]
-        print("  %s: 文档点名 %s" % (which, doc))
-        print("       真渲染 %s" % got)
+        print("  %s: 收到的行首 %s" % (which, head_keys))
+        print("       文档点名 %s / 真渲染 %s" % (doc, got))
+        ok &= line("%s 收到的行首 == 自己要写的那 8 个键（同构）" % which,
+                   head_keys == list(KEYS), "%s" % head_keys)
+        ok &= line("%s: 收到的 8 个键在文档里都点了名" % which,
+                   all(k in PROMPT[which] for k in KEYS))
         ok &= line("%s 的文档段落与渲染段落一致" % which, doc == got)
-        ok &= line("%s: 「结论字数要求」在文档与渲染里都在" % which,
-                   "结论字数要求" in PROMPT[which]
-                   and "结论字数要求（上层给的）:" in nI.header())
+        ok &= line("%s: conc_range 在文档与渲染里都在" % which,
+                   "conc_range" in PROMPT[which]
+                   and "conc_range: [100, 500]" in nI.header())
         ok &= line("%s: 真值都渲染出来了（区间/检索键/意图链）" % which,
                    all(s in text for s in ("[100, 500]", "akshare",
                                            "ROOT: 把量化系统做出来",
                                            "MID: 摸清数据这条线")))
+    # 分配节点历史里的子任务也要用同一套键 —— 它看到的是自己写过的形式，
+    # 不是另一套中文标签。
+    nA = filled("dispatch", [])
+    nA.attempts.append({
+        "children": [{"name": "子任务A", "kind": "leaf", "gate": True,
+                      "accept": "A 2026-12-31 的读数", "keywords": ["akshare"],
+                      "conc_range": [100, 500]}], "results": []})
+    hist = nA.render_attempts()
+    print("  历史长这样: %s" % hist.splitlines()[-1].strip())
+    ok &= line("历史里的子任务用同一套键写（不再有中文标签）",
+               "name: 子任务A" in hist and "gate: true" in hist
+               and "conc_range: [100, 500]" in hist
+               and "验收标准:" not in hist and "[门槛]" not in hist)
     ok &= line("alloc 的两个出口 = children / conclusion",
                all(s in PROMPT["alloc"] for s in ("children", "conclusion")))
     ok &= line("leaf 的两个出口 = action / conclusion",

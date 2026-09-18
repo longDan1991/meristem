@@ -260,7 +260,7 @@ def step(nid, ctx):
         ok_parent = inherits(node.accept, s["accept"])
         ok_root = (not ra) or any(x in s["accept"] for x in ra)
         if not (ok_parent and ok_root):
-            reject = ("子任务的验收标准丢了可测物理量（缺 %s）—— 这是把任务换成了别的东西"
+            reject = ("子任务的 accept 丢了可测物理量（缺 %s）—— 这是把任务换成了别的东西"
                       % ", ".join(sorted(ra or anchors(node.accept))))
             trace.add(node.id, "criterion_drift",
                       {"child": s["name"], "accept": s["accept"],

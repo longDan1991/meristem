@@ -11,15 +11,18 @@
 想让它更保守，就把事实说得更清楚，而不是加一个上限。
 
 **这个文件只管格子的形状与视图**：
-字段怎么定义、给模型看时怎么截、渲染成什么中文标签。
+字段怎么定义、给模型看时怎么截、渲成什么形状（行首是键，和它写回去的同一套）。
 "这个格子填得合不合规"是 `gate.py`；"落盘 / 调度"是 `runtime/`。
 
 **注入面是公开的**：`render()` 会渲哪几段、每段叫什么名字，`prompts/*.md` 里
 都逐段点了名（`tests/test_protocol.py` 的 I 段**双向核对**：文档说了没渲 =
-承诺落空；渲了文档没说 = 偷偷塞东西）。提示词文件是 system，被注入的那几行
-在**另一条 user 消息**里（`turn.ask`）—— 占位符不做任何模板替换。
+承诺落空；渲了文档没说 = 偷偷塞东西）。形式字段那几行的行首就是字段名，
+与模型自己要写的键是同一个词 —— "收到的东西与要交出去的东西同构"。
+提示词文件是 system，被注入的那几行在**另一条 user 消息**里（`turn.ask`）——
+占位符不做任何模板替换。
 """
 
+import json
 import uuid
 from dataclasses import dataclass, field
 
@@ -52,13 +55,30 @@ def norm(text):
     return " ".join(s.split())
 
 
-def range_txt(rng):
-    """结论字数区间的中文展示，如 [100, 500]。
+def as_json(v):
+    """值按 JSON 形状渲染（数组就是数组，假就是 false），空写 (无)。
 
-    区间在进 Node 之前已经过 `gate.parse_range`；这里只负责展示，
-    所以形状不对是**调用方的 bug**，当场炸出来而不是编一个字符串糊过去。
+    收到的行和模型要写出去的 JSON 必须是同一套值形状 —— 否则它得先猜
+    "逗号分隔的一串算不算数组"，而这正是漂移的开始。
     """
-    return "[%d, %d]" % (int(rng[0]), int(rng[1]))
+    if v is None or v == "" or v == []:
+        return "(无)"
+    return json.dumps(v, ensure_ascii=False)
+
+
+def spec_line(c):
+    """一次分配里的一个子任务 —— 按**它自己输出的那套键**列出来。
+
+    历史里看到的是自己写过的形式，不是另一套中文标签：同一个词在"收到的"
+    和"写回去的"两边指同一个东西，模型不用做翻译。
+    """
+    return " | ".join([
+        "name: %s" % (c.get("name") or "(无)"),
+        "kind: %s" % (c.get("kind") or "(无)"),
+        "gate: %s" % as_json(bool(c.get("gate"))),
+        "conc_range: %s" % as_json(c.get("conc_range")),
+        "keywords: %s" % as_json(c.get("keywords")),
+        "accept: %s" % (c.get("accept") or "(无)")])
 
 
 @dataclass
@@ -95,18 +115,24 @@ class Node:
 
     # ---------------------------------------------------------------- 视图
     def header(self):
-        out = ["任务名: %s" % (self.name or "(无)"),
-               "任务详情: %s" % (self.detail or "(无)"),
-               "注意事项: %s" % (self.notes or "(无)"),
-               "验收标准: %s" % (self.accept or "(无)")]
-        if self.conc_range:
-            out.append("结论字数要求（上层给的）: %s" % range_txt(self.conc_range))
-        if self.keywords:
-            # 查了什么就说什么：叶子不查老树（老树是"该怎么拆"的判据）。
-            what = "能力库" if self.kind == "leaf" else "老树和能力库"
-            out.append("检索键（上层给的，已据此查过%s）: %s"
-                       % (what, ", ".join(str(k) for k in self.keywords)))
-        return "\n".join(out)
+        """形式字段 —— **行首就是字段名**，和模型自己写给孩子的键一模一样。
+
+        这是"收到的东西与要交出去的东西同构"：同一个词既在收到的行首，
+        也在它输出的 JSON 里，中间没有"中文标签 → 键"的翻译层可漂移。
+        哪一行是谁给的（上层给的 / 程序查出来的）由 `prompts/*.md` 说，
+        不放进行内 —— 行内只留键和值。
+        """
+        return "\n".join([
+            "name: %s" % (self.name or "(无)"),
+            "detail: %s" % (self.detail or "(无)"),
+            "notes: %s" % (self.notes or "(无)"),
+            "accept: %s" % (self.accept or "(无)"),
+            "kind: %s" % (self.kind or "(无)"),
+            "gate: %s" % as_json(bool(self.gate)),
+            # 查了什么就说什么：叶子不查老树（老树是"该怎么拆"的判据），
+            # 那句话在 prompts 里说，这里只给键和值。
+            "keywords: %s" % as_json(self.keywords),
+            "conc_range: %s" % as_json(self.conc_range)])
 
     def render_lineage(self):
         """从根到自己的上层的意图链（程序物化的，不是上层下发的字段）。
@@ -135,15 +161,7 @@ class Node:
         for i, a in enumerate(shown, start=len(self.attempts) - len(shown) + 1):
             lines.append("  第 %d 次分配:" % i)
             for c in a.get("children", []):
-                bits = [c.get("name", "")]
-                if c.get("gate"):
-                    bits.append("[门槛]")
-                if c.get("conc_range"):
-                    bits.append("结论 %s" % range_txt(c["conc_range"]))
-                if c.get("keywords"):
-                    bits.append("检索键 %s" % ",".join(str(k) for k in c["keywords"]))
-                lines.append("    - %s｜验收标准: %s"
-                             % ("｜".join(bits), c.get("accept", "")))
+                lines.append("    - %s" % spec_line(c))
             if a.get("rejected"):
                 lines.append("    → 这次分配被代码拒了: %s" % a["rejected"])
                 continue
