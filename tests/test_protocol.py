@@ -8,7 +8,8 @@
   E. 次数不限：反复"再做一次"不被任何计数器阻止，而每次尝试都看得见
   F. 必填项缺一个 → 当场被拒；长字段原样通过（代码不做任何长度检查）
   G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
-  H. 检索键：孩子一出生就自动查老树（模型不用自己想起来要查）
+  H. 检索键：分配节点一出生就自动查老树，叶子只查能力库
+  I. 注入面：文档点名的段落 == 真渲染的段落；意图链两种节点都有
 """
 
 import json
@@ -88,12 +89,40 @@ class Scripted:
                 return json.dumps({"conclusion": {
                     "verdict": "满足", "text": "早期子任务干完了",
                     "evidence": ["第1次观测"]}})
+            if self.mode == "deep":
+                if fresh:
+                    return json.dumps({"action": {"tool": "bash",
+                                                   "args": {"cmd": "echo deep"}}})
+                return json.dumps({"conclusion": {
+                    "verdict": "满足", "text": "收盘价读到了",
+                    "evidence": ["第1次观测"]}})
             if self.mode == "many" and fresh:
                 return json.dumps({"action": {"tool": "bash", "args": {"cmd": "echo sib"}}})
             return json.dumps({"conclusion": {"verdict": "满足", "text": "兄弟干完了",
                                                "evidence": ["第1次观测"]}})
 
         # ── 分配节点
+        if self.mode == "deep":
+            # 三层：ROOT(分配) → MID(分配) → LEAF(叶子)，验意图链真的逐层加长
+            if name == "MID":
+                if fresh:
+                    return json.dumps({"children": [kid(
+                        "LEAF", "2026-12-31 的权益读数已取到",
+                        detail="读收盘价")]}, ensure_ascii=False)
+                return json.dumps({"conclusion": {"verdict": "满足",
+                                                   "text": "叶子回来了",
+                                                   "evidence": ["LEAF"]}},
+                                  ensure_ascii=False)
+            if not fresh:
+                return json.dumps({"conclusion": {"verdict": "满足",
+                                                   "text": "都回来了",
+                                                   "evidence": ["MID"]}},
+                                  ensure_ascii=False)
+            return json.dumps({"children": [kid(
+                "MID", "2026-12-31 的权益读数已取到", kind="dispatch",
+                detail="先把数据这条线摸清楚",
+                keywords=["akshare", "回测", "2026-12-31"])]},
+                ensure_ascii=False)
         if self.mode == "recite":
             # 真跑过的孩子回来后，又发了一次用不了的分配（被代码拒），
             # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
@@ -126,6 +155,10 @@ class Scripted:
             return json.dumps({"children": [{
                 "name": "缺验收标准的孩子", "detail": "d", "kind": "leaf",
                 "keywords": ["x"], "conc_range": [100, 500]}]})
+        if self.mode == "badkind":                  # kind 写成示例里的 "dispatch|leaf"
+            s = kid("kind 写错的孩子", "2026-12-31 的权益读数已取到")
+            s["kind"] = "dispatch|leaf"
+            return json.dumps({"children": [s]}, ensure_ascii=False)
         if self.mode == "badrange":                 # 下限比上限大
             return json.dumps({"children": [{
                 "name": "区间写错的孩子", "detail": "d", "notes": "",
@@ -141,8 +174,6 @@ class Scripted:
             kids[0]["detail"] = "很长" * 200
         if self.mode == "note":
             kids[0]["notes"] = "写在字段里放不下的判断依据。" * 50
-        if self.mode == "newkeywords":
-            kids[0]["keywords"] = ["akshare", "回测", "2026-12-31"]
         return json.dumps({"children": kids}, ensure_ascii=False)
 
 
@@ -240,6 +271,10 @@ def main():
     root3, reg3, recs3, _ = go("badrange")
     ok &= line("conc_range 形状不对（[500,100]）→ 被拒",
                "conc_range" in str(root3.attempts))
+    root5, reg5, recs5, _ = go("badkind")
+    print("  kind 写错的原因: %s" % str(root5.attempts)[:100])
+    ok &= line('kind 写成 "dispatch|leaf" → 被拒（不再默默当 dispatch）',
+               "rejected" in str(root5.attempts) and "kind" in str(root5.attempts))
     root4, reg4, recs4, _ = go("long")
     longest = max((len(n.detail) for n in reg4.values()), default=0)
     ok &= line("400 字的 detail 原样通过（代码不做长度检查）", longest == 400,
@@ -277,29 +312,88 @@ def main():
     ok &= line("停下时把原因写清楚", "没有新信息" in (root.conclusion or ""))
 
     print("=" * 80)
-    print("H. 检索键：孩子一出生就自动查老树（模型不用自己想起来要查）")
+    print("H. 检索键：分配节点一出生就自动查老树，叶子只查能力库")
     fake = FakeIndex()
-    rootH, regH, recsH, _ = go("newkeywords", index=fake)
-    g = [n for n in regH.values() if n.name == "GATE"][0]
+    _, regH, recsH, _ = go("deep", index=fake)
+    mid = [n for n in regH.values() if n.name == "MID"][0]
+    leaf = [n for n in regH.values() if n.name == "LEAF"][0]
+    n_dispatch = len([n for n in regH.values() if n.kind == "dispatch"])
     pre = [r for r in recsH if r["kind"] == "precedent"]
-    print("  程序发出的查询: %s" % fake.qs[:3])
-    print("  给孩子注入的先例: %s" % (g.precedents[0][:40] if g.precedents else "无"))
+    print("  程序发出的查询: %s" % fake.qs)
+    print("  给 MID 注入的先例: %s"
+          % (mid.precedents[0][:40] if mid.precedents else "无"))
     ok &= line("按上层给的 keywords 查了（不是模型自己想起来的）",
                any("akshare" in q for qs in fake.qs for q in qs))
-    ok &= line("命中结果直接进了孩子的提示词",
-               any("假的老树" in p for p in g.precedents))
     ok &= line("根没有上层 → 用它自己的名字+验收标准查",
                any(qs and "ROOT" in qs[0] for qs in fake.qs))
-    ok &= line("每个节点一条 precedent 记录（不再有「先例」这个动作）",
-               len(pre) == len(regH) and '"先例"' not in PROMPT["alloc"])
+    ok &= line("老树只给分配节点查（每个 dispatch 一条，叶子零条）",
+               len(pre) == n_dispatch > 0
+               and all(regH[r["node"]].kind == "dispatch" for r in pre)
+               and not leaf.precedents)
+    ok &= line("不再有「先例」这个动作（文档只把它当程序注入的东西）",
+               '"先例"' not in PROMPT["alloc"])
     # 上层给的 conc_range / keywords 必须**真的出现在下层的提示词里**。
     # 提示词里只写"如 [100,500]"是不够的 —— 那是举例，不是上层的判断。
     gin = [r["payload"] for r in recsH
-           if r["kind"] == "leaf_in" and r.get("node") == g.id]
+           if r["kind"] == "leaf_in" and r.get("node") == leaf.id]
     ok &= line("上层给的 conc_range 落到了孩子提示词里（不是举例）",
                bool(gin) and "结论字数要求（上层给的）: [100, 500]" in gin[0])
     ok &= line("上层给的 keywords 也落到了孩子提示词里",
                bool(gin) and "检索键（上层给的" in gin[0])
+    ok &= line("叶子的提示词里没有老树（它只要工具）",
+               bool(gin) and "假的老树" not in gin[0])
+    min_ = [r["payload"] for r in recsH
+            if r["kind"] == "alloc_in" and r.get("node") == mid.id]
+    ok &= line("命中结果进了分配节点的提示词",
+               bool(min_) and "假的老树" in min_[0])
+
+    print("=" * 80)
+    print("I. 注入面：文档点名的段落 == 真渲染的段落；意图链两种节点都有")
+    # 文档承诺给模型看的段落就这几样；在这里**双向**核对：
+    #   文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
+    SECTIONS = ("先例", "现成做法", "上层意图链", "本层已有尝试",
+                "观测历史", "可用工具")
+
+    def filled(kind_, lineage):
+        n = Node(name="N", detail="D", notes="X", accept="A 2026-12-31",
+                 kind=kind_, keywords=["akshare"], conc_range=[100, 500],
+                 lineage=lineage)
+        n.precedents.append("[先例] 假的老树")
+        n.caps.append("pip install akshare")
+        return n
+
+    for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
+        nI = filled(kind_, [["ROOT", "把量化系统做出来"],
+                            ["MID", "摸清数据这条线"]])
+        text = nI.render()
+        doc = [s for s in SECTIONS if s in PROMPT[which]]
+        got = [s for s in SECTIONS if s in text]
+        print("  %s: 文档点名 %s" % (which, doc))
+        print("       真渲染 %s" % got)
+        ok &= line("%s 的文档段落与渲染段落一致" % which, doc == got)
+        ok &= line("%s: 「结论字数要求」在文档与渲染里都在" % which,
+                   "结论字数要求" in PROMPT[which]
+                   and "结论字数要求（上层给的）:" in nI.header())
+        ok &= line("%s: 真值都渲染出来了（区间/检索键/意图链）" % which,
+                   all(s in text for s in ("[100, 500]", "akshare",
+                                           "ROOT: 把量化系统做出来",
+                                           "MID: 摸清数据这条线")))
+    ok &= line("alloc 的两个出口 = children / conclusion",
+               all(s in PROMPT["alloc"] for s in ("children", "conclusion")))
+    ok &= line("leaf 的两个出口 = action / conclusion",
+               all(s in PROMPT["leaf"] for s in ("action", "conclusion")))
+    ok &= line("叶子看不到「先例」（它只要工具）",
+               "先例" not in filled("leaf", []).render())
+    ok &= line("分配节点看得到「先例」",
+               "先例" in filled("dispatch", []).render())
+    ok &= line("根没有上层 → 不渲染意图链",
+               filled("dispatch", []).render_lineage() == "")
+    _, regI, recsI, _ = go("deep")
+    lin = [r["payload"] for r in recsI if r["kind"] == "leaf_in"
+           and regI[r["node"]].name == "LEAF"]
+    ok &= line("叶子的提示词里带着从根到它上层的整条意图链",
+               bool(lin) and "上层意图链" in lin[0] and "ROOT" in lin[0]
+               and "MID" in lin[0])
 
     print("=" * 80)
     print("全部通过" if ok else "有失败项")

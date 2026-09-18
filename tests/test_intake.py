@@ -175,6 +175,8 @@ def main():
             (root(keywords=[])["root"], "keywords 是空的"),
             (root(conc_range=[500, 100])["root"], "conc_range 形状不对"),
             (root(name="")["root"], "name 是空的"),
+            (root(kind="dispatch|leaf")["root"], "kind 写成示例里的两种之一"),
+            (root(kind="")["root"], "kind 没填"),
             (root(accept="")["root"], "accept 是空的")):
         out, why = validate_root(spec)
         print("  %-16s → %s" % (tag, why))

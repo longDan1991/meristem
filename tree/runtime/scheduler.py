@@ -51,7 +51,9 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
         # 出生即检索：键是**上层给的**（根没有上层，就用它自己的名字+验收标准）。
         # 检索不花 LLM 调用，也不问模型要不要查 —— 实测它没有理由去查，
         # 而真正贵的恰恰是大事（DESIGN §5.4）。
-        if index is not None:
+        # **老树只给分配节点查**：先例回答的是"这件事该怎么拆、当年卡在哪"，
+        # 而拆是分配节点的事；叶子要的是工具，老树对它只是噪音。
+        if index is not None and node.kind == "dispatch":
             qs = node.keywords or ["%s %s" % (node.name, node.accept)]
             picked, text = index.search(qs, workspace=os.getcwd())
             if text:
@@ -59,7 +61,8 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
             trace.add(node.id, "precedent",
                       {"queries": qs, "auto": True,
                        "hits": [p.id for p in picked], "chars": len(text)})
-        # 现成做法也在出生时塞进来：模型没有动机去主动找工具（它觉得自己都会，§4.3），
+        # 现成做法也在出生时塞进来（**所有节点**：叶子就是要动手的那个）：
+        # 模型没有动机去主动找工具（它觉得自己都会，§4.3），
         # 所以没有 need 这个动作 —— 程序按同一组检索键查能力库，直接给它。
         if caps is not None:
             q = " ".join(str(x) for x in
@@ -150,7 +153,9 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
             kids.append(Node(name=s["name"], detail=s["detail"], notes=s["notes"],
                              accept=s["accept"], kind=s["kind"], gate=s["gate"],
                              keywords=s["keywords"], conc_range=s["conc_range"],
-                             parent=parent.id, depth=parent.depth + 1))
+                             parent=parent.id, depth=parent.depth + 1,
+                             # 意图链只加一层，孩子不重新把祖先走一遍（§11）
+                             lineage=parent.lineage + [[parent.name, parent.detail]]))
         parent.children += [k.id for k in kids]
         return kids
 

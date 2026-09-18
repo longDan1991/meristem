@@ -1,7 +1,7 @@
 """闸门：形式字段上的机械校验。不采信自报，只核对指得到的东西。
 
 代码只做四件事（都在形式字段上，不是计数器）：
-  ① 规范化字段（**不切长度** —— 上限由提示词承诺，代码不再偷偷砍）
+  ① 规范化字段（**不切长度**；`kind` 只能是 dispatch / leaf，不给兜底）
   ② 子任务的验收标准必须携带父/根的可测物理量，否则这次分配当场被拒并记进尝试
   ③ 一次最多一个门槛；门槛不成立，其余子任务不启动
   ④ 判定"满足"却指不出证据 → 降级为"未满足"
@@ -67,12 +67,16 @@ def clean_spec(spec):
     必填：name / detail / accept / kind / keywords / conc_range。
     选填：notes —— 而且它**不参与老树检索**（§5.2：检索键要用可执行形状，
     自由发挥的判断依据放进去只会污染词法匹配）。gate 是个开关，默认 false。
+
+    必填就是真必填：`kind` 写错（或根本没写）当场拒，不默认成 dispatch ——
+    兜底会把"模型没说清"变成"叶子/分配节点"这个既成事实，错误就消失了。
     """
+    kind = norm(spec.get("kind"))
     out = {"name": norm(spec.get("name")),
            "detail": norm(spec.get("detail")),
            "notes": norm(spec.get("notes")),
            "accept": norm(spec.get("accept")),
-           "kind": "leaf" if norm(spec.get("kind")) == "leaf" else "dispatch",
+           "kind": kind,
            "gate": bool(spec.get("gate")),
            "keywords": parse_keywords(spec.get("keywords")),
            "conc_range": parse_range(spec.get("conc_range"))}
@@ -80,6 +84,10 @@ def clean_spec(spec):
     missing = [k for k in ("name", "detail", "accept") if not out[k]]
     if missing:
         why.append("缺必填项: " + ", ".join(missing))
+    # kind 不默默兜底成 dispatch：写 "dispatch|leaf" / "叶子" 不是非法值，
+    # 是**没填对**，兜底会把错误藏起来（提示词也写着它必填）。
+    if kind not in ("dispatch", "leaf"):
+        why.append("kind 必须是 dispatch 或 leaf（给的是 %r）" % kind)
     if not out["keywords"]:
         why.append("keywords 必须是非空数组（它是下层自己去查老树的检索键）")
     if not out["conc_range"]:

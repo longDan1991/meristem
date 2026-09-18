@@ -13,6 +13,11 @@
 **这个文件只管格子的形状与视图**：
 字段怎么定义、给模型看时怎么截、渲染成什么中文标签。
 "这个格子填得合不合规"是 `gate.py`；"落盘 / 调度"是 `runtime/`。
+
+**注入面是公开的**：`render()` 会渲哪几段、每段叫什么名字，`prompts/*.md` 里
+都逐段点了名（`tests/test_protocol.py` 的 I 段**双向核对**：文档说了没渲 =
+承诺落空；渲了文档没说 = 偷偷塞东西）。提示词文件是 system，被注入的那几行
+在**另一条 user 消息**里（`turn.ask`）—— 占位符不做任何模板替换。
 """
 
 import uuid
@@ -71,6 +76,10 @@ class Node:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     parent: str = None
     depth: int = 0
+    # 出生时物化的**上层意图链**：[[name, detail], …]，从根到自己的上层。
+    # 由 `scheduler._spawn` 从父节点上拼出来（O(1)），不在 render 时反查 registry：
+    # 形式字段只读 ⇒ 父的 detail 出生后不会再变 ⇒ 物化不可能变旧（§11）。
+    lineage: list = field(default_factory=list)
     # ── 看得见的历史（程序填，模型只读）──
     attempts: list = field(default_factory=list)     # 分配节点：每次分配 + 下层结论
     observations: list = field(default_factory=list)  # 叶子：每次动作的真实返回
@@ -93,9 +102,24 @@ class Node:
         if self.conc_range:
             out.append("结论字数要求（上层给的）: %s" % range_txt(self.conc_range))
         if self.keywords:
-            out.append("检索键（上层给的，已据此查过老树）: %s"
-                       % ", ".join(str(k) for k in self.keywords))
+            # 查了什么就说什么：叶子不查老树（老树是"该怎么拆"的判据）。
+            what = "能力库" if self.kind == "leaf" else "老树和能力库"
+            out.append("检索键（上层给的，已据此查过%s）: %s"
+                       % (what, ", ".join(str(k) for k in self.keywords)))
         return "\n".join(out)
+
+    def render_lineage(self):
+        """从根到自己的上层的意图链（程序物化的，不是上层下发的字段）。
+
+        没有它，节点只知道"我要干什么"，不知道"这件事为什么值得做" ——
+        拆到第三层就没人记得最初的验收标准是给谁用的了。**叶子也要看**。
+        """
+        if not self.lineage:
+            return ""
+        lines = ["上层意图链（从根到你上层，只读）:"]
+        for i, (name, detail) in enumerate(self.lineage, start=1):
+            lines.append("  %d. %s: %s" % (i, name, detail or "(无)"))
+        return "\n\n" + "\n".join(lines)
 
     def render_attempts(self):
         if not self.attempts:
@@ -183,10 +207,14 @@ class Node:
 
     def render(self):
         if self.kind == "leaf":
-            return "%s%s\n\n可用工具: bash / read / write\n%s" % (
-                self.header(), self.render_caps(), self.render_observations())
-        return "%s%s%s\n\n%s" % (self.header(), self.render_precedents(),
-                                   self.render_caps(), self.render_attempts())
+            # 叶子不看老树：先例是"这件事该怎么拆、当年卡在哪"的判据，拆是分配节点的事；
+            # 叶子只要工具（现成做法）+ 自己的观测。所以这里没有 render_precedents()。
+            return "%s%s%s\n\n可用工具: bash / read / write\n%s" % (
+                self.header(), self.render_lineage(), self.render_caps(),
+                self.render_observations())
+        return "%s%s%s%s\n\n%s" % (self.header(), self.render_lineage(),
+                                   self.render_precedents(), self.render_caps(),
+                                   self.render_attempts())
 
     # ---------------------------------------------------------------- 结局
     def close(self, verdict, conclusion, evidence, external=None):

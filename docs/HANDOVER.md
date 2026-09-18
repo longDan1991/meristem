@@ -93,7 +93,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tree/llm.py` | 168 | LLM + MockLLM（OpenAI 兼容；`on_delta` 流式、`on_reasoning` 思考） |
 | `tree/tools.py` | 115 | 叶子的手（bash / read / write）。截断与超时的落点；环境失败=观测，不 raise |
 | `tree/effects.py` | 224 | 从 bash/write **机械**抽 effects + 契约核对 / `.meta.json` 落盘 |
-| `tree/protocol/fields.py` | 206 | **协议层**：`Node` 形式字段 + 渲染 + `VIEW` + `EXTERNAL_CLASSES` |
+| `tree/protocol/fields.py` | 233 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
 | `tree/protocol/gate.py` | 223 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
 | `tree/runtime/trace.py` | 61 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
@@ -168,9 +168,12 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
   老 trace 的中文键照样能读（`index.py` 做了兼容），
   否则 `night_quant` 那棵树就变成死数据了。
 - **✅ `keywords` 出生即检索**：`先例` 动作和 `need` 动作都没了，
-  老树先例 + 能力库现成做法在同一时刻由程序塞进提示词（`register`）。
+  老树先例（**只给分配节点** —— 先例回答的是"该怎么拆、当年卡在哪"）
+  + 能力库现成做法（所有节点）在同一时刻由程序塞进提示词（`register`）。
 - **✅ `conc_range` + 必填项**：缺一项当场拒；区间是建议不是配额，
   但上层给的具体区间会真渲染进下层的提示词（`Node.header`）。
+- **✅ 上层意图链**：每个节点出生时物化 [[name, detail], …]（根→上层），
+  两种节点都渲染 —— 拆到第三层也还知道"这件事为什么值得做"（`render_lineage`）。
 - **✅ 阻塞枝带回可复核的东西**：`TreeIndex.render` 给阻塞枝补
   `外部需求` + `证据` + `卡在哪（最近 3 次动作 → 当时观测）` + `卡住时间`；
   老格式的 `leaf_tool` 也算观测。索引 `night_quant`（2443 节点）0.25s，检索 0.15s。
@@ -264,15 +267,15 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 ---
 
-## 6. 测试（179 个断言，全离线）
+## 6. 测试（211 个断言，全离线）
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
-| `tests/test_protocol.py` | 34 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、长字段原样通过、`keywords` 出生即检索、无进展停下、分配节点没有 execute |
+| `tests/test_protocol.py` | 49 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、**老树只给分配节点查**、无进展停下、分配节点没有 execute、**文档点名的段落 == 真渲染的段落**、**意图链两种节点都有** |
 | `tests/test_caps.py` | 46 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
 | `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_intake.py` | 27 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
+| `tests/test_intake.py` | 29 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
 | `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
 | `tests/test_tty.py` | 37 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 
