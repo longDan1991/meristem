@@ -5,15 +5,15 @@
 所以 cap 只从**真实执行过、且所属节点最终完工**的命令里长出来。
 
 这个模块被两处用：
-  - run.py 在线增量：节点一完工就学（回路闭合，同一次运行内的后续节点就能复用）
-  - mine.py 离线批量：崩溃/被 kill 之后补挖
+  - scheduler 在线增量：节点一完工就学（回路闭合，同一次运行内的后续节点就能复用）
+  - mine_trace 离线批量：崩溃/被 kill 之后补挖
 """
 
 import json
 import os
 import re
 
-from .effects import effects_of, is_runnable
+from ..effects import effects_of, is_runnable
 
 ABS_RE = re.compile(r"(?<![\w.\-:/])/(?!dev/(?:null|stdout|stderr))[\w.\-]+(?:/[\w.\-]+)*")
 PATHWORD_RE = re.compile(r"/([A-Za-z_][A-Za-z0-9_.\-]*)")  # 任何路径片段，包括 /Users 这种单段
@@ -126,7 +126,7 @@ def keys_of(recipe, arts, body=""):
 
     两个错都是真实数据打出来的：
       - 扫原始 heredoc 会把脚本内容和 cwd 吸进来（`users, night_quant, mycode`）
-      - `/Users` 这种单段路径参数 ABS_RE 抳不到，得单独排
+      - `/Users` 这种单段路径参数 ABS_RE 抓不到，得单独排
     但 heredoc 正文里的 **import 例外**：那是最可靠的能力信号，
     而且它就在正文里（`list_emails.py` 的 imaplib 只能在正文找到）。
     """
@@ -285,9 +285,6 @@ def caps_from_node(nid, task, calls, trace_name, contracts=None, skipped=None):
                 "%s __SCRIPT__" % hd["runner"]
             rec["artifacts"] = ([hd["target"]] if hd["target"] else []) + \
                 [a for a in arts if a != hd["target"]]
-        # （原来这里有一条 `elif rec["cmd"] == cmd[:240]: continue`，
-        #   借"命令被截断"这个信号跳过不可复现的长配方。
-        #   截断删了，信号也就没了 —— 换成下面这条明说的判据。）
         scripts = [a for a in rec["artifacts"] if a.endswith(SCRIPT_EXT)]
         # 一条"配方"必须是能**直接照做**的东西。多行又没落成脚本的不算 ——
         # 你没法"粘上就执行"（实测：一个 57 行的 HTML heredoc 被收了进来，
@@ -365,33 +362,32 @@ def mine_trace(trace_path):
     之后用 concluded/action。两种都要能读，否则旧的那 14MB 就变成死数据了。
     """
     status, tools, tasks, contracts = {}, {}, {}, {}
-    for line in open(trace_path):
-        line = line.strip()
-        if not line:
-            continue
-        try:
+    with open(trace_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
             r = json.loads(line)
-        except Exception:
-            continue
-        k, p, nid = r["kind"], r["payload"], r["node"]
-        if k == "open":
-            tasks[nid] = p.get("name") or p.get("任务名") or p.get("task") or ""
-        elif k in ("concluded", "done"):
-            status[nid] = "done"
-        elif k in ("crashed", "budget_exhausted", "failed") and nid not in status:
-            status[nid] = "failed"
-        elif k == "leaf_tool":                       # 旧格式
-            tools.setdefault(nid, []).append(
-                (p.get("tool"), p.get("args") or {}, str(p.get("obs", ""))))
-        elif k == "action" and (p.get("tool") or p.get("工具")):
-            tools.setdefault(nid, []).append(
-                (p.get("tool") or p.get("工具"),
-                 p.get("args") or p.get("参数") or {},
-                 str(p.get("obs") or p.get("观测", ""))))
-        elif k == "contract" and p.get("path"):       # write 出来的工件契约
-            contracts.setdefault(nid, []).append(
-                {"path": p["path"], "契约": p.get("contract") or p.get("契约") or {},
-                 "effects": p.get("effects"), "前置条件": p.get("preconditions") or p.get("前置条件")})
+            k, p, nid = r["kind"], r["payload"], r["node"]
+            if k == "open":
+                tasks[nid] = p.get("name") or p.get("任务名") or p.get("task") or ""
+            elif k in ("concluded", "done"):
+                status[nid] = "done"
+            elif k in ("crashed", "budget_exhausted", "failed") and nid not in status:
+                status[nid] = "failed"
+            elif k == "leaf_tool":                       # 旧格式
+                tools.setdefault(nid, []).append(
+                    (p.get("tool"), p.get("args") or {}, str(p.get("obs", ""))))
+            elif k == "action" and (p.get("tool") or p.get("工具")):
+                tools.setdefault(nid, []).append(
+                    (p.get("tool") or p.get("工具"),
+                     p.get("args") or p.get("参数") or {},
+                     str(p.get("obs") or p.get("观测", ""))))
+            elif k == "contract" and p.get("path"):       # write 出来的工件契约
+                contracts.setdefault(nid, []).append(
+                    {"path": p["path"], "契约": p.get("contract") or p.get("契约") or {},
+                     "effects": p.get("effects"),
+                     "前置条件": p.get("preconditions") or p.get("前置条件")})
 
     found, out = set(), []
     for nid, calls in tools.items():

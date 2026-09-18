@@ -18,8 +18,10 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tree.node import Node, Trace                    # noqa: E402
-from tree import run as R                            # noqa: E402
+from tree.protocol.fields import Node                # noqa: E402
+from tree.runtime.trace import Trace                 # noqa: E402
+from tree.prompts import PROMPT                      # noqa: E402
+from tree.runtime import scheduler as R              # noqa: E402
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
@@ -289,7 +291,7 @@ def main():
     ok &= line("根没有上层 → 用它自己的名字+验收标准查",
                any(qs and "ROOT" in qs[0] for qs in fake.qs))
     ok &= line("每个节点一条 precedent 记录（不再有「先例」这个动作）",
-               len(pre) == len(regH) and '"先例"' not in R.PROMPT["alloc"])
+               len(pre) == len(regH) and '"先例"' not in PROMPT["alloc"])
     # 上层给的 conc_range / keywords 必须**真的出现在下层的提示词里**。
     # 提示词里只写"如 [100,500]"是不够的 —— 那是举例，不是上层的判断。
     gin = [r["payload"] for r in recsH

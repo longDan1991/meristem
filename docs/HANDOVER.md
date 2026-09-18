@@ -43,9 +43,12 @@ python3 main.py "演示" -c "演示完成" --mock --progress 0
 python3 main.py "帮我做一个能赚大钱的A股量化系统" \
     -c "账户权益在2026-12-31收盘 >= 本金 x 2" --workers 3 --progress 0
 
-# 让入口先把预期谈清楚再开工（会和你对话，谈完才交给根节点）
+# 入口：和你谈，谈成一个任务就当场跑掉、把结论带回来接着谈（不退场，Ctrl-D 停）
 # 不给 -c 就是「我还没定验收标准，入口去问」—— 不许拿默认值当用户的话
 python3 main.py "帮我自动做视频赚钱" --intake
+
+# 连任务都没想好：先让你在终端上把开场白说完，再让入口开口
+python3 main.py --intake
 
 # 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
 
@@ -81,20 +84,26 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 135 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
-| `terminal/` | 119 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里 |
+| `main.py` | 161 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
+| `terminal/` | 168 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里 |
 | `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。改提示词不用碰代码 |
 | `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
-| `tree/intake.py` | 101 | **入口**：只用一次，把用户的话谈成根节点的形式字段，然后退场 |
-| `tree/run.py` | 765 | **调度器 + 代码检查**。改行为先看这里，再看 `prompts/` |
-| `tree/node.py` | 280 | `Node`/`Trace`/`Budget`/`norm`/`VIEW`/`EXTERNAL_CLASSES` + 所有渲染 |
-| `tree/index.py` | 262 | 老树索引 + 整树检索（返回**路径**；阻塞枝带回"卡在哪"） |
-| `tree/tools.py` | 102 | 叶子的手（bash / read / write）。截断与超时的落点 |
-| `tree/caps.py` | 224 | 能力库（懒加载、失败自动退休、幂等回填） |
-| `tree/mine.py` | 406 | 从 trace 挖能力（在线增量 + 离线批量共用） |
-| `tree/effects.py` | 148 | 从 bash/write **机械**抽 effects（`fs/pkg/proc/net/data/cwd` + 前置条件） |
-| `tree/config.py` | 59 | `.env` + 路径规则 |
-| `tree/llm.py` | 104 | LLM + MockLLM |
+| `tree/intake.py` | 176 | **入口**：唯一顶层。谈成一个形式就当场 `run()`，结论回填再接着谈 |
+| `tree/config.py` | 65 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
+| `tree/llm.py` | 168 | LLM + MockLLM（OpenAI 兼容；`on_delta` 流式、`on_reasoning` 思考） |
+| `tree/tools.py` | 115 | 叶子的手（bash / read / write）。截断与超时的落点；环境失败=观测，不 raise |
+| `tree/effects.py` | 224 | 从 bash/write **机械**抽 effects + 契约核对 / `.meta.json` 落盘 |
+| `tree/protocol/fields.py` | 206 | **协议层**：`Node` 形式字段 + 渲染 + `VIEW` + `EXTERNAL_CLASSES` |
+| `tree/protocol/gate.py` | 223 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
+| `tree/runtime/trace.py` | 61 | trace 落盘（写线程 + 队列，无锁） |
+| `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
+| `tree/runtime/hands.py` | 28 | bash/write 串行执行（单消费者，无锁） |
+| `tree/runtime/turn.py` | 293 | 一个节点的一回合：问模型 → 过闸门 → 动作 / 分配 |
+| `tree/runtime/scheduler.py` | 221 | **调度器**：广度优先、并行扇出、门槛、学能力、进度回调 |
+| `tree/memory/text.py` | 47 | 词法匹配（token / 2-gram），索引与能力库共用 |
+| `tree/memory/index.py` | 270 | 老树索引 + 整树检索（返回**路径**；阻塞枝带回"卡在哪"） |
+| `tree/memory/caps.py` | 227 | 能力库（单线程门 + 队列；失败自动退休、幂等回填） |
+| `tree/memory/mine.py` | 404 | 从 trace 挖能力（在线增量 + 离线批量共用） |
 | `docs/DESIGN.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
@@ -119,24 +128,36 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 ## 3. 已经做完的（留档，别重复做）
 
-- **✅ 入口**（`prompts/intake.md` + `tree/intake.py`）：根节点的"上层"只用一次 ——
-  **只有一个出口**：把用户的话谈成 `name/detail/accept/keywords/conc_range`。
-  没有 `blocked` 出口（行不行是树跑出来的事实，不是入口聊出来的判断）；
-  **对话的形式不归代码管**：一次问几件事、带不带建议、问几轮，都是模型的事 ——
-  代码不认识"回合数"，也不数"同一个问题问了几次"（这些曾经都有，全是看模型犯错后
-  焊上去的，已删）。代码只认识出口：产物过 `validate_root`（= `_clean_spec` +
+- **✅ 入口**（`prompts/intake.md` + `tree/intake.py`）：**这个程序唯一的顶层**，
+  不退场。谈成一个能过闸门的 `root`，就**当场 `run()` 它**（`tree/intake.py`
+  直接 import `tree.run`），把结论作为一条外部观测回填给对话，再接着调模型 ——
+  **谈和跑交替，直到人在终端上中止**。所以没有"最终根 / 附加任务"之分：
+  **每个 `root` 都是任务**（用户定的，提示词里叫“附加任务”的也是这个）。
+  **手在树上，不在入口**：入口自己没有 `bash`/`read`/`write`；要动手就必须
+  先交出一个能过校验的形式。
+  **代码只认识出口**：产物过 `validate_root`（= `_clean_spec` +
   "accept 必须有可测物理量"），缺字段、没有可测物理量都当场打回**并把原因说给它**，
-  让它自己改。**模型要么说话（纯文本），要么交形式（`{"root": …}`）** ——
-  识别规则只有一条：只有带 `root` 键的 JSON 算形式，其余一律当"话"原样送到
-  用户面前（不过 `norm()` —— 那是形式字段的规范化，会压掉换行）。
+  让它自己改。**对话的形式不归代码管**：一次问几件事、带不带建议、问几轮，
+  都是模型的事 —— 代码不认识"回合数"，也不数"同一个问题问了几次"。
+  **模型要么说话（纯文本），要么交形式（`{"root": …}`）** —— 识别规则只有一条：
+  只有带 `root` 键的 JSON 算形式，其余一律当"话"原样送到用户面前
+  （不过 `norm()` —— 那是形式字段的规范化，会压掉换行）。
   **用户不会给你验收标准**：那是入口的使命，不是用户的任务。
-  交谈记录不存 —— 结论已落成根节点的形式字段。
-- **✅ 终端会话**（`terminal/`）：`python3 main.py "..." -c "..." --intake`
-  就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由走旁白，
-  **回车只换行，空行才发送**（按 Ctrl-D 也一样：写了东西＝说完了，什么都没写＝中止），
-  发出去时明说「发出（N 行）」。Ctrl-D / Ctrl-C 中止时返回 `None`（中止不是结论），不抛 traceback。
+- **✅ 终端会话**（`terminal/`）：`python3 main.py ... --intake`
+  就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由 / “接到任务 /
+  跑完了”走旁白，**回车只换行，空行才发送**（按 Ctrl-D 也一样：写了东西＝说完了，
+  什么都没写＝中止），发出去时明说「发出（N 行）」。Ctrl-D / Ctrl-C 中止时返回 `None`，不抛 traceback。
+  **没在命令行交底（裸 `--intake`）→ 先在终端上让你把开场白说完，再让入口开口**：
+  否则种子是空的，那一次模型调用只够换来一句"你要做什么？"（实测）——
+  看起来就像程序没等你说话就自作主张。
+  **模型的吐字是真流式**（`LLM.chat(on_delta=…)` 读 SSE，一个字一个字写屏），
+  但只吐「话」那一路：交形式（`{"root":…}`，含 ```json 围栏）在 `tree/intake.py`
+  的 `_Spoken` 里被按住，不往用户眼前甩一坨 JSON；`ask` 因此只负责读，
+  不再重复显示（话已经在吐字时上屏了）。
+  **思考（`reasoning_content`）整段按流式画成灰的**（`on_reasoning` 通道）：
+  推理模型先想后说，不想的话屏幕会十几秒一个字没有，看着像卡死（实测）。
   边界：`main.py` 不再自己 `input()`，`tree/intake.py` 不知道自己是 tty 还是脚本 ——
-  由 `tests/test_tty.py` G 段守门。
+  由 `tests/test_tty.py` F 段守门。
 - **✅ bash 永远带超时且可见**（`tree/tools.py`）：默认 120 秒 / 上限 3600 秒，
   可写 `args.timeout`；超时明说"这是超时不是出错"、把**已产生的输出**交回去、
   告诉它怎么跑更久，并且 `killpg` 连子进程一起杀（不留孤儿）。
@@ -167,9 +188,10 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 - **negative caps / deadend 层** —— 理由见 `DESIGN.md` §2.7、§4.2 和 §6。
   原来提的两个落点都作废：`TreeIndex.search` **别**给阻塞枝加抑制性权重
   （它只给 `满足` +1、对阻塞不加权也不减权，这已经是对的）；
-  `tree/caps.py` **别**收"负能力"。
+  `tree/memory/caps.py` **别**收"负能力"。
 - **引导 LLM（常驻的第二个 agent）** —— 理由见 `DESIGN.md` §2.8。
-  入口是一次性的提示词，不是常驻进程。
+  入口是唯一的顶层循环，但它不是第二个 agent：手在树上（`run`），
+  它自己只会谈和交形式。
 
 ---
 
@@ -230,7 +252,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 ### ⑤ 小项
 
 - 无进展检测的阈值 3 / 5 是**拍的**，没有依据
-- `EXTERNAL_CLASSES` 是硬编码的四类（在 `tree/node.py`，和 `VIEW` 放一起）；
+- `EXTERNAL_CLASSES` 是硬编码的四类（在 `tree/protocol/fields.py`，和 `VIEW` 放一起）；
   按设计它只应作"提议"，由人确认
 - caps 的 `name` 继承只做了一半
 - 观测历史的可见预算（最近 10 次 / 单条 1500 / 总 6000 字）是拍的
@@ -250,9 +272,9 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tests/test_caps.py` | 46 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
 | `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_intake.py` | 22 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因、**没有回合数限制**、**只有一个出口**、闸门逐条说不 |
+| `tests/test_intake.py` | 27 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
 | `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
-| `tests/test_tty.py` | 27 | 终端会话：问→答→交棒、问题只显示一遍、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
+| `tests/test_tty.py` | 37 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 
 ```bash
 for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
@@ -322,7 +344,7 @@ for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
     把老节点的观测历史搬过来当起点"。老树能复用的是**证据**，不是进度。
 
 18. **提示词和代码检查是一对，改一边就要看另一边。** 提示词在 `prompts/*.md`，
-    硬性要求在 `tree/run.py`（必填项 / 锚点 / 门槛 / 证据降级）和 `tree/node.py`
+    硬性要求在 `tree/protocol/gate.py`（必填项 / 锚点 / 门槛 / 证据降级）和 `tree/protocol/fields.py`
     （`VIEW` / `EXTERNAL_CLASSES`）。`tree/prompts.py` 的文件头列了对照表。
 
 19. **文档要分离。** `docs/DESIGN.md` 只写设计与不变量（不讲进度），

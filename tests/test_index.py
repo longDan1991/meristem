@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tree.index import TreeIndex                      # noqa: E402
+from tree.memory.index import TreeIndex               # noqa: E402
 
 
 def build(spec, workspace="/tmp/ws-x", old_format=False,

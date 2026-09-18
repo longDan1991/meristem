@@ -4,7 +4,11 @@
 
 静默截断等于对模型撒谎 —— 它会以为"这就是全部输出"，然后反复重读同一个
 东西。这不是假设：实测一个叶子把同一个文件读了 25 次，只因为提示词里
-每条观测只给它看前 200 字，而它不知道那是截断。模型不傻，是我们没给它信息。
+每条观测只给模型看前 200 字，而它不知道那是截断。模型不傻，是我们没给它信息。
+
+另一条：**环境失败是观测，不是异常。** 文件不存在、命令跑不动，是"世界说不行",
+要让模型看见并据此换路；所以工具在这里就地把它变成观测文本返回。
+真正的编程错误（不该发生的）照旧往上炸，不被糊掉（AGENTS §2、§6）。
 """
 
 import os
@@ -33,16 +37,20 @@ def bash(cmd, timeout=None):
     """
     try:
         t = int(timeout) if timeout not in (None, "") else BASH_TIMEOUT
-    except Exception:
+    except (TypeError, ValueError):
         t = BASH_TIMEOUT
     if t <= 0:
         t = BASH_TIMEOUT
     asked = t
     if t > BASH_TIMEOUT_MAX:
         t = BASH_TIMEOUT_MAX
-    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, text=True,
-                         start_new_session=True)
+    try:
+        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT,
+                             encoding="utf-8", errors="replace",
+                             start_new_session=True)
+    except OSError as e:
+        return "工具出错: %r" % e
     timed_out = False
     try:
         out, _ = p.communicate(timeout=t)
@@ -50,7 +58,7 @@ def bash(cmd, timeout=None):
         timed_out = True
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except Exception:
+        except OSError:
             p.kill()
         out, _ = p.communicate()          # 收尸，顺手把已产生的输出拿回来
     out = (out or "").strip()
@@ -80,8 +88,11 @@ def read(path, offset=0, limit=READ_CAP):
 
     报出行号区间，模型才能自己翻页；不报，它就只能反复重读同一段。
     """
-    with open(path, encoding="utf-8", errors="replace") as f:
-        s = f.read()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            s = f.read()
+    except OSError as e:
+        return "工具出错: %r" % e
     n = len(s)
     offset = max(0, int(offset or 0))
     limit = max(1, int(limit or READ_CAP))
@@ -94,8 +105,11 @@ def read(path, offset=0, limit=READ_CAP):
 
 
 def write(path, content):
-    with open(path, "w") as f:
-        f.write(content)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return "工具出错: %r" % e
     return "written: %s (%d bytes)" % (path, len(content))
 
 

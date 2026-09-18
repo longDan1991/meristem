@@ -1,4 +1,4 @@
-"""从动作里机械抽 effects。能测的就不许模型自报。
+"""从动作里机械抽 effects，并核对/落盘工件契约。能测的就不许模型自报。
 
 bash 和 write 是同一件事的两个壳：`echo hi > a.txt` 就是 write("a.txt","hi")。
 所以这里一套抽取同时服务两者 —— 因为复用者只关心"碰了什么"，
@@ -7,12 +7,16 @@ bash 和 write 是同一件事的两个壳：`echo hi > a.txt` 就是 write("a.t
 `前置条件` 和 effects 一样重要：复用失败最常见的原因不是配方错，
 而是前提不成立（没网、包没装、不在那个目录）。没有这一项，
 一次冤枉的失败会把一条好配方记成"烂了"。
+
+**契约**也归这里：`func` 是不是一条能直接跑的命令、入口在不在、
+`.meta.json` 怎么写。它和 effects 共享同一个变因 —— "工件被怎样描述"。
 """
 
+import json
 import os
 import re
 
-from .node import EXTERNAL_CLASSES
+from .protocol.fields import EXTERNAL_CLASSES
 
 URL_RE = re.compile(r"\b(?:https?|ftp)://([\w.\-]+)(?::(\d+))?")
 REDIR_RE = re.compile(r"(>>?)\s*([A-Za-z0-9_][A-Za-z0-9_./\-]*)")
@@ -24,7 +28,10 @@ PKG_RE = re.compile(r"\b(?:pip3?|npm|apt-get|brew)\s+install\s+(?:-[\w-]+\s+)*([
 NOHUP_RE = re.compile(r"\bnohup\b")
 TAILBG_RE = re.compile(r"&\s*$")
 
-# `外部需求` 的词表在 node.py（它是形式字段的边界，跟 LIMITS 放一起）
+# 哪些产出物必须给契约（要么给契约，要么明确声明它属于内部）。
+# 日志/缓存这类副产物不在里面。
+ARTIFACT_EXT = (".py", ".sh", ".js", ".ts", ".rb", ".json",
+                ".yaml", ".yml", ".toml", ".csv", ".sql")
 
 
 def _abs(p, cwd):
@@ -172,3 +179,46 @@ def contract_problems(path, contract, base=None):
                                   else os.path.join(root, path)):
         problems.append("path 指向的文件不存在: %s" % path)
     return problems
+
+
+def write_sidecar(path, contract, eff=None, pre=None):
+    """把契约写在工件旁边。这样即使没有检索，谁看到这个文件都知道怎么用它。"""
+    mp = str(path) + ".meta.json"
+    if os.path.exists(mp):
+        with open(mp, encoding="utf-8") as f:
+            meta = json.load(f)
+    else:
+        meta = {}
+    meta["契约"] = contract
+    if eff:
+        meta["effects"] = eff
+    if pre:
+        meta["前置条件"] = pre
+    with open(mp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def accept_artifacts(node, artifacts, trace, st):
+    """把结论里交代的工件落成契约 + .meta.json 记录。
+
+    只在入口给完整契约；只给自己用的写 type="内部" 就行 —— 两者都要显式出现，
+    因为是**结论里一次交代**，不是逼它一边干活一边填表。
+    """
+    for a in artifacts:
+        if not isinstance(a, dict):
+            continue
+        path = str(a.get("path") or "").strip()
+        if not path:
+            continue
+        rp = os.path.realpath(path)
+        contract = contract_of(a)
+        internal = contract.get("type") == "内部"
+        eff, pre = (st or {}).get("art_effects", {}).get(rp, (None, None))
+        problems = [] if internal else contract_problems(path, contract)
+        trace.add(node.id, "contract", {"path": path, "contract": contract,
+                                        "problems": problems, "source": "conclusion",
+                                        "effects": eff, "preconditions": pre})
+        st.setdefault("contracts", []).append({"path": path, "契约": contract,
+                                               "effects": eff, "前置条件": pre})
+        if not internal and contract and not problems:
+            write_sidecar(path, contract, eff, pre)

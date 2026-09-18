@@ -1,64 +1,28 @@
-"""能力库：懒加载、按操作检索、注入封顶。
+"""能力库：append-only 的 jsonl，按操作检索，跨 session 复用。
 
 唯一的原则（这决定它成不成立）：
     库的大小必须与上下文大小解耦。
-所以它**不进 prompt** —— 它是一个工具（need），只在叶子真要动手那一刻被问。
-不需要的节点，成本是 0。
+所以它**不进系统提示词** —— 它在节点出生时按检索键被问一次（`runner` 里
+`register` 干这件事）。不需要的节点，成本是 0。
 
 昨天踩过的坑，这里必须避开：**锚点会被稀释**
 （根 {2026-12-31} → d1 {close,date,high,low} → 之后谁提 date 都算）。
 所以检索 key 从**真实执行过的命令**里抽，不从领域词里抽 ——
-按"怎么读邮件"检索，而不是按"量化"检索。后者会让能力收缩到一个方向。
+按"怎么读邮件"检索，而不是按"量化"检索。
+
+**单线程独占**：`entries` / 文件 / 脚本都由库自己的线程改（`_serve`），
+调用方通过队列收发 —— 没有锁（AGENTS §9）。token 集合在载入/写入时算一次，
+不在每次检索里重算（AGENTS §11）。
 """
 
 import hashlib
 import json
 import os
-import re
+import queue
 import threading
 import time
 
-# 数字只收两位以上：单个数字（如 "1"）几乎出现在所有文本里，
-# 收进来会命中一切（实测：查询"算 1 到 100 的和"匹配到"净值为 1"）。
-TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{1,}|\d{2,}")
-# 中文虚字：由它们拼成的 bigram（"到的" "的和" "是一"）不携带信息，
-# 留着会让任何两句话都能对上（实测：查询"算 1 到 100 的和"命中
-# "名称到的映射表"）。这跟 IDF 是同一个道理。
-FUNC_CHARS = set("的了在是和与到就很也不之其中为以或但而对从把被使且等则")
-
-
-def _bigrams(text):
-    cjk = re.sub(r"[^\u4e00-\u9fff]", "", text or "")
-    out = set()
-    for i in range(len(cjk) - 1):
-        b = cjk[i:i + 2]
-        if not set(b) <= FUNC_CHARS:
-            out.add(b)
-    return out
-
-
-def tokens(text):
-    """拉丁词 + 数字 + 中文 2-gram。不需要分词器，也不引依赖。
-
-    数字必须进 token：查询说"算 1 到 100 的和"，而 cap 里的 100 对不上，
-    就会靠 bridge 凑单数 —— 实测就是这样退回来的。但单个数字要排掉。
-    """
-    t = {w.lower() for w in TOKEN_RE.findall(text or "")}
-    return t | _bigrams(text)
-
-
-def overlap(q, hay):
-    """两个 token 集的重合度。索引和能力库共用同一套匹配。
-
-    中文 2-gram 直接重合 + 拉丁词/数字允许前缀匹配（http↔https, broker↔mock_broker）。
-    """
-    n = len(q & hay)
-    ql = {t for t in q if t.isascii() and len(t) >= 4}
-    hl = {t for t in hay if t.isascii() and len(t) >= 4}
-    for a in ql:
-        if any(b != a and (b.startswith(a) or a.startswith(b)) for b in hl):
-            n += 1
-    return n
+from .text import overlap, tokens
 
 
 def cap_id(*parts):
@@ -66,39 +30,47 @@ def cap_id(*parts):
 
 
 class Caps:
-    """append-only 的 jsonl，按 id 取最新一条。崩溃安全，可直接 diff 看历史。"""
-
     def __init__(self, path="caps.jsonl"):
         self.path = path
         # 能力自带脚本：内联 heredoc 的正文落在这里，配方指向它。
         # 于是配方可复现，而且跨项目活下来。
         self.scripts_dir = os.path.join(
             os.path.dirname(os.path.abspath(path)), "caps_scripts")
-        self._lock = threading.Lock()
         self.entries = {}
+        self._tok = {}
         self._load()
+        self._q = queue.Queue()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
 
     # ---------------------------------------------------------------- 存储
     def _load(self):
         if not os.path.exists(self.path):
             return
-        for line in open(self.path):
-            try:
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
                 e = json.loads(line)
-            except Exception:
-                continue
-            if e.get("id"):
-                self.entries[e["id"]] = e
+                if e.get("id"):
+                    self.entries[e["id"]] = e
+                    self._index(e)
+
+    def _index(self, e):
+        """一条能力的三组 token 算一次存下来。检索时直接用，不重算。"""
+        k = tokens(" ".join(e.get("keys") or []))
+        d = tokens(e.get("does", ""))
+        b = tokens(e.get("seen_in", "")
+                   + " " + (e.get("evidence") or {}).get("obs", ""))
+        b -= (k | d)
+        self._tok[e["id"]] = (k, d, b)
 
     def _append(self, e):
         d = os.path.dirname(self.path)
         if d:
             os.makedirs(d, exist_ok=True)
-        with self._lock:
-            with open(self.path, "a") as f:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
-    def record(self, entry):
+    def _record(self, entry):
         e = dict(entry)
         body = e.pop("body", None)
         how = dict(e.get("how") or {})
@@ -110,7 +82,7 @@ class Caps:
             path = os.path.join(self.scripts_dir, eid + (body.get("ext") or ".py"))
             if not os.path.exists(path):
                 os.makedirs(self.scripts_dir, exist_ok=True)
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     f.write(body["text"])
             how["cmd"] = (how.get("cmd") or "").replace("__SCRIPT__", path)
             how["script_file"] = path
@@ -124,10 +96,11 @@ class Caps:
         e["fails"] = old.get("fails", 0)
         e["ts"] = round(time.time(), 1)
         self.entries[eid] = e
+        self._index(e)
         self._append(e)
         return eid
 
-    def note_outcome(self, eid, ok):
+    def _note_outcome(self, eid, ok):
         e = self.entries.get(eid)
         if not e:
             return
@@ -143,7 +116,7 @@ class Caps:
         self.entries[eid] = e
 
     # ---------------------------------------------------------------- 检索
-    def search(self, query):
+    def _search(self, query):
         q = tokens(query)
         if len(q) < 1:
             return [], ""
@@ -151,21 +124,13 @@ class Caps:
         for e in self.entries.values():
             if e.get("retired"):
                 continue
-            # does+keys 是能力本身（权重 2）；seen_in 是中文桥（权重 1）。
+            # does+keys 是能力本身（权重 2）；seen_in + obs 是中文桥（权重 1）。
             # 叶子用中文提问而键是英文，需要这个桥；但不能让桥淹没能力本身，
             # 否则"把 1 到 100 的和写进文件"会命中 `pip install pandas`。
-            # keys 是有意提取的（脚本名/包名/模块名），命令正文是副产品。
-            # 不分开计分的话，一条很长的 grep 命令会靠两个字赢过真正的做法。
-            # seen_in + obs 是中文桥：obs 是那次执行的中文结论，
-            # 正好是查询会描述的东西（"已完成，data/000001.SZ.csv 已生成"）。
-            k_tok = tokens(" ".join(e.get("keys") or []))
-            d_tok = tokens(e.get("does", ""))
-            b_tok = tokens(e.get("seen_in", "")
-                           + " " + (e.get("evidence") or {}).get("obs", ""))
-            b_tok -= (k_tok | d_tok)
+            k_tok, d_tok, b_tok = self._tok[e["id"]]
             k_hit, d_hit, b_hit = (overlap(q, k_tok), overlap(q, d_tok),
                                    overlap(q, b_tok))
-            # 中文桥不能单独召回：否则"把 1 到 100 的和写进文件"会命中 `pip install pandas`。
+            # 中文桥不能单独召回。
             if not (k_hit or d_hit or b_hit >= 2):
                 continue
             scored.append((3 * k_hit + d_hit + b_hit, e.get("uses", 0), e))
@@ -173,12 +138,12 @@ class Caps:
         # 不设 top-k、不设总量封顶：命中多少给你多少。
         # 词法匹配本身就很克制，而且**在背后替你丢掉几条**是最坏的选择 ——
         # 模型根本不知道自己少看了东西。
-        return self.render([e for _, _, e in scored])
+        return self._render([e for _, _, e in scored])
 
-    def render(self, picked):
+    def _render(self, picked):
         """一条 cap 里最重要的是：怎么用（用法）+ 需要什么前提 + 会影响什么。
         "前提" 尤其重要——复用失败最常见的原因是前提不成立，
-        而不是配方错。没这一项，一条好配方会被记成“烂了”。
+        而不是配方错。没这一项，一条好配方会被记成"烂了"。
         """
         out, kept = [], []
         for e in picked:
@@ -216,10 +181,47 @@ class Caps:
             kept.append(e)
         return kept, "\n".join(out)
 
-    def stats(self):
+    def _stats(self):
         live = [e for e in self.entries.values() if not e.get("retired")]
         return {"总数": len(live),
                 "已退休": len(self.entries) - len(live),
                 "自带脚本": sum(1 for e in live if (e.get("how") or {}).get("script_file")),
                 "有契约": sum(1 for e in live if e.get("契约")),
                 "有复用记录": sum(1 for e in live if e["uses"] + e["fails"] > 0)}
+
+    # ---------------------------------------------------------------- 单线程门
+    def _serve(self):
+        while True:
+            op, arg, reply = self._q.get()
+            if op == "record":
+                reply.put(self._record(arg))
+            elif op == "note_outcome":
+                eid, ok = arg
+                self._note_outcome(eid, ok)
+                reply.put(None)
+            elif op == "search":
+                reply.put(self._search(arg))
+            else:
+                reply.put(self._stats())
+
+    def _call(self, op, arg=None):
+        if not self._thread.is_alive():
+            raise RuntimeError("能力库线程已死（%s）：后续操作不再安全" % self.path)
+        reply = queue.Queue()
+        self._q.put((op, arg, reply))
+        try:
+            return reply.get(timeout=60)
+        except queue.Empty:
+            raise RuntimeError("能力库线程没有响应（%s）" % self.path)
+
+    def record(self, entry):
+        return self._call("record", entry)
+
+    def note_outcome(self, eid, ok):
+        self._call("note_outcome", (eid, ok))
+
+    def search(self, query):
+        return self._call("search", query)
+
+    def stats(self):
+        return self._call("stats")

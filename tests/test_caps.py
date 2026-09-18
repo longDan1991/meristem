@@ -18,17 +18,18 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-from tree.caps import Caps                            # noqa: E402
-from tree.effects import contract_problems, effects_of   # noqa: E402
-from tree.mine import mine_trace as mine_caps         # noqa: E402
-from tree.node import Node, Trace                     # noqa: E402
-from tree import run as R                             # noqa: E402
+from tree.memory.caps import Caps                        # noqa: E402
+from tree.effects import contract_problems               # noqa: E402
+from tree.memory.mine import caps_from_node, mine_trace as mine_caps   # noqa: E402
+from tree.protocol.fields import Node                    # noqa: E402
+from tree.runtime.trace import Trace                     # noqa: E402
+from tree.runtime import scheduler as R                  # noqa: E402
 
 # 真实数据资产在工作区里（不在项目目录）：一晚 11.5 小时那棵树。
 # 路径来自配置文件（TREE_WORKSPACE），换机器只要改 .env。
 from tree import config as _cfg                            # noqa: E402
 REAL = os.environ.get("TREE_TRACE") or os.path.join(
-    _cfg.workspace(), "runs", "night_quant", "trace.jsonl")
+    _cfg.WORKSPACE, "runs", "night_quant", "trace.jsonl")
 
 
 def line(tag, cond, detail=""):
@@ -139,7 +140,6 @@ def main():
     ok &= line("长配方也原样给出，不砍", max(len(e["how"]["cmd"]) for e in live) > 0,
                "最长 %d 字" % max(len(e["how"]["cmd"]) for e in live))
     # 不收的东西必须说得出来（不悄悄丢）
-    from tree.mine import caps_from_node
     skipped = []
     caps_from_node("n", "t",
                    [("bash", {"cmd": "echo a > x.txt\nprintf 'b' > y.txt"}, "")],

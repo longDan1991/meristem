@@ -11,8 +11,8 @@
      满足的子树可以照抄计划；阻塞的**不是死路**，是"上次卡在这条命令、这个条件上"——
      所以阻塞枝要把命令和观测一起带回去，让模型自己重判（DESIGN §2.7）。
 
-检索参数由 LLM 自己定，可以同时给多组（不同说法/不同侧面），
-程序一次扫遍所有老树 —— 本地是完整物化的树，不需要像网络调研那样一层层探。
+节点形式的词法特征在**载入时算一次**（AGENTS §11）：一次检索要扫所有老树，
+不该为每个查询把每棵树的字段重新分词一遍。
 """
 
 import json
@@ -20,8 +20,8 @@ import os
 import time
 from collections import defaultdict
 
-from .caps import overlap, tokens
-from .node import VIEW
+from ..protocol.fields import VIEW
+from .text import overlap, tokens
 
 # 形式字段的权重：任务名和验收标准信息量最大
 W_NAME, W_ACCEPT, W_DETAIL, W_CONCL = 4, 3, 1, 1
@@ -35,7 +35,7 @@ class Node:
     __slots__ = ("tree", "id", "parent", "depth", "name", "detail", "notes",
                  "accept", "kind", "verdict", "conclusion", "external",
                  "evidence", "actions", "t_open", "t_end",
-                 "workspace", "score")
+                 "workspace", "score", "name_t", "acc_t", "det_t", "con_t")
 
 
 def _load_tree(path):
@@ -46,67 +46,68 @@ def _load_tree(path):
     否则昨晚那 2437 个节点的大树就变成死数据了。
     老格式没有 判定 字段，只能近似：done → 满足，failed → 阻塞。
     """
-    nodes, order = {}, []
+    nodes = {}
     workspace = None
-    for line in open(path, errors="ignore"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
             r = json.loads(line)
-        except Exception:
-            continue
-        p, nid = r.get("payload") or {}, r.get("node")
-        k = r.get("kind")
-        if k == "open":
-            n = Node()
-            n.tree, n.id, n.parent = path, nid, p.get("parent")
-            # 英文键是新协议的；中文键是历史 trace 的。两种都必须认 ——
-            # 否则昨晚那些树就变成死数据了。
-            n.depth = p.get("depth", p.get("深度", 0))
-            n.name = p.get("name") or p.get("任务名") or p.get("task") or ""
-            n.detail = p.get("detail") or p.get("任务详情") or ""
-            n.notes = p.get("notes") or p.get("注意事项") or ""
-            n.accept = p.get("accept") or p.get("验收标准") or p.get("criteria") or ""
-            kk = p.get("kind") or p.get("类型") or "dispatch"
-            n.kind = "leaf" if kk == "evidence" else kk
-            n.verdict, n.conclusion, n.external, n.evidence = "", "", [], []
-            n.actions, n.t_open, n.t_end = [], r.get("t"), None
-            n.workspace = p.get("workspace") or p.get("工作目录")
-            if n.parent is None and n.workspace:
-                workspace = n.workspace
-            n.score = 0.0
-            nodes[nid] = n
-            order.append(nid)
-        elif k == "concluded" and nid in nodes:
-            nodes[nid].verdict = p.get("verdict") or p.get("判定", "")
-            nodes[nid].conclusion = p.get("text") or p.get("内容", "")
-            nodes[nid].external = p.get("external") or p.get("外部需求") or []
-            nodes[nid].evidence = p.get("evidence") or p.get("证据") or []
-            nodes[nid].t_end = r.get("t")
-        elif k in ("action", "leaf_tool") and nid in nodes:
-            # 一次动作 + 世界回了什么。两种键名（新格式 / 老格式）都要认 ——
-            # 阻塞枝靠它回答"卡在哪条命令"，没有它，一条阻塞先例就只是
-            # 一句没有探测方式的断言（DESIGN §2.7）。
-            nodes[nid].actions.append((
-                p.get("工具") or p.get("tool") or "",
-                p.get("参数") or p.get("args") or {},
-                p.get("观测") or p.get("obs") or ""))
-        elif k == "done" and nid in nodes:          # 旧格式
-            nodes[nid].verdict = nodes[nid].verdict or "满足"
-            nodes[nid].conclusion = nodes[nid].conclusion or str(p.get("result", ""))
-            nodes[nid].t_end = r.get("t")
-        elif k in ("failed", "crashed", "budget_exhausted") and nid in nodes:
-            nodes[nid].verdict = nodes[nid].verdict or "阻塞"
-            # 老格式的 failed 里原因在 result；直接 str(p) 会把整行 dump 出来
-            why = p.get("result") if isinstance(p, dict) else None
-            nodes[nid].conclusion = nodes[nid].conclusion or str(why if why else p)
-            nodes[nid].t_end = r.get("t")
+            p, nid = r.get("payload") or {}, r.get("node")
+            k = r.get("kind")
+            if k == "open":
+                n = Node()
+                n.tree, n.id, n.parent = path, nid, p.get("parent")
+                # 英文键是新协议的；中文键是历史 trace 的。两种都必须认 ——
+                # 否则昨晚那些树就变成死数据了。
+                n.depth = p.get("depth", p.get("深度", 0))
+                n.name = p.get("name") or p.get("任务名") or p.get("task") or ""
+                n.detail = p.get("detail") or p.get("任务详情") or ""
+                n.notes = p.get("notes") or p.get("注意事项") or ""
+                n.accept = p.get("accept") or p.get("验收标准") or p.get("criteria") or ""
+                kk = p.get("kind") or p.get("类型") or "dispatch"
+                n.kind = "leaf" if kk == "evidence" else kk
+                n.verdict, n.conclusion, n.external, n.evidence = "", "", [], []
+                n.actions, n.t_open, n.t_end = [], r.get("t"), None
+                n.workspace = p.get("workspace") or p.get("工作目录")
+                if n.parent is None and n.workspace:
+                    workspace = n.workspace
+                n.score = 0.0
+                nodes[nid] = n
+            elif k == "concluded" and nid in nodes:
+                nodes[nid].verdict = p.get("verdict") or p.get("判定", "")
+                nodes[nid].conclusion = p.get("text") or p.get("内容", "")
+                nodes[nid].external = p.get("external") or p.get("外部需求") or []
+                nodes[nid].evidence = p.get("evidence") or p.get("证据") or []
+                nodes[nid].t_end = r.get("t")
+            elif k in ("action", "leaf_tool") and nid in nodes:
+                # 一次动作 + 世界回了什么。两种键名（新格式 / 老格式）都要认 ——
+                # 阻塞枝靠它回答"卡在哪条命令"，没有它，一条阻塞先例就只是
+                # 一句没有探测方式的断言（DESIGN §2.7）。
+                nodes[nid].actions.append((
+                    p.get("工具") or p.get("tool") or "",
+                    p.get("参数") or p.get("args") or {},
+                    p.get("观测") or p.get("obs") or ""))
+            elif k == "done" and nid in nodes:          # 旧格式
+                nodes[nid].verdict = nodes[nid].verdict or "满足"
+                nodes[nid].conclusion = nodes[nid].conclusion or str(p.get("result", ""))
+                nodes[nid].t_end = r.get("t")
+            elif k in ("failed", "crashed", "budget_exhausted") and nid in nodes:
+                nodes[nid].verdict = nodes[nid].verdict or "阻塞"
+                # 老格式的 failed 里原因在 result；直接 str(p) 会把整行 dump 出来
+                why = p.get("result") if isinstance(p, dict) else None
+                nodes[nid].conclusion = nodes[nid].conclusion or str(why if why else p)
+                nodes[nid].t_end = r.get("t")
     if workspace is None:
         workspace = os.path.dirname(os.path.abspath(path))
     for n in nodes.values():
         n.workspace = workspace
-    return nodes, order
+        n.name_t = tokens(n.name)
+        n.acc_t = tokens(n.accept)
+        n.det_t = tokens(n.detail)
+        n.con_t = tokens(n.conclusion)
+    return nodes
 
 
 class TreeIndex:
@@ -120,10 +121,7 @@ class TreeIndex:
         for t in traces or []:
             if not os.path.isfile(t) or os.path.abspath(t) in excl:
                 continue
-            try:
-                nodes, _ = _load_tree(t)
-            except Exception:
-                continue
+            nodes = _load_tree(t)
             if not nodes:
                 continue
             self.trees.append(t)
@@ -152,24 +150,21 @@ class TreeIndex:
             queries = [queries]
         qtok = [tokens(q) for q in queries if q and str(q).strip()]
         # 数字可以加分，但不能单独构成命中：查询里的 100 会命中
-        # “closes=[100,110,99]” 这种无关节点（实测就是这样）。
+        # "closes=[100,110,99]" 这种无关节点（实测就是这样）。
         qword = [{t for t in q if not t.isdigit()} for q in qtok]
         if not qtok or not self.nodes:
             return [], ""
 
         for n in self.nodes.values():
-            name_t, acc_t = tokens(n.name), tokens(n.accept)
             # notes **不参与检索**（DESIGN §5.2：键要用可执行形状；
             # 注意事项是自由发挥的判断依据，放进去只会污染词法匹配）。
-            det_t = tokens(n.detail)
-            con_t = tokens(n.conclusion)
-            all_t = name_t | acc_t | det_t | con_t
+            all_t = n.name_t | n.acc_t | n.det_t | n.con_t
             best = 0
             for i, q in enumerate(qtok):
                 if not overlap(qword[i], all_t):
                     continue            # 至少得有一个词对上
-                s = (W_NAME * overlap(q, name_t) + W_ACCEPT * overlap(q, acc_t)
-                     + W_DETAIL * overlap(q, det_t) + W_CONCL * overlap(q, con_t))
+                s = (W_NAME * overlap(q, n.name_t) + W_ACCEPT * overlap(q, n.acc_t)
+                     + W_DETAIL * overlap(q, n.det_t) + W_CONCL * overlap(q, n.con_t))
                 best = max(best, s)
             n.score = best            # 必须无条件重置：否则上一次查询的脏分会残留
             if n.score:

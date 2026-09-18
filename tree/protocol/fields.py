@@ -1,4 +1,4 @@
-"""节点 = 形式化字段 + 看见的历史 + 结局。
+"""形式字段：格子长什么样、怎么渲染给模型看。
 
 这个会话里反复验出来的那条原则，落在这里：
 
@@ -9,12 +9,12 @@
 所有"该不该停"的问题，都由"看得见的事实"回答：
 分配节点看 `attempts`（自己试过什么、下层回了什么），叶子看 `observations`。
 想让它更保守，就把事实说得更清楚，而不是加一个上限。
+
+**这个文件只管格子的形状与视图**：
+字段怎么定义、给模型看时怎么截、渲染成什么中文标签。
+"这个格子填得合不合规"是 `gate.py`；"落盘 / 调度"是 `runtime/`。
 """
 
-import json
-import os
-import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -48,11 +48,12 @@ def norm(text):
 
 
 def range_txt(rng):
-    """结论字数区间的中文展示，如 [100, 500]。"""
-    try:
-        return "[%d, %d]" % (int(rng[0]), int(rng[1]))
-    except Exception:
-        return str(rng)
+    """结论字数区间的中文展示，如 [100, 500]。
+
+    区间在进 Node 之前已经过 `gate.parse_range`；这里只负责展示，
+    所以形状不对是**调用方的 bug**，当场炸出来而不是编一个字符串糊过去。
+    """
+    return "[%d, %d]" % (int(rng[0]), int(rng[1]))
 
 
 @dataclass
@@ -203,78 +204,3 @@ class Node:
         if self.external:
             r["external"] = self.external
         return r
-
-
-class Trace:
-    """append-only，按 node id 索引。这是"过程下沉"的落点，不是记忆机制。"""
-
-    def __init__(self, path="trace.jsonl"):
-        self.path = path
-        self._lock = threading.Lock()
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-
-    def add(self, node_id, kind, payload):
-        rec = {"t": round(time.time(), 3), "node": node_id, "kind": kind,
-               "payload": payload}
-        line = json.dumps(rec, ensure_ascii=False) + "\n"
-        with self._lock:
-            with open(self.path, "a") as f:
-                f.write(line)
-                f.flush()
-
-    def of(self, node_id):
-        if not os.path.exists(self.path):
-            return []
-        out = []
-        with open(self.path) as f:
-            for line in f:
-                r = json.loads(line)
-                if r["node"] == node_id:
-                    out.append(r)
-        return out
-
-
-class Budget:
-    """纯计数器：只记用掉了多少，给报告看。不设上限。"""
-
-    def __init__(self, max_nodes=None, max_tokens=None, max_hours=None):
-        self.max_nodes = max_nodes
-        self.max_tokens = max_tokens
-        self.max_seconds = max_hours * 3600 if max_hours else None
-        self.nodes = 0
-        self.tokens = 0
-        self.t0 = time.time()
-        self._lock = threading.Lock()
-
-    def take_nodes(self, n):
-        with self._lock:
-            if self.max_nodes is not None and self.nodes + n > self.max_nodes:
-                return False
-            self.nodes += n
-            return True
-
-    def add_tokens(self, n):
-        with self._lock:
-            self.tokens += n
-
-    def exhausted(self):
-        with self._lock:
-            if self.max_nodes is not None and self.nodes >= self.max_nodes:
-                return True
-            if self.max_tokens is not None and self.tokens >= self.max_tokens:
-                return True
-            if self.max_seconds is not None and time.time() - self.t0 >= self.max_seconds:
-                return True
-            return False
-
-    def why(self):
-        with self._lock:
-            return "节点 %d, token %d, %.1f 分钟" % (
-                self.nodes, self.tokens, (time.time() - self.t0) / 60)
-
-    def stats(self):
-        with self._lock:
-            return {"nodes": self.nodes, "tokens": self.tokens,
-                    "minutes": round((time.time() - self.t0) / 60, 1)}

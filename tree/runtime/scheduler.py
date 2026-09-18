@@ -1,0 +1,220 @@
+"""调度器：广度优先、并行扇出、门槛、学能力 —— 次数不限。
+
+    分配节点：读自己的形式字段 + 本层已有尝试 → 「再做一次分配」或「出结论」
+    叶子：  读自己的形式字段 + 观测历史   → 「做一个动作」或「出结论」
+
+原则：
+  · 形式化的是字段，次数不限，判断只看已经发生的事实
+  · 分配节点**没有 execute 分支** ——"不拆"就是派一个叶子
+  · 完成与否由上层看证据复核，节点只能说判定，不能自己算数
+  · 所以这里没有任何计数器（max_rounds / self_exec / nudged / rejects 全部删除）
+
+这个文件只管**编排**：谁先谁后、门槛过没过、并行几个、什么时候学能力。
+"一回合怎么走"在 `turn.py`；协议校验在 `protocol/gate.py`。
+"""
+
+import os
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+from ..memory.mine import caps_from_node
+from ..protocol.fields import Node
+from ..protocol.gate import anchors
+from .budget import Budget
+from .hands import Hands
+from .trace import Trace
+from .turn import step
+
+
+def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
+        index=None, on_beat=None, beat=60):
+    """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。"""
+    registry = {} if registry is None else registry
+    budget = Budget() if budget is None else budget
+    trace = trace if isinstance(trace, Trace) else Trace(trace)
+    hands = Hands()
+    state, pending = {}, deque()
+
+    def register(node):
+        state[node.id] = {"node": node, "ready": True, "finished": False,
+                          "waiting": 0, "rest": [], "gate_id": None,
+                          "gate_name": None, "calls": [], "_caps": [],
+                          "contracts": [], "artifacts": set(), "art_effects": {},
+                          "seen_actions": {}}
+        registry[node.id] = node
+        trace.add(node.id, "open", {
+            "name": node.name, "detail": node.detail, "notes": node.notes,
+            "accept": node.accept, "kind": node.kind, "gate": node.gate,
+            "depth": node.depth, "parent": node.parent,
+            "keywords": node.keywords, "conc_range": node.conc_range,
+            "workspace": os.path.abspath(os.getcwd())})
+        # 出生即检索：键是**上层给的**（根没有上层，就用它自己的名字+验收标准）。
+        # 检索不花 LLM 调用，也不问模型要不要查 —— 实测它没有理由去查，
+        # 而真正贵的恰恰是大事（DESIGN §5.4）。
+        if index is not None:
+            qs = node.keywords or ["%s %s" % (node.name, node.accept)]
+            picked, text = index.search(qs, workspace=os.getcwd())
+            if text:
+                node.precedents.append(text)
+            trace.add(node.id, "precedent",
+                      {"queries": qs, "auto": True,
+                       "hits": [p.id for p in picked], "chars": len(text)})
+        # 现成做法也在出生时塞进来：模型没有动机去主动找工具（它觉得自己都会，§4.3），
+        # 所以没有 need 这个动作 —— 程序按同一组检索键查能力库，直接给它。
+        if caps is not None:
+            q = " ".join(str(x) for x in
+                         (node.keywords or [node.name, node.accept]))
+            picked, text = caps.search(q)
+            if text:
+                node.caps.append(text)
+            state[node.id]["_caps"] = picked
+            trace.add(node.id, "caps_injected",
+                      {"queries": node.keywords or [node.name],
+                       "hits": [e["id"] for e in picked], "chars": len(text)})
+        pending.append(node.id)
+
+    def learn(node, calls, contracts=None):
+        skipped = []
+        for e in caps_from_node(node.id, node.name, calls,
+                                os.path.basename(getattr(trace, "path", "")),
+                                contracts, skipped):
+            caps.record(e)
+            trace.add(node.id, "cap_learned",
+                      {"does": e["does"], "keys": e["keys"],
+                       "scope": e.get("scope"),
+                       "有契约": bool(e.get("契约"))})
+        # 不收的能力也要说得出来：理由 + 原命令，不悄悄丢
+        for s in skipped:
+            trace.add(node.id, "cap_skipped", s)
+
+    def settle(nid, res):
+        st = state[nid]
+        if res["kind"] == "finished":
+            st["finished"] = True
+            node = st["node"]
+            if node.verdict in ("满足", "未满足") and caps is not None and st["calls"]:
+                learn(node, st["calls"], st.get("contracts"))
+            parent = node.parent
+            if parent and parent in state:
+                pst = state[parent]
+                pn = pst["node"]
+                if pn.attempts:
+                    pn.attempts[-1].setdefault("results", []).append(node.record())
+                # 门槛不成立 → 整个分支作废，其余子任务永不启动
+                if pst.get("gate_id") == nid and node.verdict != "满足":
+                    skipped = [s["name"] for s in pst.get("rest") or []]
+                    pst["rest"], pst["gate_id"] = [], None
+                    if pn.attempts:
+                        pn.attempts[-1]["outcome"] = "门槛不成立（%s）: %s" % (
+                            node.name, node.conclusion)
+                        if skipped:
+                            pn.attempts[-1]["results"].append(
+                                {"name": "（以下子任务被跳过）", "outcome": "未启动",
+                                 "text": ", ".join(skipped), "evidence": []})
+                    trace.add(parent, "gate_failed",
+                              {"gate": node.name, "reason": node.conclusion,
+                               "skipped": skipped})
+                    if not pst["finished"]:
+                        pst["ready"] = True
+                        pending.append(parent)
+                    return
+                pst["waiting"] -= 1
+                if pst["waiting"] <= 0 and not pst["finished"]:
+                    if pn.attempts:
+                        pn.attempts[-1]["outcome"] = "下层已全部返回"
+                    if pst.get("rest"):
+                        rest, pst["rest"], pst["gate_id"] = pst["rest"], [], None
+                        trace.add(parent, "gate_passed",
+                                  {"started": [s["name"] for s in rest]})
+                        kids = _spawn(pn, rest)
+                        for k in kids:
+                            register(k)
+                        pst["waiting"] = len(kids)
+                    else:
+                        pst["ready"] = True
+                        pending.append(parent)
+        elif res["kind"] == "children":
+            for k in res["kids"]:
+                register(k)
+            st["waiting"] = len(res["kids"])
+            st["rest"] = res.get("rest") or []
+            st["gate_id"] = res.get("gate_id")
+        else:                                      # again：接着再来一回合
+            if not st["finished"]:
+                st["ready"] = True
+                pending.append(nid)
+
+    def _spawn(parent, specs):
+        kids = []
+        for s in specs:
+            kids.append(Node(name=s["name"], detail=s["detail"], notes=s["notes"],
+                             accept=s["accept"], kind=s["kind"], gate=s["gate"],
+                             keywords=s["keywords"], conc_range=s["conc_range"],
+                             parent=parent.id, depth=parent.depth + 1))
+        parent.children += [k.id for k in kids]
+        return kids
+
+    ctx = {"state": state, "llm": llm, "trace": trace, "budget": budget,
+           "root_anchors": anchors(root.accept),
+           "caps": caps, "index": index, "hands": hands}
+
+    def dispatch(nid, res):
+        """把 step 的抽象结果翻译成真实的节点/子节点。"""
+        if res["kind"] != "children":
+            settle(nid, res)
+            return
+        st = state[nid]
+        pn = st["node"]
+        first = _spawn(pn, res["first"])
+        rest = res["rest"]
+        gate_kid = first[0] if res["gate_name"] else None
+        settle(nid, {"kind": "children", "kids": first,
+                     "rest": rest,
+                     "gate_id": gate_kid.id if gate_kid else None})
+
+    inflight = {}
+    try:
+        register(root)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while pending or inflight:
+                while pending and len(inflight) < workers:
+                    nid = pending.popleft()
+                    st = state[nid]
+                    if st["finished"] or not st["ready"]:
+                        continue
+                    st["ready"] = False
+                    inflight[pool.submit(step, nid, ctx)] = nid
+                if not inflight:
+                    break
+                done, _ = wait(list(inflight), return_when=FIRST_COMPLETED,
+                               timeout=beat if on_beat else None)
+                if not done:
+                    on_beat()
+                    continue
+                for fut in done:
+                    nid = inflight.pop(fut)
+                    dispatch(nid, fut.result())
+    finally:
+        hands.close()
+        trace.drain()
+    return root
+
+
+def render_tree(root, registry, prefix="", is_last=True, lines=None):
+    b = "└─ " if is_last else "├─ "
+    mark = {"done": "✓", "failed": "✗", "running": "·"}.get(root.status, "?")
+    if lines is None:
+        lines = []
+    tag = "%s%s" % ("[分配]" if root.kind == "dispatch" else "[叶子]", " [门槛]" if root.gate else "")
+    lines.append("%s%s%s %s %s" % (prefix, b, mark, tag, root.name))
+    lines.append("%s%s  [%s] %s" % (prefix, "  " if is_last else "│ ",
+                                    root.verdict or "…", root.accept))
+    if root.conclusion:
+        lines.append("%s%s  → %s" % (prefix, "  " if is_last else "│ ",
+                                     root.conclusion))
+    for i, cid in enumerate(root.children):
+        kid = registry.get(cid)
+        if kid:
+            render_tree(kid, registry, prefix + ("   " if is_last else "│  "),
+                        i == len(root.children) - 1, lines)
+    return lines

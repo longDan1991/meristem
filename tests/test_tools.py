@@ -17,10 +17,12 @@
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tree.tools import bash, read                # noqa: E402
-from tree.node import Node, VIEW                 # noqa: E402
+import tree.tools as T                        # noqa: E402
+from tree.tools import bash, read             # noqa: E402
+from tree.protocol.fields import Node, VIEW   # noqa: E402
 
 OK = []
 
@@ -83,8 +85,6 @@ def main():
 
     print("=" * 78)
     print("E. bash 必须带超时，而且超时是可见的 / 可调的 / 会连子进程一起杀")
-    import time as _time
-    import tree.tools as T
     out = T.bash("echo 先打一行; sleep 30", timeout=2)
     print("  超时观测（末两行）: %s" % " / ".join(out.strip().splitlines()[-2:]))
     line("明说是超时，不是「工具出错」", "[超时]" in out and "工具出错" not in out)
@@ -97,7 +97,7 @@ def main():
         os.remove(orphan)
     T.bash("sh -c 'sleep 3; touch %s' & echo 起了个子进程; sleep 30" % orphan,
            timeout=1)
-    _time.sleep(4)
+    time.sleep(4)
     line("超时把子进程也一起杀了（没留孤儿）", not os.path.exists(orphan))
 
     # 夹上限：把上限改小，否则要等一小时才能验这一条
