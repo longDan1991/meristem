@@ -69,7 +69,8 @@ async def submit_root(root: ChildSpec, _b=Depends(get_intake_binding)) -> str:
               budget=env.get("budget"), workers=env.get("workers", 6),
               caps=env.get("caps"), index=env.get("index"),
               on_beat=env.get("on_beat"), beat=env.get("beat", 60),
-              on_event=env.get("on_event"))
+              on_event=env.get("on_event"),
+              on_delta=env.get("on_delta"), on_reasoning=env.get("on_reasoning"))
     if b["say"]:
         b["say"]("（跑完了：%s）" % (rnode.verdict or "没有判定"))
     return _result(rnode)

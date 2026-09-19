@@ -28,7 +28,8 @@ from .turn import step
 
 
 async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
-              index=None, on_beat=None, beat=60, on_event=None):
+              index=None, on_beat=None, beat=60, on_event=None,
+              on_delta=None, on_reasoning=None):
     """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。
 
     真异步（P4）：一个节点的一回合 = 一个 asyncio task，`workers` 是同时在飞
@@ -37,6 +38,10 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
     on_event(node) 是可选的事件回调：每个节点**出生**和**出结论**各调一次
     （节点状态当时分别是 running 和 done/failed）。它是给实时展示用的
     （终端据此重画任务树）—— 调度器只管发事实，怎么显示是消费方的事。
+
+    on_delta(node_id, text) / on_reasoning(node_id, text) 是可选的**节点级
+    实时吐字**回调：每个节点问模型时，把它吐的每一口（content / 思考）按
+    node_id 送出来，给终端画进树里。没给就不开流式（main 直跑那一路不要）。
     """
     registry = {} if registry is None else registry
     budget = Budget() if budget is None else budget
@@ -176,7 +181,8 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
 
     ctx = {"state": state, "llm": llm, "trace": trace, "budget": budget,
            "root_anchors": anchors(root.accept),
-           "caps": caps, "index": index, "hands": hands, "box": box}
+           "caps": caps, "index": index, "hands": hands, "box": box,
+           "on_delta": on_delta, "on_reasoning": on_reasoning}
 
     def dispatch(nid, res):
         """把 step 的抽象结果翻译成真实的节点/子节点。"""

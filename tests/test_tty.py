@@ -25,6 +25,9 @@
   G. 不是真终端（管道 / 重定向）→ 树逐帧追加
   H. 真终端：任务树用 rich Live 原地重画，跑完那帧留在屏幕上
   I. 用户没交底：入口开口之前，先让他把话说完（不是先调模型）
+  J. 节点级吐字：每个节点正在想/正在说的话，画进树里它的节点下（真终端）
+  K. 跑任务时输入不冻结：敲的字进 Live 帧，跑完按顺序交出去
+  L. 每节点一行铺开：整棵树所有节点正在吐的字都看得见（真终端）
 """
 
 import asyncio
@@ -41,6 +44,7 @@ import tree.intake as intake_mod                           # noqa: E402
 import terminal.chat as chat                               # noqa: E402
 from prompt_toolkit.input import create_pipe_input         # noqa: E402
 from tree.llm import Message, ToolCall                     # noqa: E402
+from tree.protocol.fields import Node                      # noqa: E402
 
 OK = []
 RAN = []
@@ -125,6 +129,136 @@ async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
 
 
 intake_mod.run = fake_run
+
+
+async def slow_stream_run(root, llm, trace, registry=None, budget=None, workers=6,
+                          caps=None, index=None, on_event=None, on_delta=None,
+                          on_reasoning=None, **kwargs):
+    """慢跑的树替身：按 node_id 吐字、给够时间让跑阶段的输入会话活一阵。
+
+    真调度器把终端的节点级 on_delta/on_reasoning 接到 llm.chat（turn.ask），
+    这里直接照发，证明终端把这一路画进了树的节点下。总时长约 0.5s。
+    """
+    if registry is not None:
+        registry[root.id] = root
+    if on_event:
+        on_event(root)
+    think = "先看看用户到底要什么，再决定怎么拆。"
+    for i in range(0, len(think), 4):
+        if on_reasoning:
+            on_reasoning(root.id, think[i:i + 4])
+        await asyncio.sleep(0.08)
+    if on_delta:
+        on_delta(root.id, "我要拆成三个子任务。")
+    await asyncio.sleep(0.15)
+    root.close("满足", "跑完了：%s" % root.name, ["证据"])
+    if on_event:
+        on_event(root)
+    return root
+
+
+async def multi_stream_run(root, llm, trace, registry=None, budget=None, workers=6,
+                            caps=None, index=None, on_event=None, on_delta=None,
+                            on_reasoning=None, **kwargs):
+    """慢跑的多节点树替身：根 + 三个孩子并发吐字（各自不同的内容）。
+
+    证明实时视图是**每节点一行铺开** —— 三个孩子同时在想，三路思考都在
+    各自的节点行上看得见（不是只显示一个节点的）。总时长约 0.5s。
+    """
+    if registry is not None:
+        registry[root.id] = root
+    if on_event:
+        on_event(root)
+    for i in range(0, 16, 4):
+        if on_reasoning:
+            on_reasoning(root.id, "根在想怎么拆这一句"[i:i + 4])
+        await asyncio.sleep(0.05)
+    kids = []
+    for name, accept in [("子任务A", "A在2026-12-31 >= 1"),
+                         ("子任务B", "B在2026-12-31 >= 1"),
+                         ("子任务C", "C在2026-12-31 >= 1")]:
+        n = Node(name=name, detail="d", notes="", accept=accept, kind="leaf",
+                 gate=False, keywords=[], conc_range=[], parent=root.id, depth=1)
+        root.children.append(n.id)
+        if registry is not None:
+            registry[n.id] = n
+        kids.append(n)
+        if on_event:
+            on_event(n)
+    thinks = {"子任务A": "孩子A在琢磨验收标准怎么定",
+              "子任务B": "孩子B在看老树有没有先例",
+              "子任务C": "孩子C准备写第一段代码"}
+
+    async def stream(kid, txt):
+        for i in range(0, len(txt), 4):
+            if on_reasoning:
+                on_reasoning(kid.id, txt[i:i + 4])
+            await asyncio.sleep(0.05)
+
+    await asyncio.gather(*(stream(k, thinks[k.name]) for k in kids))
+    for k in kids:
+        k.close("满足", "做完了：%s" % k.name, ["证据"])
+        if on_event:
+            on_event(k)
+    root.close("满足", "全部完成", ["证据"])
+    if on_event:
+        on_event(root)
+    return root
+
+
+async def _typed_sched(inp, schedule):
+    """按 (延时秒, 按键) 一张表敲键。Ctrl-D 必须排在慢跑（≈0.5s）之后：
+    跑阶段还开着时按 Ctrl-D = 运行中中止（那是设计行为，不是本节的断言）。"""
+    for delay, key in schedule:
+        await asyncio.sleep(delay)
+        inp.send_text(key)
+
+
+def slow_session(replies, schedule):
+    """真终端 + 慢跑：返回屏幕上留下的内容（Live 原地画，最后那帧留下）。"""
+    screen = Screen(tty=True)
+    old_run, old_out = intake_mod.run, sys.stdout
+    intake_mod.run, sys.stdout = slow_stream_run, screen
+    try:
+        with create_pipe_input() as inp:
+            session = chat._session(inp)
+            llm = FakeLLM(replies)
+
+            async def go():
+                r, _ = await asyncio.gather(
+                    chat.converse(llm, "帮我赚大钱", ENV, session=session),
+                    _typed_sched(inp, schedule))
+                return r
+
+            _guard(go)
+    finally:
+        sys.stdout = old_out
+        intake_mod.run = old_run
+    return screen
+
+
+def multi_session(replies, schedule):
+    """真终端 + 多节点慢跑：返回屏幕上留下的内容（Live 原地画，最后那帧留下）。"""
+    screen = Screen(tty=True)
+    env = {"trace": None, "registry": {}}
+    old_run, old_out = intake_mod.run, sys.stdout
+    intake_mod.run, sys.stdout = multi_stream_run, screen
+    try:
+        with create_pipe_input() as inp:
+            session = chat._session(inp)
+            llm = FakeLLM(replies)
+
+            async def go():
+                r, _ = await asyncio.gather(
+                    chat.converse(llm, "帮我赚大钱", env, session=session),
+                    _typed_sched(inp, schedule))
+                return r
+
+            _guard(go)
+    finally:
+        sys.stdout = old_out
+        intake_mod.run = old_run
+    return screen
 
 
 async def _typed(inp, keys, pause=0.1):
@@ -330,6 +464,41 @@ def main():
     line("先问了他要做什么（不是先调模型）", "先说你要做什么" in scr.plain())
     line("说清了怎么发、怎么换行",
          "回车就是发送" in scr.plain() and "Alt-Enter" in scr.plain())
+
+    print("=" * 80)
+    print("J. 节点级吐字：每个节点正在说的话/想的事，画进树里它的节点下")
+    scr = slow_session([root(), "好，那继续谈。"],
+                       [(0.2, "2026-12-31 收盘\r"), (2.2, "\x04")])
+    line("思考一小口一小口按 node_id 画进树", "▸ 思考: 先看看" in scr.plain())
+    line("思考的尾巴跟着长（不是只有头一个字）", "再决定怎么" in scr.plain())
+    line("content 也画进树（▸ 说:）", "▸ 说: 我要拆成三个子任务" in scr.plain())
+    line("树照样跑完、判定留在屏幕上",
+         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
+
+    print("=" * 80)
+    print("K. 跑任务时输入不冻结：敲的字进 Live 帧，跑完按顺序交出去")
+    scr = slow_session([root(), "你说的「赚大钱」按哪个数字判定？", "好。"],
+                       [(0.15, "2026-12-31 收盘\r"), (0.3, "先停一下\r"),
+                        (0.45, "3\r"), (2.5, "\x04")])
+    line("跑的时候敲的字没有丢（进过 Live 帧的输入行）",
+         "先停一下" in scr.plain())
+    line("跑完后输入行的字按顺序交出去",
+         scr.plain().count("（运行中你输入了") >= 2,
+         "%d 条" % scr.plain().count("（运行中你输入了"))
+
+    print("=" * 80)
+    print("L. 每节点一行铺开：整棵树所有节点正在吐的字都看得见（真终端）")
+    scr = multi_session([root(), "好，那继续谈。"],
+                        [(0.2, "2026-12-31 收盘\r"), (3.0, "\x04")])
+    line("三个孩子都在各自的节点行上（不是只显示一个）",
+         all(x in scr.plain() for x in
+             ["子任务A", "子任务B", "子任务C"]))
+    line("三路思考都画进树（每节点一行）",
+         all(x in scr.plain() for x in
+             ["孩子A在琢磨", "孩子B在看老树", "孩子C准备写"]))
+    line("根的吐字也在自己那行", "根在想怎么拆" in scr.plain())
+    line("跑完切回详细帧（判定 + 验收标准都在）",
+         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

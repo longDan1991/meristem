@@ -100,7 +100,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
 | `tree/runtime/turn.py` | 369 | 一个节点的一回合：问模型（带工具）→ 工具函数做动作 / 出结论。三个工具的实现在这里（ContextVar 注入每节点 ctx） |
-| `tree/runtime/scheduler.py` | 232 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、学能力、进度回调、**节点开/关事件回调（`on_event`，给终端实时画树）** |
+| `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、学能力、进度回调、**节点开/关事件回调（`on_event`）与节点级吐字回调（`on_delta/on_reasoning`，给终端实时画树）** |
 | `tree/runtime/box.py` | 180 | **盒子**：`register` / `search` / `call` —— 能力库里的 cap 变成可调用的 API |
 | `tree/runtime/sandbox.py` | 367 | **executor**：一段代码在 CPython 子进程里跑，工具走 JSON 行协议回调宿主（真异步） |
 | `tree/memory/text.py` | 47 | 词法匹配（token / 2-gram），索引与能力库共用 |
@@ -179,7 +179,17 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
   就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由 / “接到任务 /
   跑完了”走旁白，**任务跑的时候终端把当前整棵树实时画出来**（每开/关一个
   节点重画一次：真终端用 rich Live 原地重画，非终端逐帧追加；跑完那帧就是
-  完整结果，树的视图在 `tree/protocol/fields.py`）。**读交给 `prompt_toolkit`**
+  完整结果，树的视图在 `tree/protocol/fields.py`）。**实时视图每节点一行铺开**
+  （`render_tree(compact=True)`）：`· [叶子] 子任务B  ▸ 思考: …`，整棵树按结构
+  铺开，所有节点正在吐的字都占一行看得见，谁也不被折掉（屏幕放不下只折没在
+  跑的段落）；根出结论那帧切回详细视图。**每个节点问模型时的吐字（思考 / 话）
+  也画进树**：按 node_id 送进 Live 帧，画在它自己的节点行上
+  （`run` 的 `on_delta / on_reasoning` → `turn.ask` 按节点包一层），最底一行
+  永远是输入行。**跑任务时输入不冻结**：
+  树的 Live 接管屏幕的同时，终端开一条不渲染的 prompt_toolkit 会话读键盘
+  （DummyOutput：一个屏幕只有一个画家，rich 和 prompt_toolkit 各画一遍会把
+  光标位置搞乱，实测），敲下的行进队列、入口下次提问按顺序交给它，运行中
+  Ctrl-D / Ctrl-C 就是中止整个会话。**读交给 `prompt_toolkit`**
   （`terminal/chat.py` 的 `PromptSession` + `prompt_async`）：回车发送、方向键改已经
   敲的字、上下键翻历史、粘贴多行当一条、要分几行写按 Alt-Enter；
   Ctrl-D / Ctrl-C 中止时返回 `None`，不抛 traceback。这一段不再自己拿 `input()` 拼
@@ -319,7 +329,7 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 | `tests/test_box.py` | 39 | **盒子与 code-mode**：注册/搜索/签名（有契约才可调用）、填模板与错参当场抛、绑定名净化与保留名、print=观测、超时是观测、运行时 `search_tools` 当场装函数、**产出靠工作区 diff**（`open()` 直接写也跑不掉）、两条复用路径都记账 |
 | `tests/test_intake.py` | 28 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
 | `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
-| `tests/test_tty.py` | 43 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
+| `tests/test_tty.py` | 52 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
 
 ```bash
 for t in protocol caps index tools box intake cli tty; do python3 tests/test_$t.py; done

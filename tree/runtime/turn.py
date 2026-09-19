@@ -73,12 +73,23 @@ def _log_usage(llm, trace, node_id, phase, budget):
     budget.add_tokens(total)
 
 
-async def ask(llm, trace, node, which, budget):
+async def ask(llm, trace, node, which, budget, ctx=None):
+    """问模型。节点级的实时吐字从这里接出去：调度器把终端给的
+    `on_delta` / `on_reasoning` 放进 ctx，这里按节点包一层再传给 llm.chat ——
+    节点是并发的，回调不带 node.id 就分不清是谁在说话（§11 不建共享计数器，
+    只是给回调做标记）。没给就不开流式：main 直跑那一路没有实时展示，
+    不背 SSE 的开销。"""
     trace.add(node.id, "%s_in" % which, node.render())
     tools = (await openai_tools())[which]
+    stream_kw = {}
+    if ctx:
+        if ctx.get("on_delta"):
+            stream_kw["on_delta"] = lambda t: ctx["on_delta"](node.id, t)
+        if ctx.get("on_reasoning"):
+            stream_kw["on_reasoning"] = lambda t: ctx["on_reasoning"](node.id, t)
     msg = await llm.chat([{"role": "system", "content": PROMPT[which]},
                           {"role": "user", "content": node.render()}],
-                         tools=tools)
+                         tools=tools, **stream_kw)
     _log_usage(llm, trace, node.id, which, budget)
     trace.add(node.id, "%s_out" % which,
               {"text": msg.text,
@@ -348,7 +359,7 @@ async def step(nid, ctx):
 
     which = "leaf" if node.kind == "leaf" else "alloc"
     _step_binding.set((ctx, nid))
-    msg = await ask(llm, trace, node, which, budget)
+    msg = await ask(llm, trace, node, which, budget, ctx)
 
     if not msg.tool_calls:
         hint = ("（你只回了一段文字，开头：%s）" % msg.text[:60]) if msg.text else ""
