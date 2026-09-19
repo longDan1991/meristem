@@ -46,6 +46,10 @@ def _required(name):
 WORKSPACE = _abs(_required("TREE_WORKSPACE"))
 # 能力库：跨 session 复用的现成做法。默认在工作区里。
 CAPS_PATH = _abs(os.environ.get("TREE_CAPS") or os.path.join(WORKSPACE, "caps.jsonl"))
+# 代码沙箱落临时脚本和观测日志的地方：工作区里的隐藏目录，
+# 不往模型的 cwd 里扔垃圾，也不会被工作区 diff 记成它的产出。
+SNIPPET_DIR = _abs(os.environ.get("TREE_SNIPPET_DIR")
+                   or os.path.join(WORKSPACE, ".tree"))
 # 要索引的老树：默认扫工作区里所有历史 trace。执行树就是成果树。
 INDEX_GLOB = os.environ.get("TREE_INDEX") or os.path.join(
     WORKSPACE, "runs", "*", "trace.jsonl")

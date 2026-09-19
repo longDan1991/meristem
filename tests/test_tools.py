@@ -14,6 +14,7 @@
   D. 观测历史过长时明说被截了，且**新观测优先拿额度**
 """
 
+import asyncio
 import os
 import re
 import sys
@@ -21,7 +22,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tree.tools as T                        # noqa: E402
-from tree.tools import bash, read             # noqa: E402
+from tree.tools import read                  # noqa: E402
+
+
+def bash(*a, **k):
+    """bash 现在是真异步（P4），测试里用同步壳调它。"""
+    return asyncio.run(T.bash(*a, **k))
 from tree.protocol.fields import Node, VIEW   # noqa: E402
 
 OK = []
@@ -85,7 +91,7 @@ def main():
 
     print("=" * 78)
     print("E. bash 必须带超时，而且超时是可见的 / 可调的 / 会连子进程一起杀")
-    out = T.bash("echo 先打一行; sleep 30", timeout=2)
+    out = bash("echo 先打一行; sleep 30", timeout=2)
     print("  超时观测（末两行）: %s" % " / ".join(out.strip().splitlines()[-2:]))
     line("明说是超时，不是「工具出错」", "[超时]" in out and "工具出错" not in out)
     line("已经产生的输出被带回来了", "先打一行" in out)
@@ -95,7 +101,7 @@ def main():
     orphan = "/tmp/_t_orphan_%d" % os.getpid()
     if os.path.exists(orphan):
         os.remove(orphan)
-    T.bash("sh -c 'sleep 3; touch %s' & echo 起了个子进程; sleep 30" % orphan,
+    bash("sh -c 'sleep 3; touch %s' & echo 起了个子进程; sleep 30" % orphan,
            timeout=1)
     time.sleep(4)
     line("超时把子进程也一起杀了（没留孤儿）", not os.path.exists(orphan))
@@ -104,9 +110,9 @@ def main():
     _saved = (T.BASH_TIMEOUT, T.BASH_TIMEOUT_MAX)
     T.BASH_TIMEOUT, T.BASH_TIMEOUT_MAX = 1, 2
     try:
-        o1 = T.bash("sleep 30", timeout=99999)
+        o1 = bash("sleep 30", timeout=99999)
         line("超上限会被夹住并明说", "被夹到上限" in o1 and "99999" in o1)
-        o2 = T.bash("sleep 30")          # 不给 timeout → 用默认
+        o2 = bash("sleep 30")          # 不给 timeout → 用默认
         line("不给 timeout 也一定有超时（走默认）", "[超时]" in o2 and "上限" in o2)
     finally:
         T.BASH_TIMEOUT, T.BASH_TIMEOUT_MAX = _saved

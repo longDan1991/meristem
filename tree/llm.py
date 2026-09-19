@@ -15,6 +15,7 @@ MockLLM 让整棵树在没有 API key 的情况下也能跑通。
 
 import json
 import os
+import re
 import threading
 
 import litellm
@@ -43,8 +44,8 @@ class LLM:
     def _route(self, model):
         return model if "/" in model else _COMPAT_PREFIX + model
 
-    def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
-        """给 messages，返回整段文本。
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
+        """给 messages，返回整段文本。真异步（P4）：走 `litellm.acompletion`。
 
         `on_delta` / `on_reasoning` 给了任一个就**流式**：内容每到一个字就调
         一次 `on_delta(这一小口)`，模型思考每到一个字就调一次
@@ -55,7 +56,7 @@ class LLM:
         已经开始吐字就不重试 —— 重试会把同一段话说两遍（§2.5 实测教训）。
         """
         streaming = on_delta is not None or on_reasoning is not None
-        resp = litellm.completion(
+        resp = await litellm.acompletion(
             model=self._route(self.model),
             messages=messages,
             temperature=temperature,
@@ -67,11 +68,11 @@ class LLM:
         if not streaming:
             self._tls.usage = _usage_dict(resp)
             return resp.choices[0].message.content
-        return self._stream(resp, messages, on_delta, on_reasoning)
+        return await self._stream(resp, messages, on_delta, on_reasoning)
 
-    def _stream(self, resp, messages, on_delta, on_reasoning):
+    async def _stream(self, resp, messages, on_delta, on_reasoning):
         parts, chunks = [], []
-        for chunk in resp:
+        async for chunk in resp:
             chunks.append(chunk)
             try:
                 delta = chunk.choices[0].delta
@@ -121,16 +122,15 @@ class MockLLM:
     def __init__(self):
         self.calls = 0
 
-    def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
         self.calls += 1
         self.last_usage = {"total_tokens": 0}
         user = messages[-1]["content"]
         fresh = "(还没有)" in user
 
-        if "可用工具" in user:                      # 叶子
+        if "手上的东西" in user:                   # 叶子
             if fresh:
-                text = json.dumps({"action": {"tool": "bash",
-                                               "args": {"cmd": "echo mock"}}},
+                text = json.dumps({"code": "print(bash(cmd='echo mock'))"},
                                   ensure_ascii=False)
             else:
                 text = json.dumps({"conclusion": {"verdict": "满足",
@@ -138,9 +138,15 @@ class MockLLM:
                                                    "evidence": ["第1次观测"]}},
                                   ensure_ascii=False)
         elif fresh:                                 # 分配节点：拆一次
+            # 子任务的 accept 必须**带着父的那条可测物理量**（gate 会核对），
+            # 所以从父的 accept 上长出来，而不是编一句固定的 —— 编的那句会被
+            # 判成“把任务换成了别的东西”，mock 就永远拆不开。
+            m = re.search(r"^accept:\s*(.+)$", user, re.M)
+            acc = (m.group(1).strip() if m else "") or "可观测结果"
+
             def kid(n):
                 return {"name": n, "detail": "mock 详情", "notes": "",
-                        "accept": "%s 的可观测结果" % n, "kind": "leaf",
+                        "accept": "%s（%s 负责）" % (acc, n), "kind": "leaf",
                         "gate": False, "keywords": ["mock", "echo"],
                         "conc_range": [50, 200]}
             text = json.dumps({"children": [kid("子任务A"), kid("子任务B")]},

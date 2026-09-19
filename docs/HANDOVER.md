@@ -53,7 +53,7 @@ python3 main.py --intake
 # 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
 
 # 测试
-for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
+for t in protocol caps index tools box intake cli tty; do python3 tests/test_$t.py; done
 ```
 
 **`.env` 是唯一的事实来源**（`tree/config.py` 读它）：
@@ -90,22 +90,33 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
 | `tree/intake.py` | 176 | **入口**：唯一顶层。谈成一个形式就当场 `run()`，结论回填再接着谈 |
 | `tree/config.py` | 65 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
-| `tree/llm.py` | 168 | LLM + MockLLM（OpenAI 兼容；`on_delta` 流式、`on_reasoning` 思考） |
-| `tree/tools.py` | 115 | 叶子的手（bash / read / write）。截断与超时的落点；环境失败=观测，不 raise |
-| `tree/effects.py` | 224 | 从 bash/write **机械**抽 effects + 契约核对 / `.meta.json` 落盘 |
-| `tree/protocol/fields.py` | 233 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
-| `tree/protocol/gate.py` | 223 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
+| `tree/llm.py` | 161 | LLM + MockLLM（OpenAI 兼容；`acompletion` 真异步、流式、思考） |
+| `tree/tools.py` | 148 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
+| `tree/effects.py` | 309 | effects 抽取 + 契约核对 / `.meta.json` 落盘 + **工作区快照与 diff**（产出认定） |
+| `tree/protocol/fields.py` | 256 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
+| `tree/protocol/gate.py` | 231 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
 | `tree/runtime/trace.py` | 61 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
-| `tree/runtime/hands.py` | 28 | bash/write 串行执行（单消费者，无锁） |
-| `tree/runtime/turn.py` | 293 | 一个节点的一回合：问模型 → 过闸门 → 动作 / 分配 |
-| `tree/runtime/scheduler.py` | 221 | **调度器**：广度优先、并行扇出、门槛、学能力、进度回调 |
+| `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
+| `tree/runtime/turn.py` | 299 | 一个节点的一回合：问模型（await）→ 过闸门 → 写一段代码 / 分配 |
+| `tree/runtime/scheduler.py` | 232 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、学能力、进度回调 |
+| `tree/runtime/box.py` | 180 | **盒子**：`register` / `search` / `call` —— 能力库里的 cap 变成可调用的 API |
+| `tree/runtime/sandbox.py` | 367 | **executor**：一段代码在 CPython 子进程里跑，工具走 JSON 行协议回调宿主（真异步） |
 | `tree/memory/text.py` | 47 | 词法匹配（token / 2-gram），索引与能力库共用 |
 | `tree/memory/index.py` | 270 | 老树索引 + 整树检索（返回**路径**；阻塞枝带回"卡在哪"） |
-| `tree/memory/caps.py` | 227 | 能力库（单线程门 + 队列；失败自动退休、幂等回填） |
-| `tree/memory/mine.py` | 404 | 从 trace 挖能力（在线增量 + 离线批量共用） |
+| `tree/memory/caps.py` | 244 | 能力库（单线程门 + 队列；失败自动退休、幂等回填）+ 签名/参数渲染 |
+| `tree/memory/mine.py` | 409 | 从 trace 挖能力（在线增量 + 离线批量共用；认 `code_call`） |
+| `tree/memory/verify.py` | 96 | **主动重验**：把 general 的 cap 重新跑一遍，烂的先记 fails（喂给自动退休）；project / 依赖目录的不冤枉 |
 | `docs/DESIGN.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
+
+**并发模型（P4 后）**：整个运行时是 asyncio —— 一个节点的一回合 = 一个
+`asyncio.Task`（`scheduler` 用 `wait(FIRST_COMPLETED)` 回收，`workers` 是同时在飞的任务数）；
+LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都不占线程。
+`hands` 用**单消费者队列**串行 bash/write（AGENTS §9，无锁）。
+**仅有的两个线程是 `trace` 和 `budget`**：它们是单一 I/O 记账者（写 jsonl / 计数），
+不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着，
+写的是 `docs/DESIGN.md` §4.0 和本行。
 
 ### 2.2 真实数据资产（在工作区里）
 
@@ -272,23 +283,24 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 ---
 
-## 6. 测试（216 个断言，全离线）
+## 6. 测试（250 个断言，全离线）
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
-| `tests/test_protocol.py` | 54 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、**老树只给分配节点查**、无进展停下、分配节点没有 execute、**收到的行首 == 要写的 8 个键**、**文档点名的段落 == 真渲染的段落**、**意图链两种节点都有** |
-| `tests/test_caps.py` | 46 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
-| `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
-| `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_intake.py` | 29 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
-| `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
-| `tests/test_tty.py` | 37 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
+| `tests/test_protocol.py` | 50 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、**老树只给分配节点查**、无进展停下、分配节点没有 execute、**收到的行首 == 要写的 8 个键**、**文档点名的段落 == 真渲染的段落**、**意图链两种节点都有** |
+| `tests/test_caps.py` | 52 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
+| `tests/test_index.py` | 21 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
+| `tests/test_tools.py` | 20 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
+| `tests/test_box.py` | 38 | **盒子与 code-mode**：注册/搜索/签名（有契约才可调用）、填模板与错参当场抛、绑定名净化与保留名、print=观测、超时是观测、运行时 `search_tools` 当场装函数、**产出靠工作区 diff**（`open()` 直接写也跑不掉）、两条复用路径都记账 |
+| `tests/test_intake.py` | 24 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
+| `tests/test_cli.py` | 12 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
+| `tests/test_tty.py` | 38 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**回车不发送（多行拼成一条）**、Ctrl-D 分「说完了」与「中止」两种、旁白到位、管道输入不留粘连；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入 |
 
 ```bash
-for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
+for t in protocol caps index tools box intake cli tty; do python3 tests/test_$t.py; done
 ```
 
-**待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）。
+**待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）；主动重验的定时跑法还没接进 `main.py`（现在是 `python -m tree.memory.verify <caps.jsonl>` 手动跑）。
 
 ---
 
@@ -307,8 +319,9 @@ for t in protocol caps index tools intake; do python3 tests/test_$t.py; done
 
 3. **"取回的路"必须真的通。** `read` 返回里写了"`read(offset=2000)` 取下一段"，
    但 `offset` 从来没传下去 —— 模型照做了也拿不到下一段，只能反复重读。
-   **凡是告诉模型"你可以用 X 取回/调整"的地方，`_do_action` 的 `call_args` 就必须透传那个参数**
-   （现在白名单是 `path/content/cmd/timeout/offset/limit`）。
+   当时靠白名单透传来修（`path/content/cmd/timeout/offset/limit`）；
+   现在工具是子进程里的函数、参数按名字发给宿主（`sandbox._dispatch`），
+   少一个参数就是子进程里当场一个 `TypeError` —— 这一类漏传在结构上不可能再发生。
 
 4. **任何"退回去重来"的路径都必须计数，否则就是死循环。** 实测撞了两次：
    看不懂的输出（同一回合不停）、总缺 `accept` 的子任务（一直分配 → 一直被拒）。

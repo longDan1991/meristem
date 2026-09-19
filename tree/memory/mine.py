@@ -358,8 +358,9 @@ def caps_from_node(nid, task, calls, trace_name, contracts=None, skipped=None):
 def mine_trace(trace_path):
     """离线：扫整份 trace。
 
-    trace 是历史数据，格式变过两次：形式化之前用 done/leaf_tool，
-    之后用 concluded/action。两种都要能读，否则旧的那 14MB 就变成死数据了。
+    trace 是历史数据，格式变过三次：形式化之前用 done/leaf_tool，
+    之后用 concluded/action，现在是 code_call（一段代码里的每一次工具调用）。
+    三种都要能读，否则那些旧 trace 就变成死数据了。
     """
     status, tools, tasks, contracts = {}, {}, {}, {}
     with open(trace_path, encoding="utf-8") as f:
@@ -383,6 +384,10 @@ def mine_trace(trace_path):
                     (p.get("tool") or p.get("工具"),
                      p.get("args") or p.get("参数") or {},
                      str(p.get("obs") or p.get("观测", ""))))
+            elif k == "code_call" and p.get("tool"):     # 代码模式：一次工具调用
+                tools.setdefault(nid, []).append(
+                    (p["tool"], p.get("args") or {},
+                     str(p.get("obs") or p.get("error") or "")))
             elif k == "contract" and p.get("path"):       # write 出来的工件契约
                 contracts.setdefault(nid, []).append(
                     {"path": p["path"], "契约": p.get("contract") or p.get("契约") or {},

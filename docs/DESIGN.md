@@ -277,9 +277,12 @@ Node{ name, detail, notes, accept, kind=dispatch|leaf, gate,
 
 - **分配节点**：`{"children":[...]}` 或 `{"conclusion":{}}`。
   **没有 execute 分支** —— "不拆"就是派一个叶子。少一个分支，少一类边界情况。
-- **叶子**：`{"action":{tool,args}}` 或 `{"conclusion":{}}`，
-  工具只有 `bash` / `read` / `write`。**没有 `need`** —— 现成做法在出生时就
-  由程序塞进来了（§4.3、§5.4）。
+- **叶子**：`{"code":"..."}` 或 `{"conclusion":{}}`。
+  它写的是**一段真的 Python 代码**，跑在一个 CPython 子进程里（`runtime/sandbox.py`）：
+  三只手 `bash` / `read` / `write` 永远绑着，命中的**现成做法各自绑成同名函数**
+  （`runtime/box.py`），`print` 和最后一行表达式的值就是观测。
+  **没有 `need`** —— 现成做法在出生时就由程序塞进来了（§4.3、§5.4）；
+  运行时还想找就 `search_tools("...")`，命中什么当场装成函数。
 
 每个子任务**除 `notes` 外全部必填**，缺一个当场被拒：
 `name` / `detail` / `accept` / `kind` / `keywords` / `conc_range`。
@@ -303,7 +306,7 @@ Node{ name, detail, notes, accept, kind=dispatch|leaf, gate,
 `keywords`=不浪费已经做过的工作、`conc_range`=想要的成果规模、`gate`=轻重缓急。
 
 **注入面是公开的**：`render()` 会渲哪几段（先例 / 现成做法 / 上层意图链 /
-本层已有尝试 / 观测历史 / 可用工具），`prompts/*.md` 里逐段点名，
+本层已有尝试 / 观测历史 / 手上的东西），`prompts/*.md` 里逐段点名，
 `tests/test_protocol.py` 的 I 段**双向核对**：文档说了没渲 = 承诺落空，
 渲了文档没说 = 偷偷塞东西。（旧账：叶子那份曾经写了"命中的判据链在先例里"，
 而叶子根本不渲先例 —— 这个核对就是为了让这类漂移当场红。）
@@ -320,6 +323,36 @@ Node{ name, detail, notes, accept, kind=dispatch|leaf, gate,
 ---
 
 ## 4. 能力：从成功里长出来
+
+### 4.0 能力库就是盒子：注册 / 搜索 / 调用
+
+叶子不是“拄一条命令去 bash 里跑”，而是**写一段代码去调函数**。
+能力库（`memory/caps.py`）是那个装着所有工具的盒子，三个动作对应三件事
+（`runtime/box.py`）：
+
+| 动作 | 谁调 | 干什么 |
+|---|---|---|
+| `register(entry)` | `scheduler.settle` → `learn` | 节点完工，把这次成功的做法（+ 契约）写进库 |
+| `search(query)` | 节点出生（`register`）、运行时 `search_tools()` | 命中什么就返回什么：文字给**全部**命中，函数只绑**有签名**的那些 |
+| `call(tool_id, args)` | 子进程里的同名函数 | 填模板 → 跑 → 记 uses/fails |
+
+**“有签名”就是契约里有 `func`**（`func` 里 `__名字__` 是占位符，`params` 说它
+是什么类型）。只有这种能变成函数；只有配方、没签名的仍在文字里，能照抄着跑。
+错签名比没签名更坏 —— 它会把模型引到一条走不通的路上（`gate.contract_problems`
+在结论那一刻就把对不上占位符的 params 退回去）。
+
+**叶子写的那段代码跑在一个真的 CPython 子进程里**（`runtime/sandbox.py`），
+不是沙箱：叶子本来就有 bash，给编排代码加沙箱等于给已经握着钥匙的人装防盗门，
+代价却是那套 Python 子集（没有 pandas / glob / async with）。协议是一行一个 JSON：
+子进程要调工具就写一行到 stdout 等回答，它的 `stderr` 整份就是**观测**。
+
+两件必须刻意的：
+
+- **超时在子进程里触发**（SIGALRM），所以 `while True: pass` 能被中断，
+  而且“超时”是一条**观测**（和 bash 一样明说），不是静默杀掉。
+  等宿主的时间不计入额度 —— 一条跑 20 分钟的 bash 不该吃掉代码的额度。
+- **产出记账靠跑前跑后 diff 工作区**，不是解析工具参数：代码模式下没有参数
+  可解析，而 diff 连 `open()` 直接写的文件都跑不掉，比解析参数硬。
 
 ### 4.1 一个工件一条能力
 

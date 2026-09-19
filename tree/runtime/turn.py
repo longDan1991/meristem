@@ -11,14 +11,14 @@
 """
 
 import hashlib
-import json
 import os
 
-from ..effects import ARTIFACT_EXT, accept_artifacts, effects_of
+from ..effects import (ARTIFACT_EXT, accept_artifacts, classify_paths,
+                       effects_of, snapshot_workspace)
 from ..llm import parse_json
 from ..prompts import PROMPT
 from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits
-from ..tools import TOOLS
+from . import sandbox
 
 
 # ---------------------------------------------------------------- 问模型
@@ -36,10 +36,10 @@ def _log_usage(llm, trace, node_id, phase, budget):
     budget.add_tokens(total)
 
 
-def ask(llm, trace, node, which, budget):
+async def ask(llm, trace, node, which, budget):
     trace.add(node.id, "%s_in" % which, node.render())
-    text = llm.chat([{"role": "system", "content": PROMPT[which]},
-                     {"role": "user", "content": node.render()}])
+    text = await llm.chat([{"role": "system", "content": PROMPT[which]},
+                           {"role": "user", "content": node.render()}])
     _log_usage(llm, trace, node.id, which, budget)
     trace.add(node.id, "%s_out" % which, text)
     try:
@@ -52,17 +52,15 @@ def ask(llm, trace, node, which, budget):
 
 
 # ---------------------------------------------------------------- 原地打转
-def sig(tool, args, obs):
-    """动作 + 观测的指纹。用于检测"重复同一件事、没有新信息"。
+def sig(what, obs=""):
+    """这次做了什么 + 世界回了什么的指纹。用于检测"重复同一件事、没有新信息"。
 
-    这不是轮次上限：只要观测变了（比如轮询一个正在启动的服务），
-    指纹就不同，永远不会触发。它检测的是**没有新信息**，不是"做得太多"。
-
+    这不是轮次上限：只要观测变了（比如轮询一个正在启动的服务），指纹
+    就不同，永远不会触发。它检测的是**没有新信息**，不是"做得太多"。
     观测**整段参与哈希**：截掉尾巴会让"只在 400 字之后不一样"的两次观测
     看起来一样，于是真的进展被当成原地打转。哈希再长的字符串也不贵。
     """
-    a = json.dumps({"tool": tool, "args": args}, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha1((a + "\x00" + str(obs)).encode()).hexdigest()
+    return hashlib.sha1((str(what) + "\x00" + str(obs)).encode()).hexdigest()
 
 
 def bump(seen, fingerprint, trace, node, what):
@@ -97,7 +95,7 @@ def balk(node, why, trace, st, kids=None):
     else:
         node.attempts.append({"children": kids or [], "rejected": why})
     n, note = bump(st.setdefault("seen_actions", {}),
-                   sig("(balk)", why, ""), trace, node, "(用不了的输出)")
+                   sig("(balk)", why), trace, node, "(用不了的输出)")
     if n >= 5:
         node.close("未满足", "同一份用不了的东西连续 %d 次，没有新信息：%s"
                    % (n, why), [])
@@ -110,75 +108,89 @@ def balk(node, why, trace, st, kids=None):
     return {"kind": "again"}
 
 
-# ---------------------------------------------------------------- 动作
-def do_action(node, act, trace, caps, st, hands):
-    """执行一个形式化动作。返回观测文本。动作是唯一能改变世界的东西。"""
-    tool = str(act.get("tool", ""))
-    args = act.get("args") or {}
-    if not isinstance(args, dict):
-        return "参数必须是一个 JSON 对象"
-    if tool not in TOOLS:
-        return ("没有这个工具：%s（只有 bash / read / write）\n"
-                "现成做法已经在上面的「现成做法」里了，直接用 bash 跑。" % tool)
-    # offset/limit 必须传下去 —— read 的返回里就写着
-    # "read(offset=2000) 取下一段"，不传的话模型照做了也拿不到下一段，
-    # 它就只能反复重读（这正是当年读了 25 次的那个坑）。
-    call_args = {k: args[k] for k in ("path", "content", "cmd", "timeout",
-                                      "offset", "limit") if k in args}
-    # write 必须在动作**之前**记下文件存不存在，否则 create 永远被记成 modify
-    existed = None
-    if tool == "write":
-        existed = os.path.exists(str(args.get("path")))
-    # 工具层把环境错误变成观测（世界说"不行"），编程错误照旧往上炸（§2）。
-    # 观测不能提前 return —— 提前 return 会让它绕过调用方的重复计数，
-    # 于是同一个报错无限重试。
-    obs = hands.run(tool, call_args)
+# ---------------------------------------------------------------- 动手
+def code_label(code):
+    """观测历史里给这一段代码的标题：第一行，够短。
+    完整代码进 trace（那里不占模型的上下文）。"""
+    for ln in str(code).splitlines():
+        if ln.strip():
+            s = ln.strip()
+            return s if len(s) <= 200 else s[:200] + "…"
+    return "(空代码)"
 
-    # 动作之后统一记账：effects 由代码抽，不给模型自报的机会。
-    # bash 和 write 共用这一套 —— 它们本来就是同一件事的两个壳。
-    eff, pre = effects_of(tool, args, cwd=os.getcwd(), existed_before=existed)
-    # effects / 前置条件 是 effects.py 自己的词表（能力库、sidecar 也用它），
-    # 跟形式字段不是一套；这里只把协议那个键写成英文。
-    trace.add(node.id, "effects", {"tool": tool, "effects": eff, "前置条件": pre})
-    # 产出物由代码记账（模型只管干活）。effects 留着，结论时给契约用。
-    made = []
+
+def _merged_effects(calls):
+    """把这一段代码里**真跑过的每一条命令**的 effects 合起来。
+
+    这里来的是文件清单看不见的那一半：装了什么包、连了哪个网、起了常驻进程 ——
+    能力库的「前置条件」靠它，而复用失败最常见的原因就是前提不成立。
+    create/modify 先按命令里写的收下来，真正的认定（是否真发生）由
+    `effects.classify_paths` 对比快照做。"""
+    eff = {"fs": {"create": [], "modify": [], "delete": []},
+           "pkg": [], "proc": [], "net": [], "data": [], "cwd": os.getcwd()}
+    pre = {}
+    for tool, args, _ in calls:
+        e, p = effects_of(tool, args, cwd=os.getcwd())
+        for k in ("pkg", "proc", "net", "data"):
+            for x in e[k]:
+                if x not in eff[k]:
+                    eff[k].append(x)
+        for k in ("create", "modify", "delete"):
+            for x in e["fs"][k]:
+                if x not in eff["fs"][k]:
+                    eff["fs"][k].append(x)
+        pre.update(p)
+    return eff, pre
+
+
+async def do_code(node, code, trace, box, st, hands):
+    """跑一段代码。它是唯一能改变世界的东西，也是这一回合的观测来源。
+
+    产出记账不再靠解析工具参数（代码模式下没有参数可解析）：候选 = 子进程自己
+    报的写入 ∪ 真跑过的命令里解析出的目标，再逐个 stat 和跑之前的快照对比。
+    这样**并发节点写的东西不会被算到它头上**（全局 diff 会 —— 见 `effects.classify_paths`）。
+    这一段代码真发生过的调用（走协议回调宿主的那几次）同时是能力库的原料。
+    """
+    cwd = os.getcwd()
+    # 自己的账本（trace / caps）每回合都在改，不能算成模型的产出
+    skip = [getattr(trace, "path", None)]
+    if getattr(box, "caps", None) is not None:
+        skip.append(getattr(box.caps, "path", None))
+    before = snapshot_workspace(cwd, skip)
+    obs, calls, wrote = await sandbox.run(
+        code, st.get("tools") or [], box, hands, trace=trace,
+        node_id=node.id, cwd=cwd)
+    eff, pre = _merged_effects(calls)
+    candidates = list(wrote)
     for p in eff["fs"]["create"] + eff["fs"]["modify"]:
-        if str(p).lower().endswith(ARTIFACT_EXT):
-            rp = os.path.realpath(p)
-            st.setdefault("artifacts", set()).add(rp)
-            st.setdefault("art_effects", {})[rp] = (eff, pre)
-            if p in eff["fs"]["create"]:
-                made.append(os.path.basename(p))
+        candidates.append(p)
+    created, modified = classify_paths(candidates, before, cwd)
+    eff["fs"] = {"create": created, "modify": modified, "delete": []}
+    trace.add(node.id, "effects", {"calls": [c[0] for c in calls],
+                                    "wrote": wrote, "effects": eff,
+                                    "前置条件": pre})
+    # 要交代的是**该给契约的那几类**（和以前同一个词表）；数据/日志不用管。
+    made = []
+    for p in created + modified:
+        if not str(p).lower().endswith(ARTIFACT_EXT):
+            continue
+        st.setdefault("artifacts", set()).add(os.path.realpath(p))
+        st.setdefault("art_effects", {})[os.path.realpath(p)] = (eff, pre)
+        if p in created:
+            made.append(os.path.basename(p))
+    st.setdefault("calls", []).extend(calls)
     # 过程中只给一个中性事实，不下指令 —— 不分散注意力
     note = "\n（本次产出：%s）" % ", ".join(made) if made else ""
-
-    # 复用反馈：刚检索出来的做法，用它成没成
-    if caps is not None and tool == "bash" and st.get("_caps"):
-        cmd = str(args.get("cmd", ""))
-        for e in list(st["_caps"]):
-            c = (e.get("how") or {}).get("cmd") or ""
-            if c and (c in cmd or cmd in c):
-                ok = ("工具出错" not in str(obs)
-                      and ("[exit=" not in str(obs) or "[exit=0]" in str(obs)))
-                caps.note_outcome(e["id"], ok)
-                trace.add(node.id, "cap_outcome", {"cap": e["id"], "ok": ok})
-                break
-        st["_caps"] = []
-    # 无进展检测：同一动作 + 同一结果重复多次 = 再重复不会带来新信息。
-    # 实测：一个叶子把同一个文件读了 25 次，光摆着历史它停不下来。
-    # 所以把"重复"这个事实显式化（内容信号，不是轮次预算）。
-    # 计数**不在这里做** —— 这里有好几个 return，漏掉一个就是死循环。
-    # 收口在 step：每一回合的动作都在那里计数，一条路也漏不了。
     return str(obs) + note
 
 
 # ---------------------------------------------------------------- 一回合
-def step(nid, ctx):
+async def step(nid, ctx):
     """一个节点的一回合。不递归，只返回下一步该干什么。"""
     st = ctx["state"][nid]
     node = st["node"]
     llm, trace, budget = ctx["llm"], ctx["trace"], ctx["budget"]
-    caps, hands = ctx["caps"], ctx["hands"]
+    hands = ctx["hands"]
 
     if budget.exhausted():
         node.close("阻塞", "预算耗尽: " + budget.why(), [])
@@ -187,7 +199,7 @@ def step(nid, ctx):
         return {"kind": "finished"}
 
     which = "leaf" if node.kind == "leaf" else "alloc"
-    d = ask(llm, trace, node, which, budget)
+    d = await ask(llm, trace, node, which, budget)
 
     if d.get("_bad"):
         # 把非法输出当成一条事实喂回去，让它自己纠正（不加计数器）
@@ -208,31 +220,25 @@ def step(nid, ctx):
         return {"kind": "finished"}
 
     if node.kind == "leaf":
-        act = d.get("action")
-        if not isinstance(act, dict):
+        code = d.get("code")
+        if not isinstance(code, str) or not code.strip():
             return balk(
                 node,
-                "输出里没有能识别的顶层键（你只能给 action 或 conclusion）。"
+                "输出里没有能识别的顶层键（你只能给 code 或 conclusion）。"
                 "你给的键是: %s" % (", ".join(sorted(d)) or "(空)"),
                 trace, st)
-        obs = do_action(node, act, trace, caps, st, hands)
-        label = "%s %s" % (act.get("tool", ""),
-                           json.dumps(act.get("args") or {}, ensure_ascii=False))
-        # 每一回合的动作只在这一处计数：动作成没成、工具报不报错，都得过这里，
-        # 所以"同一动作 + 同一结果 ≥3 告警 / ≥5 停下"没有漏网的路。
+        obs = await do_code(node, code, trace, ctx["box"], st, hands)
+        label = code_label(code)
+        # 每一回合的代码只在这一处计数：跑成没成、报不报错，都得过这里，
+        # 所以"同一段代码 + 同一结果 ≥3 告警 / ≥5 停下"没有漏网的路。
         n, note = bump(st.setdefault("seen_actions", {}),
-                       sig(act.get("tool"), act.get("args") or {}, obs),
-                       trace, node, str(act.get("tool")))
+                       sig(code, obs), trace, node, label)
         if n >= 5:
-            st["stalled"] = ("同一动作重复 %d 次、结果完全一样，没有新信息" % n)
+            st["stalled"] = ("同一段代码重复 %d 次、输出完全一样，没有新信息" % n)
         if note:
             obs = str(obs) + note
         node.observations.append({"action": label, "obs": obs})
-        st["calls"].append((act.get("tool"), act.get("args") or {}, obs))
-        # 存结构化参数：挖掘器要能直接读，不该去反解一个拼出来的字符串
-        trace.add(node.id, "action", {"tool": act.get("tool"),
-                                      "args": act.get("args") or {},
-                                      "obs": obs})
+        trace.add(node.id, "code", {"code": code, "obs": obs})
         stalled = st.pop("stalled", None)
         if stalled:
             trace.add(node.id, "stalled", stalled)

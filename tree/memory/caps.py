@@ -151,6 +151,15 @@ class Caps:
             tag = " [本项目]" if e.get("scope") == "project" else ""
             lines = ["- %s%s" % (c.get("name") or e.get("does", ""), tag),
                      "  用法: %s" % (c.get("func") or how.get("cmd", ""))]
+            ps = c.get("params") or {}
+            if ps:
+                bits = []
+                for k, spec in ps.items():
+                    spec = spec if isinstance(spec, dict) else {}
+                    bits.append("%s:%s%s" % (k, spec.get("type") or "?",
+                                              ("=%s" % spec["default"])
+                                              if "default" in spec else "(必填)"))
+                lines.append("  参数: " + ", ".join(bits))
             if c.get("return"):
                 lines.append("  产出: %s" % c["return"])
             pre = e.get("前置条件") or {}
@@ -181,9 +190,15 @@ class Caps:
             kept.append(e)
         return kept, "\n".join(out)
 
+    def _get(self, eid):
+        return self.entries.get(eid)
+
     def _stats(self):
         live = [e for e in self.entries.values() if not e.get("retired")]
+        callable_ = sum(1 for e in live if (e.get("契约") or {}).get("func"))
         return {"总数": len(live),
+                "可调用": callable_,
+                "不可调用": len(live) - callable_,
                 "已退休": len(self.entries) - len(live),
                 "自带脚本": sum(1 for e in live if (e.get("how") or {}).get("script_file")),
                 "有契约": sum(1 for e in live if e.get("契约")),
@@ -201,6 +216,8 @@ class Caps:
                 reply.put(None)
             elif op == "search":
                 reply.put(self._search(arg))
+            elif op == "get":
+                reply.put(self._get(arg))
             else:
                 reply.put(self._stats())
 
@@ -222,6 +239,9 @@ class Caps:
 
     def search(self, query):
         return self._call("search", query)
+
+    def get(self, eid):
+        return self._call("get", eid)
 
     def stats(self):
         return self._call("stats")

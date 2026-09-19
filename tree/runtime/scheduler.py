@@ -1,7 +1,7 @@
 """调度器：广度优先、并行扇出、门槛、学能力 —— 次数不限。
 
     分配节点：读自己的形式字段 + 本层已有尝试 → 「再做一次分配」或「出结论」
-    叶子：  读自己的形式字段 + 观测历史   → 「做一个动作」或「出结论」
+    叶子：  读自己的形式字段 + 观测历史   → 「写一段代码」或「出结论」
 
 原则：
   · 形式化的是字段，次数不限，判断只看已经发生的事实
@@ -13,32 +13,38 @@
 "一回合怎么走"在 `turn.py`；协议校验在 `protocol/gate.py`。
 """
 
+import asyncio
 import os
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from ..memory.mine import caps_from_node
 from ..protocol.fields import Node
 from ..protocol.gate import anchors
+from .box import Box
 from .budget import Budget
 from .hands import Hands
 from .trace import Trace
 from .turn import step
 
 
-def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
-        index=None, on_beat=None, beat=60):
-    """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。"""
+async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
+              index=None, on_beat=None, beat=60):
+    """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。
+
+    真异步（P4）：一个节点的一回合 = 一个 asyncio task，`workers` 是同时在飞
+    的任务数。谁先完成谁先被回收（`FIRST_COMPLETED`），慢节点不拖整批。
+    """
     registry = {} if registry is None else registry
     budget = Budget() if budget is None else budget
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
+    box = Box(caps, hands)
     state, pending = {}, deque()
 
     def register(node):
         state[node.id] = {"node": node, "ready": True, "finished": False,
                           "waiting": 0, "rest": [], "gate_id": None,
-                          "gate_name": None, "calls": [], "_caps": [],
+                          "gate_name": None, "calls": [], "tools": [],
                           "contracts": [], "artifacts": set(), "art_effects": {},
                           "seen_actions": {}}
         registry[node.id] = node
@@ -64,16 +70,17 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
         # 现成做法也在出生时塞进来（**所有节点**：叶子就是要动手的那个）：
         # 模型没有动机去主动找工具（它觉得自己都会，§4.3），
         # 所以没有 need 这个动作 —— 程序按同一组检索键查能力库，直接给它。
-        if caps is not None:
-            q = " ".join(str(x) for x in
-                         (node.keywords or [node.name, node.accept]))
-            picked, text = caps.search(q)
-            if text:
-                node.caps.append(text)
-            state[node.id]["_caps"] = picked
-            trace.add(node.id, "caps_injected",
-                      {"queries": node.keywords or [node.name],
-                       "hits": [e["id"] for e in picked], "chars": len(text)})
+        # 命中的工具同时存成 **绑定**：它们会在子进程里以同名函数出现，
+        # 模型写代码就能直接调（见 runtime/sandbox.py）。
+        q = " ".join(str(x) for x in (node.keywords or [node.name, node.accept]))
+        tools, text, hits = box.search(q)
+        if text:
+            node.caps.append(text)
+        state[node.id]["tools"] = tools
+        trace.add(node.id, "caps_injected",
+                  {"queries": node.keywords or [node.name],
+                   "hits": hits, "chars": len(text),
+                   "bindings": [t["name"] for t in tools]})
         pending.append(node.id)
 
     def learn(node, calls, contracts=None):
@@ -81,11 +88,11 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
         for e in caps_from_node(node.id, node.name, calls,
                                 os.path.basename(getattr(trace, "path", "")),
                                 contracts, skipped):
-            caps.record(e)
+            box.register(e)
             trace.add(node.id, "cap_learned",
                       {"does": e["does"], "keys": e["keys"],
                        "scope": e.get("scope"),
-                       "有契约": bool(e.get("契约"))})
+                       "可调用": bool((e.get("契约") or {}).get("func"))})
         # 不收的能力也要说得出来：理由 + 原命令，不悄悄丢
         for s in skipped:
             trace.add(node.id, "cap_skipped", s)
@@ -161,7 +168,7 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
 
     ctx = {"state": state, "llm": llm, "trace": trace, "budget": budget,
            "root_anchors": anchors(root.accept),
-           "caps": caps, "index": index, "hands": hands}
+           "caps": caps, "index": index, "hands": hands, "box": box}
 
     def dispatch(nid, res):
         """把 step 的抽象结果翻译成真实的节点/子节点。"""
@@ -180,27 +187,27 @@ def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
     inflight = {}
     try:
         register(root)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            while pending or inflight:
-                while pending and len(inflight) < workers:
-                    nid = pending.popleft()
-                    st = state[nid]
-                    if st["finished"] or not st["ready"]:
-                        continue
-                    st["ready"] = False
-                    inflight[pool.submit(step, nid, ctx)] = nid
-                if not inflight:
-                    break
-                done, _ = wait(list(inflight), return_when=FIRST_COMPLETED,
-                               timeout=beat if on_beat else None)
-                if not done:
-                    on_beat()
+        while pending or inflight:
+            while pending and len(inflight) < workers:
+                nid = pending.popleft()
+                st = state[nid]
+                if st["finished"] or not st["ready"]:
                     continue
-                for fut in done:
-                    nid = inflight.pop(fut)
-                    dispatch(nid, fut.result())
+                st["ready"] = False
+                inflight[asyncio.ensure_future(step(nid, ctx))] = nid
+            if not inflight:
+                break
+            done, _ = await asyncio.wait(list(inflight),
+                                         return_when=asyncio.FIRST_COMPLETED,
+                                         timeout=beat if on_beat else None)
+            if not done:
+                on_beat()
+                continue
+            for fut in done:
+                nid = inflight.pop(fut)
+                dispatch(nid, fut.result())
     finally:
-        hands.close()
+        await hands.close()
         trace.drain()
     return root
 

@@ -217,19 +217,23 @@ class Node:
 
         **没有 need 这个动作**：模型不会主动去找工具（它觉得自己都会），
         所以由程序直接塞给它 —— 和先例同理（DESIGN §4.3、§5.4）。
+        每一条都已经在子进程里**绑定成同名函数**（见 `runtime/sandbox.py`），
+        这里给的是签名和前提 —— 写代码时先看这里。
         """
         if not self.caps:
             return ""
-        return ("\n\n现成做法（以往真实成功过的，仅供参考 —— 仍要自己跑一遍验证）:\n"
+        return ("\n\n现成做法（以往真实成功过的，每一条都已绑定成同名函数，"
+                "直接在代码里调用；仍要自己看一眼结果对不对）:\n"
                 + "\n".join(self.caps))
 
     def render(self):
         if self.kind == "leaf":
             # 叶子不看老树：先例是"这件事该怎么拆、当年卡在哪"的判据，拆是分配节点的事；
             # 叶子只要工具（现成做法）+ 自己的观测。所以这里没有 render_precedents()。
-            return "%s%s%s\n\n可用工具: bash / read / write\n%s" % (
-                self.header(), self.render_lineage(), self.render_caps(),
-                self.render_observations())
+            return ("%s%s%s\n\n手上的东西: bash / read / write（永远都在）"
+                    "+ 上面「现成做法」里的同名函数\n%s" % (
+                        self.header(), self.render_lineage(), self.render_caps(),
+                        self.render_observations()))
         return "%s%s%s%s\n\n%s" % (self.header(), self.render_lineage(),
                                    self.render_precedents(), self.render_caps(),
                                    self.render_attempts())

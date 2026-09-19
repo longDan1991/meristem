@@ -16,6 +16,7 @@
   F. 吐字：话一路出去，形式一路按住（连 ```json 围栏也不吐）
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -45,7 +46,7 @@ class FakeLLM:
     def __init__(self, replies):
         self.replies, self.last_usage, self.said = list(replies), {}, []
 
-    def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
         self.said.append(messages[-1]["content"])
         reply = self.replies.pop(0) if self.replies else "{}"
         if on_reasoning:
@@ -56,8 +57,8 @@ class FakeLLM:
         return reply
 
 
-def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
-             caps=None, index=None, **kwargs):
+async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
+                caps=None, index=None, **kwargs):
     """脚本化的树：只记下跑了哪棵根，给一个可复核的结论。"""
     RAN.append(root)
     root.close("满足", "跑完了：%s" % root.name, ["证据 %s" % root.name])
@@ -79,7 +80,7 @@ def run_intake(llm, seed, answers):
         return answers.pop(0)
 
     try:
-        intake(llm, seed, ask=ask, env=ENV, on_say=said.append)
+        asyncio.run(intake(llm, seed, ask=ask, env=ENV, on_say=said.append))
     except Stop:
         pass
     return asked, said

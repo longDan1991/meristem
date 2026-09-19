@@ -9,6 +9,7 @@
 """
 
 import argparse
+import asyncio
 import glob
 import hashlib
 import json
@@ -27,7 +28,7 @@ from tree.runtime.trace import Trace
 from terminal.chat import converse, opening
 
 
-def main():
+async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("task", nargs="?",
                     help="要做的这件事（一句话）。不给就得靠 --intake 谈出来")
@@ -132,19 +133,19 @@ def main():
                  % a.criteria if a.criteria else
                  "\n验收标准: 用户没给 —— 正常，真用户都不会给。"
                  "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。")
-        converse(llm, seed, {"trace": trace, "caps": caps, "index": index,
-                             "budget": budget, "workers": a.workers,
-                             "registry": registry, "on_beat": on_beat,
-                             "beat": a.progress or 60})
+        await converse(llm, seed, {"trace": trace, "caps": caps, "index": index,
+                                 "budget": budget, "workers": a.workers,
+                                 "registry": registry, "on_beat": on_beat,
+                                 "beat": a.progress or 60})
         return 0
 
     root = Node(name=a.task, accept=a.criteria, kind="dispatch")
     print("[验收标准] %s" % root.accept, flush=True)
 
     t0 = time.time()
-    run(root, llm, trace, registry=registry, budget=budget,
-        workers=a.workers, caps=caps, index=index,
-        on_beat=on_beat, beat=a.progress or 60)
+    await run(root, llm, trace, registry=registry, budget=budget,
+              workers=a.workers, caps=caps, index=index,
+              on_beat=on_beat, beat=a.progress or 60)
 
     print("\n" + "=" * 78)
     print("结束: %.1f 分钟   %s" % ((time.time() - t0) / 60,
@@ -156,4 +157,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))

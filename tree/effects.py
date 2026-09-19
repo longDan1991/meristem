@@ -94,7 +94,43 @@ def effects_of(tool, args, cwd=None, existed_before=None):
              "cwd": os.path.abspath(cwd) if cwd else None}, pre)
 
 
-CONTRACT_KEYS = ("type", "name", "func", "args", "return", "external")
+CONTRACT_KEYS = ("type", "name", "func", "args", "params", "return",
+                 "external")
+
+# params 是**可调用**那一半：`func` 里的 `__名字__` 就是占位符，params 说它是什么类型。
+# 只有声明了 params 的 func 才能被盒子当成 API 调用（见 runtime/box.py）；
+# 没有 params 的仍是一条能直接粘上就跑的命令（= 今天的用法）。
+PARAM_TYPES = ("int", "str", "float", "bool")
+PLACEHOLDER_RE = re.compile(r"__([A-Za-z_][A-Za-z0-9_]*)__")
+
+
+def placeholders(func):
+    return PLACEHOLDER_RE.findall(str(func or ""))
+
+
+def param_problems(contract):
+    """params 与 func 里的 `__x__` 占位符必须一一对上。对不上就是一条**错签名**，
+    而错签名比没有签名更坏：盒子会把模型引到一条走不通的路上。"""
+    func = str(contract.get("func") or "")
+    params = contract.get("params") or {}
+    slots = placeholders(func)
+    if not isinstance(params, dict):
+        return ["params 必须是一个对象，如 {\"epochs\":{\"type\":\"int\",\"default\":50}}"]
+    bad = []
+    for k, spec in params.items():
+        if k not in slots:
+            bad.append("params 里的 %s 在 func 里没有 __%s__ 占位符" % (k, k))
+        if not isinstance(spec, dict):
+            bad.append("params.%s 必须是对象（type/default/required）" % k)
+            continue
+        t = spec.get("type")
+        if t not in PARAM_TYPES:
+            bad.append("params.%s.type 必须是 %s（收到 %r）"
+                       % (k, "/".join(PARAM_TYPES), t))
+    for s in slots:
+        if s not in params:
+            bad.append("func 里的 __%s__ 没在 params 里说它是什么" % s)
+    return bad
 
 # func 必须是一条**能直接粘上就执行**的命令，不是一句描述。
 # 实测模型会写"执行 bash sum.sh 即可运行，将结果写入 sum.txt"——那是给人看的，
@@ -128,6 +164,8 @@ def contract_of(args):
         v = args.get(k)
         if isinstance(v, list):
             v = [str(x) for x in v if str(x).strip()]
+        elif isinstance(v, dict):
+            v = {str(a): b for a, b in v.items() if b is not None}
         else:
             v = str(v or "").strip()
         if v:
@@ -151,6 +189,7 @@ def contract_problems(path, contract, base=None):
             problems.append("type 不是内部，但没写 func（别人怎么调用它）")
         if not contract.get("name"):
             problems.append("没写 name（这东西是干什么用的）")
+        problems += param_problems(contract)
         if ctype in RUNNABLE_TYPES and not is_runnable(contract):
             problems.append(
                 "type 是「%s」，但 func 不是一条能直接执行的命令"
@@ -179,6 +218,61 @@ def contract_problems(path, contract, base=None):
                                   else os.path.join(root, path)):
         problems.append("path 指向的文件不存在: %s" % path)
     return problems
+
+
+# 产出记账：**只认这个节点自己报过的路径**，不去 diff 整个工作区。
+#
+# 为什么不用全局 diff：工作区是共享的、节点是并发的 —— 全局 diff 会把别的
+# 节点此刻写的文件算到它头上，于是 gate 反过来逼它交代一个不是它做的文件
+# （假阳性比漏报坏得多：漏报就是现状，假阳性会让它卡在这里或者编个契约）。
+# 候选只有两个来源，都是**这个节点自己做过的事**：
+#   · 它的代码里 open()/os.open() 写过的（子进程自己报上来，见 sandbox.BOOTSTRAP）
+#   · 它真跑过的命令（走协议回调宿主的那几次）里解析出来的目标
+# 然后逐个 stat，和“跑之前的快照”对比，分 create / modify。
+SKIP_DIRS = ("__pycache__", ".git", ".venv", ".tree", "caps_scripts")
+SKIP_SUFFIX = (".meta.json",)
+
+
+def snapshot_workspace(root, skip=()):
+    """{绝对路径: (mtime_ns, 大小)}。只走一遍，不读文件内容。
+
+    它在一次动作**之前**跑，用来回答两个问题：这个路径原来存不存在（create vs
+    modify）、它变没变。skip：程序自己的账本（trace / caps），它们每回合都在改。
+    """
+    skip = {os.path.realpath(p) for p in skip if p}
+    snap = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for name in filenames:
+            if name.endswith(SKIP_SUFFIX):
+                continue
+            p = os.path.join(dirpath, name)
+            if os.path.realpath(p) in skip:
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue          # 跑的过程中被删掉的临时文件
+            snap[p] = (st.st_mtime_ns, st.st_size)
+    return snap
+
+
+def classify_paths(candidates, before, cwd):
+    """候选产出 → (created, modified)。相对路径按 cwd 算，已写盘的才算。"""
+    created, modified = [], []
+    for raw in candidates:
+        p = str(raw)
+        ap = os.path.normpath(p if p.startswith("/") else os.path.join(cwd, p))
+        try:
+            st = os.stat(ap)
+        except OSError:
+            continue              # 说写了但真没写（被删了、被放弃了）
+        if ap in before:
+            if before[ap] != (st.st_mtime_ns, st.st_size):
+                modified.append(ap)
+        else:
+            created.append(ap)
+    return sorted(set(created)), sorted(set(modified))
 
 
 def write_sidecar(path, contract, eff=None, pre=None):

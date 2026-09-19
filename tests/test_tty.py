@@ -20,6 +20,7 @@
   I. 思考（reasoning_content）整段按流式吐出来，而且是灰的
 """
 
+import asyncio
 import contextlib
 import io
 import json
@@ -50,7 +51,7 @@ class FakeLLM:
         self.replies, self.last_usage, self.seen = list(replies), {}, []
         self.reasoning = reasoning
 
-    def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
         self.seen.append(messages[-1]["content"])
         if self.reasoning and on_reasoning:
             for i in range(0, len(self.reasoning), 4):   # 思考也一小口一小口
@@ -62,8 +63,8 @@ class FakeLLM:
         return reply
 
 
-def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
-             caps=None, index=None, **kwargs):
+async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
+                caps=None, index=None, **kwargs):
     """脚本化的树：记下跑了哪棵根，给一个可复核的结论。"""
     RAN.append(root)
     root.close("满足", "跑完了：%s" % root.name, ["证据"])
@@ -120,8 +121,8 @@ def main():
     llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
     scr = Screen(["2026-12-31 收盘", ""])          # 一行回答 + 空行表示说完
     RAN.clear()
-    r = converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out,
-                 write=scr.write)
+    r = asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out,
+                            write=scr.write))
     print("  终端上显示的：\n%s" % "\n".join("    " + x for x in scr.shown))
     line("模型的话送到了终端", Q in scr.text() and S in scr.text())
     line("分行的话不被压成一行（content 原样）", (Q + "\n" + S) in scr.text())
@@ -146,7 +147,7 @@ def main():
     llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
     scr = Screen(["我要一个", "能跑通这个仓库所有测试的", "任务", ""])
     RAN.clear()
-    converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write)
+    asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))
     print("  模型看见的那一条：%r" % llm.seen[1][-40:])
     line("三行都进去了", all(x in llm.seen[1] for x in ("我要一个", "能跑通", "任务")))
     line("拼成的是**一条**消息（换行分隔，不是三条）",
@@ -163,7 +164,7 @@ def main():
     llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
     scr = Screen(["就按你说的办"])                    # 之后 EOF
     RAN.clear()
-    converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write)
+    asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))
     line("写了的内容照样发出去", any("就按你说的办" in s for s in llm.seen))
     line("终端上说明白是 Ctrl-D 收的", "Ctrl-D" in scr.text())
     line("内容没丢：根照样被跑掉", len(RAN) == 1)
@@ -171,16 +172,17 @@ def main():
     print("=" * 80)
     print("D. 什么都没写按 Ctrl-D / Ctrl-C → 干净收手")
     scr = Screen([])                       # 一行都没有：read 直接 EOF
-    r = converse(FakeLLM([talk(Q + "\n" + S)]), "帮我赚大钱", ENV,
-                 read=scr.read, out=scr.out, write=scr.write)
+    r = asyncio.run(converse(FakeLLM([talk(Q + "\n" + S)]), "帮我赚大钱", ENV,
+                              read=scr.read, out=scr.out, write=scr.write))
     line("返回 None（中止不是结论）", r is None)
     line("终端上说清了是中止", "中止" in scr.text())
 
     def interrupted(prompt):
         raise KeyboardInterrupt()
 
-    r = converse(FakeLLM([talk(Q + "\n" + S)]), "帮我赚大钱", ENV,
-                 read=interrupted, out=lambda t: None, write=lambda t: None)
+    r = asyncio.run(converse(FakeLLM([talk(Q + "\n" + S)]), "帮我赚大钱", ENV,
+                              read=interrupted, out=lambda t: None,
+                              write=lambda t: None))
     line("Ctrl-C 也收手", r is None)
 
     print("=" * 80)
@@ -189,7 +191,7 @@ def main():
                    json.dumps(root())])
     scr = Screen([])
     RAN.clear()
-    converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write)
+    asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))
     print("  终端上显示的：\n%s" % "\n".join("    " + x for x in scr.shown))
     line("打回理由走了旁白通道", "可测物理量" in scr.text())
     line("交形式的那一段不吐给用户（那是给闸门的）",
@@ -252,7 +254,7 @@ def main():
     old = sys.stdout
     sys.stdout = buf
     try:
-        converse(llm, "帮我赚大钱", ENV, read=scr.read, out=None, write=None)
+        asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=None, write=None))
     finally:
         sys.stdout = old
     got = buf.getvalue()
@@ -265,7 +267,7 @@ def main():
 
     llm = FakeLLM([talk("好。")], reasoning=think)
     scr = Screen([""])
-    converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write)
+    asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))
     line("不是真终端（自定义 write）→ 思考只留原文、不上色",
          GRAY not in "".join(scr.stream) and think in "".join(scr.stream))
 

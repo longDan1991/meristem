@@ -83,7 +83,7 @@ def root_in(text):
     return None
 
 
-def _run_root(spec, llm, env):
+async def _run_root(spec, llm, env):
     """把谈成的形式跑成一棵真树，返回它的根（结论在 `root.conclusion`）。
 
     `env` 是 `main` 交给入口的运行现场（trace / caps / index / budget /
@@ -93,10 +93,10 @@ def _run_root(spec, llm, env):
     root = Node(name=spec["name"], detail=spec["detail"], notes=spec["notes"],
                 accept=spec["accept"], kind=spec["kind"],
                 keywords=spec["keywords"], conc_range=spec["conc_range"])
-    run(root, llm, env["trace"], registry=env.get("registry"),
-        budget=env.get("budget"), workers=env.get("workers", 6),
-        caps=env.get("caps"), index=env.get("index"),
-        on_beat=env.get("on_beat"), beat=env.get("beat", 60))
+    await run(root, llm, env["trace"], registry=env.get("registry"),
+              budget=env.get("budget"), workers=env.get("workers", 6),
+              caps=env.get("caps"), index=env.get("index"),
+              on_beat=env.get("on_beat"), beat=env.get("beat", 60))
     return root
 
 
@@ -117,7 +117,7 @@ def _result(root):
     return "\n".join(lines)
 
 
-def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=None):
+async def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=None):
     """和用户谈，谈到形式就跑，跑完把结论带回来接着谈。**只在用户中止时停。**
 
     ask(text)          -> 用户的回答（真跑时就是 input()，测试里换成脚本）。
@@ -144,8 +144,8 @@ def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=None):
 
     while True:
         spoken.reset()
-        text = llm.chat(msgs, temperature=0.3, on_delta=spoken.feed,
-                        on_reasoning=on_reasoning)
+        text = await llm.chat(msgs, temperature=0.3, on_delta=spoken.feed,
+                              on_reasoning=on_reasoning)
         spec = root_in(text)
 
         if spec is None:
@@ -168,7 +168,7 @@ def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=None):
 
         # 形式能过闸门 → 跑它。**这是入口唯一的手**。
         say("（接到任务：%s）" % got["name"])
-        root = _run_root(got, llm, env)
+        root = await _run_root(got, llm, env)
         say("（跑完了：%s）" % (root.verdict or "没有判定"))
         # 结论作为**外部观测**回填（user 通道），然后接着调模型 ——
         # 入口会决定是接着讲这个结论，还是再开下一个任务。

@@ -11,9 +11,11 @@
 真正的编程错误（不该发生的）照旧往上炸，不被糊掉（AGENTS §2、§6）。
 """
 
+import asyncio
 import os
 import signal
 import subprocess
+import time
 
 BASH_CAP = 4000
 READ_CAP = 2000
@@ -26,14 +28,34 @@ BASH_TIMEOUT = 120        # 默认：一条命令最多跑这么久
 BASH_TIMEOUT_MAX = 3600   # 上限：更久的事请改成后台 + 轮询（提示词里写明了）
 
 
-def bash(cmd, timeout=None):
+def truncate_visible(text, total=None):
+    """截断必须可见：一个地方说清"你看到的是前 N 字、总共有多少"。
+
+    bash 的输出和代码沙箱的观测都走这里 —— 两处各写一份措辞，
+    模型迟早会遇到两种不一样的"我怎么知道这是全部"。
+    total：真实总量（沙箱只读了前 BASH_CAP 字，len(text) 不等于它）。
+    """
+    n = len(text) if total is None else max(int(total), len(text))
+    if n <= BASH_CAP:
+        return text
+    return text[:BASH_CAP] + (
+        "\n…[截断：输出共 %d 字，这里只显示了前 %d 字。"
+        "要精确取用 head/tail/grep/sed -n]" % (n, BASH_CAP))
+
+
+def ok_obs(obs):
+    """这次动作算不算成了。只认工具自己给的事实（工具出错 / exit 码）。"""
+    s = str(obs)
+    return "工具出错" not in s and ("[exit=" not in s or "[exit=0]" in s)
+
+
+async def bash(cmd, timeout=None):
     """跑一条命令。**总是有超时**，但超时是可见的、可调的、会连子进程一起杀。
 
-    两个细节不能省：
-      · `start_new_session=True` + `killpg` —— 只杀 shell 不杀子进程的话，
-        被杀掉的 `python train.py` 还在后台跑，把机器占住。
-      · 超时时把**已经产生的输出**交回去 —— 一个跑了两分钟才被杀的
-        回测，它前面打印的东西正是模型最需要的。丢掉它们就是再一次静默截断。
+    真异步（P4）：`asyncio.create_subprocess_shell` + `wait_for`，不占线程。
+    语义和以前逐字一致：`start_new_session=True` + `killpg` 连子进程一起杀；
+    超时时把**已经产生的输出**交回去 —— 一个跑了两分钟才被杀的
+    回测，它前面打印的东西正是模型最需要的。丢掉它们就是再一次静默截断。
     """
     try:
         t = int(timeout) if timeout not in (None, "") else BASH_TIMEOUT
@@ -45,27 +67,37 @@ def bash(cmd, timeout=None):
     if t > BASH_TIMEOUT_MAX:
         t = BASH_TIMEOUT_MAX
     try:
-        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT,
-                             encoding="utf-8", errors="replace",
-                             start_new_session=True)
+        p = await asyncio.create_subprocess_shell(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True)
     except OSError as e:
         return "工具出错: %r" % e
-    timed_out = False
-    try:
-        out, _ = p.communicate(timeout=t)
-    except subprocess.TimeoutExpired:
-        timed_out = True
+    # 增量读，超时时**保住已经读到的部分**：`wait_for(p.communicate(), t)`
+    # 取消的那一瞬会把已读进缓冲的数据一起丢掉 —— 那正是"把已产生的输出
+    # 交回去"要交的东西（实测：`echo 先打一行; sleep 30` 超时后 out 是空的）。
+    chunks, timed_out = [], False
+    deadline = time.monotonic() + t
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        try:
+            chunk = await asyncio.wait_for(p.stdout.read(65536), left)
+        except asyncio.TimeoutError:
+            timed_out = True
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    if timed_out:
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
         except OSError:
             p.kill()
-        out, _ = p.communicate()          # 收尸，顺手把已产生的输出拿回来
-    out = (out or "").strip()
-    n = len(out)
-    if n > BASH_CAP:
-        out = (out[:BASH_CAP] + "\n…[截断：输出共 %d 字，这里只显示了前 %d 字。"
-               "要精确取用 head/tail/grep/sed -n]" % (n, BASH_CAP))
+    out = b"".join(chunks).decode("utf-8", "replace").strip()
+    rc = await p.wait()
+    out = truncate_visible(out)
     if timed_out:
         note = ("\n[超时] 这条命令跑了 %d 秒还没结束，已经被连同它起的子进程一起杀掉。"
                 % t)
@@ -80,7 +112,7 @@ def bash(cmd, timeout=None):
                  "然后轮询 run.log 和产物（轮询时观测会变，不会被当成原地打转）。"
                  % BASH_TIMEOUT_MAX)
         return (out + note).strip()
-    return out + ("\n[exit=%d]" % p.returncode if p.returncode else "")
+    return out + ("\n[exit=%d]" % rc if rc else "")
 
 
 def read(path, offset=0, limit=READ_CAP):

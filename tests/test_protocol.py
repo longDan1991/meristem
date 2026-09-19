@@ -12,6 +12,7 @@
   I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落
 """
 
+import asyncio
 import json
 import os
 import re
@@ -54,7 +55,7 @@ class Scripted:
     def __init__(self, mode):
         self.mode, self.calls, self.last_usage = mode, 0, {}
 
-    def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2):
         self.calls += 1
         user = messages[-1]["content"]
         name = (re.search(r"^name:\s*(.+)$", user, re.M) or [None, "?"])[1].strip()
@@ -62,15 +63,13 @@ class Scripted:
         m = re.search(r"本层已有尝试: 共 (\d+) 次", user)
         attempts = int(m.group(1)) if m else 0
 
-        if "可用工具" in user:                        # ── 叶子
+        if "手上的东西" in user:                        # ── 叶子
             if self.mode == "loop":
                 # 永远做同一个动作，观测也永远一样
-                return json.dumps({"action": {"tool": "bash",
-                                               "args": {"cmd": "echo same"}}})
+                return json.dumps({"code": "print(bash(cmd='echo same'))"})
             if name.startswith("GATE"):
                 if self.mode == "gate_pass" and fresh:
-                    return json.dumps({"action": {"tool": "bash",
-                                                   "args": {"cmd": "echo gate-ok"}}})
+                    return json.dumps({"code": "print(bash(cmd='echo gate-ok'))"})
                 v = "满足" if self.mode == "gate_pass" else "阻塞"
                 ev = ["第1次观测"] if v == "满足" else []
                 return json.dumps({"conclusion": {
@@ -84,20 +83,18 @@ class Scripted:
             if name.startswith("EARLY"):
                 # 第一轮拆出来的孩子：真的做过、真的出过结论
                 if fresh:
-                    return json.dumps({"action": {"tool": "bash",
-                                                   "args": {"cmd": "echo early"}}})
+                    return json.dumps({"code": "print(bash(cmd='echo early'))"})
                 return json.dumps({"conclusion": {
                     "verdict": "满足", "text": "早期子任务干完了",
                     "evidence": ["第1次观测"]}})
             if self.mode == "deep":
                 if fresh:
-                    return json.dumps({"action": {"tool": "bash",
-                                                   "args": {"cmd": "echo deep"}}})
+                    return json.dumps({"code": "print(bash(cmd='echo deep'))"})
                 return json.dumps({"conclusion": {
                     "verdict": "满足", "text": "收盘价读到了",
                     "evidence": ["第1次观测"]}})
             if self.mode == "many" and fresh:
-                return json.dumps({"action": {"tool": "bash", "args": {"cmd": "echo sib"}}})
+                return json.dumps({"code": "print(bash(cmd='echo sib'))"})
             return json.dumps({"conclusion": {"verdict": "满足", "text": "兄弟干完了",
                                                "evidence": ["第1次观测"]}})
 
@@ -185,7 +182,8 @@ def go(mode, accept=C_ANCHORED, kind="dispatch", index=None):
     cwd = os.getcwd()          # 叶子会跑真的 bash：别污染项目目录
     os.chdir(d)
     try:
-        R.run(root, llm, trace, registry=reg, workers=2, index=index)
+        asyncio.run(R.run(root, llm, trace, registry=reg,
+                          workers=2, index=index))
     finally:
         os.chdir(cwd)
     recs = [json.loads(x) for x in open(os.path.join(d, "t.jsonl"))]
@@ -291,18 +289,18 @@ def main():
         allkinds |= {n.kind for n in reg3.values()}
     print("  出现过的节点类型: %s" % allkinds)
     ok &= line("只有 dispatch 和 leaf 两种", allkinds <= {"dispatch", "leaf"})
-    ok &= line("叶子的产物必须是动作或结论",
-               all(r["kind"] in ("action", "concluded", "bad_output", "bad_conclusion")
+    ok &= line("叶子的产物必须是代码或结论",
+               all(r["kind"] in ("code", "concluded", "bad_output", "bad_conclusion")
                    for r in recs3 if r["kind"] in
-                   ("action", "concluded", "bad_output", "bad_conclusion")))
+                   ("code", "concluded", "bad_output", "bad_conclusion")))
 
     print("=" * 80)
-    print("J. 无进展检测：重复同一动作、观测一样 → 被停下来")
+    print("J. 无进展检测：重复同一段代码、输出一样 → 被停下来")
     root, reg, recs, _ = go("loop", accept="某可观测结果", kind="leaf")
     np_ = [r for r in recs if r["kind"] == "no_progress"]
     stl = [r for r in recs if r["kind"] == "stalled"]
-    acts = [r["payload"]["obs"] for r in recs if r["kind"] == "action"]
-    print("  动作次数: %d | 无进展告警: %d | 停下: %s"
+    acts = [r["payload"]["obs"] for r in recs if r["kind"] == "code"]
+    print("  代码段数: %d | 无进展告警: %d | 停下: %s"
           % (len(acts), len(np_), root.verdict))
     print("  告警长这样: %s" % (acts[-1] if acts else "").replace("\n", " "))
     ok &= line("重复被检测到并显式告警", bool(np_))
@@ -354,7 +352,7 @@ def main():
     # 文档承诺给模型看的段落就这几样；在这里**双向**核对：
     #   文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
     SECTIONS = ("先例", "现成做法", "上层意图链", "本层已有尝试",
-                "观测历史", "可用工具")
+                "观测历史", "手上的东西")
 
     def filled(kind_, lineage):
         n = Node(name="N", detail="D", notes="X", accept="A 2026-12-31",
@@ -400,8 +398,8 @@ def main():
                and "验收标准:" not in hist and "[门槛]" not in hist)
     ok &= line("alloc 的两个出口 = children / conclusion",
                all(s in PROMPT["alloc"] for s in ("children", "conclusion")))
-    ok &= line("leaf 的两个出口 = action / conclusion",
-               all(s in PROMPT["leaf"] for s in ("action", "conclusion")))
+    ok &= line("leaf 的两个出口 = code / conclusion",
+               all(s in PROMPT["leaf"] for s in ("code", "conclusion")))
     ok &= line("叶子看不到「先例」（它只要工具）",
                "先例" not in filled("leaf", []).render())
     ok &= line("分配节点看得到「先例」",

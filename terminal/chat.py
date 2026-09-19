@@ -97,7 +97,7 @@ def opening(read=None, out=None):
     return _read_answer(read, out)
 
 
-def converse(llm, seed, env, read=None, out=None, write=None):
+async def converse(llm, seed, env, read=None, out=None, write=None):
     """和入口一直谈下去，直到用户在终端上中止（返回 `None`）。
 
     入口现在**不退场**：每谈成一个任务就跑掉、把结论带回来接着谈。
@@ -166,9 +166,9 @@ def converse(llm, seed, env, read=None, out=None, write=None):
         return _read_answer(read, out)
 
     try:
-        intake(llm, seed, ask=ask, env=env,
-               on_say=lambda t: line("  " + str(t)),
-               on_delta=on_delta, on_reasoning=on_reasoning)
+        await intake(llm, seed, ask=ask, env=env,
+                     on_say=lambda t: line("  " + str(t)),
+                     on_delta=on_delta, on_reasoning=on_reasoning)
     except _Quit:
         line("\n[入口] 你在终端上中止了。")
         return None

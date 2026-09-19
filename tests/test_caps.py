@@ -9,6 +9,7 @@
   F. 内联 heredoc 的机械提取（原本整条丢掉的那类）
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -21,6 +22,7 @@ sys.path.insert(0, ROOT)
 from tree.memory.caps import Caps                        # noqa: E402
 from tree.effects import contract_problems               # noqa: E402
 from tree.memory.mine import caps_from_node, mine_trace as mine_caps   # noqa: E402
+from tree.memory.verify import eligible, verify                     # noqa: E402
 from tree.protocol.fields import Node                    # noqa: E402
 from tree.runtime.trace import Trace                     # noqa: E402
 from tree.runtime import scheduler as R                  # noqa: E402
@@ -48,11 +50,11 @@ def dump(recs, name="t.jsonl"):
 
 # ---------------------------------------------------------------- 脚本化叶子
 class LeafScript:
-    """一个叶子：按脚本依次做动作，做完出结论。"""
+    """一个叶子：按脚本依次写代码，写完出结论。"""
 
-    def __init__(self, actions, verdict="满足", evidence=None,
+    def __init__(self, codes, verdict="满足", evidence=None,
                  artifacts=None, omit_first=False):
-        self.actions = list(actions)
+        self.codes = list(codes)
         self.verdict = verdict
         self.evidence = evidence or ["第1次观测"]
         self.artifacts = artifacts
@@ -60,13 +62,13 @@ class LeafScript:
         self.retried = False
         self.i, self.last_usage = 0, {}
 
-    def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2):
         user = messages[-1]["content"]
-        assert "可用工具" in user, "这个脚本只能驱动叶子"
-        if self.i < len(self.actions):
-            a = self.actions[self.i]
+        assert "手上的东西" in user, "这个脚本只能驱动叶子"
+        if self.i < len(self.codes):
+            c = self.codes[self.i]
             self.i += 1
-            return json.dumps({"action": a}, ensure_ascii=False)
+            return json.dumps({"code": c}, ensure_ascii=False)
         body = {"verdict": self.verdict, "text": "脚本收尾", "evidence": self.evidence}
         if self.omit_first and not self.retried:
             self.retried = True          # 第一次故意不交代工件，看代码拦不拦
@@ -76,7 +78,7 @@ class LeafScript:
         return json.dumps({"conclusion": body}, ensure_ascii=False)
 
 
-def leaf_run(caps, actions, verdict="满足", accept="某可观测结果", evidence=None,
+def leaf_run(caps, codes, verdict="满足", accept="某可观测结果", evidence=None,
              artifacts=None, omit_first=False, keywords=None):
     d = tempfile.mkdtemp()
     trace = Trace(os.path.join(d, "t.jsonl"))
@@ -86,8 +88,9 @@ def leaf_run(caps, actions, verdict="满足", accept="某可观测结果", evide
     cwd = os.getcwd()
     os.chdir(d)
     try:
-        R.run(node, LeafScript(actions, verdict, evidence, artifacts, omit_first),
-              trace, registry={}, caps=caps)
+        asyncio.run(R.run(node, LeafScript(codes, verdict, evidence,
+                                  artifacts, omit_first),
+                      trace, registry={}, caps=caps))
     finally:
         os.chdir(cwd)
     recs = [json.loads(x) for x in open(os.path.join(d, "t.jsonl"))]
@@ -167,7 +170,7 @@ def main():
     caps.record({"does": "写一个证明文件", "keys": ["证明文件", "proof", "write"],
                  "how": {"cmd": "echo ok > proof.txt"}})
     node, recs, _ = leaf_run(
-        caps, [{"tool": "bash", "args": {"cmd": "echo ok > proof.txt"}}],
+        caps, ["print(bash(cmd='echo ok > proof.txt'))"],
         keywords=["我要写证明文件"])
     inj = [r for r in recs if r["kind"] == "caps_injected"]
     outs = [r for r in recs if r["kind"] == "cap_outcome"]
@@ -189,8 +192,7 @@ def main():
     eid = caps.record({"does": "过期的做法", "keys": ["过期", "old"],
                        "how": {"cmd": "this_command_does_not_exist_xyz"}})
     for _ in range(2):
-        leaf_run(caps, [{"tool": "bash",
-                         "args": {"cmd": "this_command_does_not_exist_xyz"}}],
+        leaf_run(caps, ["print(bash(cmd='this_command_does_not_exist_xyz'))"],
                  verdict="阻塞", evidence=[], keywords=["用过期的做法"])
     e = caps.entries[eid]
     print("  uses=%d fails=%d retired=%s" % (e["uses"], e["fails"], e.get("retired")))
@@ -202,7 +204,7 @@ def main():
     print("=" * 78)
     print("E. 完工即学 + 离线回填幂等")
     caps = Caps(os.path.join(tempfile.mkdtemp(), "c.jsonl"))
-    node, recs, _ = leaf_run(caps, [{"tool": "bash", "args": {"cmd": "echo hi > proof.txt"}}])
+    node, recs, _ = leaf_run(caps, ["print(bash(cmd='echo hi > proof.txt'))"])
     learned = [r for r in recs if r["kind"] == "cap_learned"]
     print("  节点判定: %s | 库内 %d 条" % (node.verdict, len(caps.entries)))
     for e in caps.entries.values():
@@ -247,9 +249,8 @@ def main():
     caps = Caps(os.path.join(tempfile.mkdtemp(), "c.jsonl"))
     node, recs, d = leaf_run(
         caps,
-        [{"tool": "write", "args": {"path": "engine.py", "content": "print('ok')"}},
-         {"tool": "bash",
-          "args": {"cmd": "pip install requests -q > /dev/null && echo x > out.txt"}}],
+        ["write(path='engine.py', content=%s)" % json.dumps("print('ok')"),
+         "print(bash(cmd='pip install requests -q > /dev/null; echo x > out.txt'))"],
         artifacts=[{"path": "engine.py", "type": "程序", "name": "一个演示程序",
                     "func": "python3 engine.py", "args": "无", "return": "打印 ok"}])
     eff = [r for r in recs if r["kind"] == "effects"]
@@ -259,20 +260,18 @@ def main():
     print("  契约记录: %s" % (json.dumps(con[0]["payload"], ensure_ascii=False)
                             if con else "无"))
     for r in eff:
-        print("  effects(%s): %s" % (r["payload"]["tool"],
-                                     json.dumps(r["payload"]["effects"],
-                                                ensure_ascii=False)))
+        print("  effects(calls=%s): %s" % (r["payload"]["calls"],
+                                          json.dumps(r["payload"]["effects"],
+                                                     ensure_ascii=False)))
     ok &= line("write 真的写到盘上", os.path.exists(made))
     ok &= line("契约记进了 trace 且没有问题",
                bool(con) and not con[0]["payload"]["problems"]
                and con[0]["payload"]["source"] == "conclusion")
     ok &= line("旁边落了 .meta.json（工件自描述）", os.path.exists(made + ".meta.json"))
-    we = [r for r in eff if r["payload"]["tool"] == "write"]
-    ok &= line("write 的 fs.create 抓到了",
-               bool(we) and any("engine.py" in x
-                                for x in we[0]["payload"]["effects"]["fs"]["create"]))
-    be = [r for r in eff if r["payload"]["tool"] == "bash"]
-    b = be[0]["payload"] if be else {"effects": {}, "前置条件": {}}
+    we = eff[0]["payload"]                 # 第一段代码：write engine.py
+    ok &= line("write 的 fs.create 抓到了（靠工作区 diff）",
+               any("engine.py" in x for x in we["effects"]["fs"]["create"]))
+    b = eff[1]["payload"] if len(eff) > 1 else {"effects": {}, "前置条件": {}}
     ok &= line("bash 装包被代码抓到", b["effects"].get("pkg") == ["requests"],
                str(b["effects"].get("pkg")))
     ok &= line("bash 联网/前置条件被抓到", bool(b["前置条件"].get("需要网络")))
@@ -293,14 +292,14 @@ def main():
                "total=0; for i in $(seq 1 100); do total=$((total+i)); done\n"
                "echo $total > sum.txt\nEOF\nbash sum.sh")
     n3, recs3, _ = leaf_run(
-        caps3, [{"tool": "bash", "args": {"cmd": heredoc}}],
+        caps3, ["print(bash(cmd=%s))" % json.dumps(heredoc)],
         artifacts=[{"path": "sum.sh", "type": "脚本",
                     "name": "算 1 到 100 的和并写 sum.txt",
                     "func": "bash sum.sh", "args": "无", "return": "写 sum.txt（5050）"}],
         omit_first=True)
     miss = [r for r in recs3 if r["kind"] == "contract_missing"]
     bad = [r for r in recs3 if r["kind"] == "bad_conclusion"]
-    acts = [r["payload"]["obs"] for r in recs3 if r["kind"] == "action"]
+    acts = [r["payload"]["obs"] for r in recs3 if r["kind"] == "code"]
     print("  第一次没交代 → 被拦: %s" % (miss[0]["payload"] if miss else "无"))
     print("  过程中只给中性事实（不打扰）: %r" % (acts[0] if acts else ""))
     print("  退回时怎么说的: %s" % (str(bad[0]["payload"]) if bad else "无"))
@@ -326,9 +325,9 @@ def main():
     os.chdir(d4)
     n4, recs4, _ = leaf_run(
         caps4,
-        [{"tool": "write", "args": {"path": "util.py", "content": "def f(): return 1"}},
-         {"tool": "write", "args": {"path": "model.py", "content": "from util import f"}},
-         {"tool": "write", "args": {"path": "main.py", "content": "from model import *"}}],
+        ["write(path='util.py', content=%s)" % json.dumps("def f(): return 1"),
+         "write(path='model.py', content=%s)" % json.dumps("from util import f"),
+         "write(path='main.py', content=%s)" % json.dumps("from model import *")],
         artifacts=[{"path": "main.py", "type": "程序", "name": "演示程序入口",
                     "func": "python3 main.py", "args": "无", "return": "打印结果"},
                    {"path": "util.py", "type": "内部"},
@@ -373,9 +372,46 @@ def main():
                                                  base=d) if "入口不存在" in p])
     os.chdir(ROOT)
 
+    ok &= test_verify()
+
     print("=" * 78)
     print("全部通过" if ok else "有失败项")
     return 0 if ok else 1
+
+
+
+
+# ---------------------------------------------------------------- L. 主动重验
+def test_verify():
+    """重验：好的保持、坏的记 fails（喂给自动退休）；project/依赖目录的跳过。
+    返回 bool，并入 main 的 ok。"""
+    ok = True
+    print("=" * 78)
+    print("L. 主动重验：坏的先记上账，project 的不冤枉")
+    d = tempfile.mkdtemp()
+    caps = Caps(os.path.join(d, "v.jsonl"))
+    good = caps.record({"does": "好配方", "keys": ["好", "echo"],
+                        "scope": "general", "how": {"cmd": "echo hi"}})
+    bad = caps.record({"does": "烂配方", "keys": ["烂"],
+                       "scope": "general",
+                       "how": {"cmd": "no_such_cmd_xyz_123"}})
+    proj = caps.record({"does": "项目配方", "keys": ["项目"],
+                        "scope": "project",
+                        "how": {"cmd": "echo hi", "cwd": "/somewhere"}})
+    print("  可重验的: %d（project 不算）" % sum(1 for e in caps.entries.values()
+                                              if eligible(e)))
+    ok &= line("project / 绑了 cwd 的不参与重验（在空目录里跑必败 = 冤枉）",
+         sum(1 for e in caps.entries.values() if eligible(e)) == 2)
+    checked, broken = verify(caps)
+    print("  重验 %d 条，烂 %d 条" % (checked, broken))
+    ok &= line("好的保持不动", caps.get(good)["fails"] == 0)
+    ok &= line("烂的被记了账", caps.get(bad)["fails"] >= 1,
+         "fails=%d" % caps.get(bad)["fails"])
+    ok &= line("project 的没被动", caps.get(proj)["fails"] == 0)
+    s = caps.stats()
+    ok &= line("stats 里有可调用/不可调用两栏",
+         "可调用" in s and "不可调用" in s, str(s))
+    return ok
 
 
 if __name__ == "__main__":
