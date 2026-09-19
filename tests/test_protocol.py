@@ -20,6 +20,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tree.llm import Message, ToolCall                      # noqa: E402
 from tree.protocol.fields import Node                # noqa: E402
 from tree.runtime.trace import Trace                 # noqa: E402
 from tree.prompts import PROMPT                      # noqa: E402
@@ -49,13 +50,26 @@ def kid(name, accept, kind="leaf", gate=False, keywords=None, rng=None,
             "conc_range": rng or [100, 500]}
 
 
+def run_code(code):
+    return Message(tool_calls=[ToolCall(name="run_code", arguments={"code": code})])
+
+
+def create(children):
+    return Message(tool_calls=[ToolCall(name="create_children",
+                                        arguments={"children": children})])
+
+
+def conclude(**kw):
+    return Message(tool_calls=[ToolCall(name="conclude", arguments=kw)])
+
+
 class Scripted:
-    """按渲染出来的形式字段回话。mode 决定行为。"""
+    """按渲染出来的形式字段回话（发工具调用）。mode 决定行为。"""
 
     def __init__(self, mode):
         self.mode, self.calls, self.last_usage = mode, 0, {}
 
-    async def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2, tools=None):
         self.calls += 1
         user = messages[-1]["content"]
         name = (re.search(r"^name:\s*(.+)$", user, re.M) or [None, "?"])[1].strip()
@@ -66,101 +80,86 @@ class Scripted:
         if "手上的东西" in user:                        # ── 叶子
             if self.mode == "loop":
                 # 永远做同一个动作，观测也永远一样
-                return json.dumps({"code": "print(bash(cmd='echo same'))"})
+                return run_code("print(bash(cmd='echo same'))")
             if name.startswith("GATE"):
                 if self.mode == "gate_pass" and fresh:
-                    return json.dumps({"code": "print(bash(cmd='echo gate-ok'))"})
+                    return run_code("print(bash(cmd='echo gate-ok'))")
                 v = "满足" if self.mode == "gate_pass" else "阻塞"
                 ev = ["第1次观测"] if v == "满足" else []
-                return json.dumps({"conclusion": {
-                    "verdict": v,
-                    "text": "门槛测过了" if v == "满足" else "开户需要人到场，不在工具里",
-                    "evidence": ev}})
+                return conclude(verdict=v,
+                                text="门槛测过了" if v == "满足"
+                                else "开户需要人到场，不在工具里",
+                                evidence=ev)
             if name.startswith("NOEV"):
-                return json.dumps({"conclusion": {"verdict": "满足",
-                                                   "text": "我发誓真的做完了",
-                                                   "evidence": ["凭良心说的"]}})
+                return conclude(verdict="满足", text="我发誓真的做完了",
+                                evidence=["凭良心说的"])
             if name.startswith("EARLY"):
                 # 第一轮拆出来的孩子：真的做过、真的出过结论
                 if fresh:
-                    return json.dumps({"code": "print(bash(cmd='echo early'))"})
-                return json.dumps({"conclusion": {
-                    "verdict": "满足", "text": "早期子任务干完了",
-                    "evidence": ["第1次观测"]}})
+                    return run_code("print(bash(cmd='echo early'))")
+                return conclude(verdict="满足", text="早期子任务干完了",
+                                evidence=["第1次观测"])
             if self.mode == "deep":
                 if fresh:
-                    return json.dumps({"code": "print(bash(cmd='echo deep'))"})
-                return json.dumps({"conclusion": {
-                    "verdict": "满足", "text": "收盘价读到了",
-                    "evidence": ["第1次观测"]}})
+                    return run_code("print(bash(cmd='echo deep'))")
+                return conclude(verdict="满足", text="收盘价读到了",
+                                evidence=["第1次观测"])
             if self.mode == "many" and fresh:
-                return json.dumps({"code": "print(bash(cmd='echo sib'))"})
-            return json.dumps({"conclusion": {"verdict": "满足", "text": "兄弟干完了",
-                                               "evidence": ["第1次观测"]}})
+                return run_code("print(bash(cmd='echo sib'))")
+            return conclude(verdict="满足", text="兄弟干完了",
+                            evidence=["第1次观测"])
 
         # ── 分配节点
         if self.mode == "deep":
             # 三层：ROOT(分配) → MID(分配) → LEAF(叶子)，验意图链真的逐层加长
             if name == "MID":
                 if fresh:
-                    return json.dumps({"children": [kid(
+                    return create([kid(
                         "LEAF", "2026-12-31 的权益读数已取到",
-                        detail="读收盘价")]}, ensure_ascii=False)
-                return json.dumps({"conclusion": {"verdict": "满足",
-                                                   "text": "叶子回来了",
-                                                   "evidence": ["LEAF"]}},
-                                  ensure_ascii=False)
+                        detail="读收盘价")])
+                return conclude(verdict="满足", text="叶子回来了",
+                                evidence=["LEAF"])
             if not fresh:
-                return json.dumps({"conclusion": {"verdict": "满足",
-                                                   "text": "都回来了",
-                                                   "evidence": ["MID"]}},
-                                  ensure_ascii=False)
-            return json.dumps({"children": [kid(
+                return conclude(verdict="满足", text="都回来了", evidence=["MID"])
+            return create([kid(
                 "MID", "2026-12-31 的权益读数已取到", kind="dispatch",
                 detail="先把数据这条线摸清楚",
-                keywords=["akshare", "回测", "2026-12-31"])]},
-                ensure_ascii=False)
+                keywords=["akshare", "回测", "2026-12-31"])])
         if self.mode == "recite":
             # 真跑过的孩子回来后，又发了一次用不了的分配（被代码拒），
             # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
             if attempts == 0:
-                return json.dumps({"children": [kid(
-                    "EARLY", "2026-12-31 的权益读数已取到")]}, ensure_ascii=False)
+                return create([kid("EARLY", "2026-12-31 的权益读数已取到")])
             if attempts == 1:
-                return json.dumps({})          # 顶层键都没有 → 当场被拒
-            return json.dumps({"conclusion": {"verdict": "满足",
-                                               "text": "下层都回来了",
-                                               "evidence": ["EARLY"]}})
+                return Message(text="我什么都不想调")   # 没调任何工具 → 被拒
+            return conclude(verdict="满足", text="下层都回来了", evidence=["EARLY"])
         if self.mode == "many":
             if attempts >= 3:
-                return json.dumps({"conclusion": {"verdict": "未满足",
-                                                  "text": "试了三种拆法都不行",
-                                                  "evidence": []}})
-            return json.dumps({"children": [kid(
+                return conclude(verdict="未满足", text="试了三种拆法都不行",
+                                evidence=[])
+            return create([kid(
                 "SIB%d" % (attempts + 1),
-                "2026-12-31 的权益读数已取到（第%d次尝试）" % (attempts + 1))]},
-                ensure_ascii=False)
+                "2026-12-31 的权益读数已取到（第%d次尝试）" % (attempts + 1))])
         if not fresh:
-            return json.dumps({"conclusion": {"verdict": "满足", "text": "下层都回来了",
-                                               "evidence": ["GATE"]}})
+            return conclude(verdict="满足", text="下层都回来了", evidence=["GATE"])
         if self.mode == "anchor":
-            return json.dumps({"children": [
+            return create([
                 {"name": "跑通就行", "detail": "把代码跑起来", "notes": "",
                  "accept": "代码能跑起来", "kind": "leaf",
-                 "keywords": ["跑通"], "conc_range": [100, 500]}]})
-        if self.mode == "missing":                  # 故意缺 accept
-            return json.dumps({"children": [{
+                 "keywords": ["跑通"], "conc_range": [100, 500]}])
+        if self.mode == "missing":                  # 故意缺 accept（schema 拒）
+            return create([{
                 "name": "缺验收标准的孩子", "detail": "d", "kind": "leaf",
-                "keywords": ["x"], "conc_range": [100, 500]}]})
+                "keywords": ["x"], "conc_range": [100, 500]}])
         if self.mode == "badkind":                  # kind 写成示例里的 "dispatch|leaf"
             s = kid("kind 写错的孩子", "2026-12-31 的权益读数已取到")
             s["kind"] = "dispatch|leaf"
-            return json.dumps({"children": [s]}, ensure_ascii=False)
+            return create([s])
         if self.mode == "badrange":                 # 下限比上限大
-            return json.dumps({"children": [{
+            return create([{
                 "name": "区间写错的孩子", "detail": "d", "notes": "",
                 "accept": "2026-12-31 的权益读数已取到", "kind": "leaf",
-                "keywords": ["x"], "conc_range": [500, 100]}]})
+                "keywords": ["x"], "conc_range": [500, 100]}])
         gate = (self.mode != "noevidence")
         kids = []
         if gate:
@@ -171,7 +170,7 @@ class Scripted:
             kids[0]["detail"] = "很长" * 200
         if self.mode == "note":
             kids[0]["notes"] = "写在字段里放不下的判断依据。" * 50
-        return json.dumps({"children": kids}, ensure_ascii=False)
+        return create(kids)
 
 
 def go(mode, accept=C_ANCHORED, kind="dispatch", index=None):
@@ -396,10 +395,10 @@ def main():
                "name: 子任务A" in hist and "gate: true" in hist
                and "conc_range: [100, 500]" in hist
                and "验收标准:" not in hist and "[门槛]" not in hist)
-    ok &= line("alloc 的两个出口 = children / conclusion",
-               all(s in PROMPT["alloc"] for s in ("children", "conclusion")))
-    ok &= line("leaf 的两个出口 = code / conclusion",
-               all(s in PROMPT["leaf"] for s in ("code", "conclusion")))
+    ok &= line("alloc 的两个出口 = create_children / conclude",
+               all(s in PROMPT["alloc"] for s in ("create_children", "conclude")))
+    ok &= line("leaf 的两个出口 = run_code / conclude",
+               all(s in PROMPT["leaf"] for s in ("run_code", "conclude")))
     ok &= line("叶子看不到「先例」（它只要工具）",
                "先例" not in filled("leaf", []).render())
     ok &= line("分配节点看得到「先例」",

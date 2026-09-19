@@ -23,7 +23,6 @@
 import asyncio
 import contextlib
 import io
-import json
 import os
 import re
 import sys
@@ -32,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import tree.intake as intake_mod                           # noqa: E402
+from tree.llm import Message, ToolCall                     # noqa: E402
 from terminal.chat import GRAY, converse, opening, _read_line   # noqa: E402
 
 OK = []
@@ -51,16 +51,22 @@ class FakeLLM:
         self.replies, self.last_usage, self.seen = list(replies), {}, []
         self.reasoning = reasoning
 
-    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None):
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
+                   tools=None):
         self.seen.append(messages[-1]["content"])
         if self.reasoning and on_reasoning:
             for i in range(0, len(self.reasoning), 4):   # 思考也一小口一小口
                 on_reasoning(self.reasoning[i:i + 4])
-        reply = self.replies.pop(0) if self.replies else "{}"
+        spec = self.replies.pop(0) if self.replies else ""
+        if isinstance(spec, dict) and "root" in spec:
+            reply, calls = "", [ToolCall(name="submit_root",
+                                         arguments={"root": spec["root"]})]
+        else:
+            reply, calls = str(spec or ""), []
         if on_delta:
             for i in range(0, len(reply), 5):    # 一小口一小口地吐
                 on_delta(reply[i:i + 5])
-        return reply
+        return Message(text=reply, tool_calls=calls)
 
 
 async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
@@ -118,7 +124,7 @@ def main():
     print("A. 谈定：问 → 答 → 交出的根被跑掉")
     Q = "你说的「赚大钱」按哪个数字判定？"
     S = "我建议写成：账户权益 >= 本金 x 2"
-    llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
+    llm = FakeLLM([talk(Q + "\n" + S), root()])
     scr = Screen(["2026-12-31 收盘", ""])          # 一行回答 + 空行表示说完
     RAN.clear()
     r = asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out,
@@ -144,7 +150,7 @@ def main():
 
     print("=" * 80)
     print("B. 回车不发送：分几行写的回答拼成一条（半句话不会被提前发出去）")
-    llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
+    llm = FakeLLM([talk(Q + "\n" + S), root()])
     scr = Screen(["我要一个", "能跑通这个仓库所有测试的", "任务", ""])
     RAN.clear()
     asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))
@@ -161,7 +167,7 @@ def main():
 
     print("=" * 80)
     print("C. 写了东西再按 Ctrl-D = 说完了（不丢）")
-    llm = FakeLLM([talk(Q + "\n" + S), json.dumps(root())])
+    llm = FakeLLM([talk(Q + "\n" + S), root()])
     scr = Screen(["就按你说的办"])                    # 之后 EOF
     RAN.clear()
     asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))
@@ -187,8 +193,8 @@ def main():
 
     print("=" * 80)
     print("E. 旁白（打回理由）显示到终端")
-    llm = FakeLLM([json.dumps(root(accept="系统做好了")),   # 没有可测物理量
-                   json.dumps(root())])
+    llm = FakeLLM([root(accept="系统做好了"),   # 没有可测物理量
+                   root()])
     scr = Screen([])
     RAN.clear()
     asyncio.run(converse(llm, "帮我赚大钱", ENV, read=scr.read, out=scr.out, write=scr.write))

@@ -86,19 +86,20 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 |---|---|---|
 | `main.py` | 161 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
 | `terminal/` | 168 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里 |
-| `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。改提示词不用碰代码 |
+| `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。流程与长规则；字段"本质"在 `tool_specs.py` |
 | `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
-| `tree/intake.py` | 176 | **入口**：唯一顶层。谈成一个形式就当场 `run()`，结论回填再接着谈 |
+| `tree/intake.py` | 150 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈 |
 | `tree/config.py` | 65 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
-| `tree/llm.py` | 161 | LLM + MockLLM（OpenAI 兼容；`acompletion` 真异步、流式、思考） |
+| `tree/llm.py` | 200 | LLM + MockLLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
 | `tree/tools.py` | 148 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
 | `tree/effects.py` | 309 | effects 抽取 + 契约核对 / `.meta.json` 落盘 + **工作区快照与 diff**（产出认定） |
 | `tree/protocol/fields.py` | 256 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
 | `tree/protocol/gate.py` | 231 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
+| `tree/protocol/tool_specs.py` | 130 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）。三个工具：`create_children` / `run_code` / `conclude` |
 | `tree/runtime/trace.py` | 61 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
-| `tree/runtime/turn.py` | 299 | 一个节点的一回合：问模型（await）→ 过闸门 → 写一段代码 / 分配 |
+| `tree/runtime/turn.py` | 369 | 一个节点的一回合：问模型（带工具）→ 工具函数做动作 / 出结论。三个工具的实现在这里（ContextVar 注入每节点 ctx） |
 | `tree/runtime/scheduler.py` | 232 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、学能力、进度回调 |
 | `tree/runtime/box.py` | 180 | **盒子**：`register` / `search` / `call` —— 能力库里的 cap 变成可调用的 API |
 | `tree/runtime/sandbox.py` | 367 | **executor**：一段代码在 CPython 子进程里跑，工具走 JSON 行协议回调宿主（真异步） |
@@ -139,6 +140,25 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 ## 3. 已经做完的（留档，别重复做）
 
+- **✅ 节点与模型的通道 = 工具调用**（`tree/protocol/tool_specs.py` +
+  `tree/runtime/turn.py`）：分配节点唯一动作 `create_children`、叶子唯一动作
+  `run_code`、两节点共用 `conclude`（出结论）。每次回复必须且只能调一个；
+  没调 / 调多个 / 调不在本层列表里的 → `balk`。
+  **schema 由 pydantic 生成、经 FastMCP 注册**（`@mcp.tool`，本地/远端同构：
+  将来连外部 MCP server 的 client，工具进同一个注册表）；参数形状由 schema 强制，
+  **语义校验仍走 gate**（`clean_spec` / `clean_conclusion`），拒绝信息保持中文原文。
+  字段的"本质"说明从 `prompts/*.md` 迁到了 schema 的 description（provider 原样
+  喂给模型）；md 只剩流程与长规则。
+  **并发接线**：每节点 ctx 通过 ContextVar 注入（`Depends(get_step_binding)`，
+  step 开头 `set`）—— 每个 asyncio task 的 context 独立，并发节点互不串。
+  `LLM.chat` 返回 `Message`（文本 + tool_calls），`tools=` 给 litellm、
+  `tool_choice="auto"`；**流式 + tools 也支持**（入口：话流式吐字、形式结构化收）。
+  MockLLM / 测试脚本全改成发工具调用；trace 的 `*_out` 现在记录 text + tool_calls。
+- **✅ 入口也走同一个通道**（`tree/intake.py` 的 `submit_root`）：模型要么说话
+  （content，流式），要么调 `submit_root(root=ChildSpec)` 交形式 —— 和节点层
+  “调工具 = 动作、回文本 = 说话”同构，root 的格子就是 `ChildSpec`（和分配节点
+  写回孩子的是同一套）。旧 `_Spoken`/`root_in`（从文本里猜 JSON 是话还是形式）
+  整个删除 —— 通道由工具 API 原生给出。交形式的打回/结论都作为**工具结果**回填。
 - **✅ 入口**（`prompts/intake.md` + `tree/intake.py`）：**这个程序唯一的顶层**，
   不退场。谈成一个能过闸门的 `root`，就**当场 `run()` 它**（`tree/intake.py`
   直接 import `tree.run`），把结论作为一条外部观测回填给对话，再接着调模型 ——
@@ -150,9 +170,10 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
   "accept 必须有可测物理量"），缺字段、没有可测物理量都当场打回**并把原因说给它**，
   让它自己改。**对话的形式不归代码管**：一次问几件事、带不带建议、问几轮，
   都是模型的事 —— 代码不认识"回合数"，也不数"同一个问题问了几次"。
-  **模型要么说话（纯文本），要么交形式（`{"root": …}`）** —— 识别规则只有一条：
-  只有带 `root` 键的 JSON 算形式，其余一律当"话"原样送到用户面前
-  （不过 `norm()` —— 那是形式字段的规范化，会压掉换行）。
+  **模型要么说话（纯文本），要么调 `submit_root` 交形式** —— 和节点层同一个分流
+  （调工具 = 动作，回文本 = 说话），root 的格子就是 `ChildSpec`。所以没有
+  “从文本里猜 JSON 是话还是形式”的识别规则（旧 `_Spoken`/`root_in` 删了）；
+  交形式不过 `norm()`，说话也不改它的分行。
   **用户不会给你验收标准**：那是入口的使命，不是用户的任务。
 - **✅ 终端会话**（`terminal/`）：`python3 main.py ... --intake`
   就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由 / “接到任务 /
@@ -162,9 +183,8 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
   否则种子是空的，那一次模型调用只够换来一句"你要做什么？"（实测）——
   看起来就像程序没等你说话就自作主张。
   **模型的吐字是真流式**（`LLM.chat(on_delta=…)` 读 SSE，一个字一个字写屏），
-  但只吐「话」那一路：交形式（`{"root":…}`，含 ```json 围栏）在 `tree/intake.py`
-  的 `_Spoken` 里被按住，不往用户眼前甩一坨 JSON；`ask` 因此只负责读，
-  不再重复显示（话已经在吐字时上屏了）。
+  但只吐「话」那一路：交形式是工具调用（`submit_root`），走另一条通道，
+  不往用户眼前甩 JSON；`ask` 因此只负责读，不再重复显示（话已经在吐字时上屏了）。
   **思考（`reasoning_content`）整段按流式画成灰的**（`on_reasoning` 通道）：
   推理模型先想后说，不想的话屏幕会十几秒一个字没有，看着像卡死（实测）。
   边界：`main.py` 不再自己 `input()`，`tree/intake.py` 不知道自己是 tty 还是脚本 ——

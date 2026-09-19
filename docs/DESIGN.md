@@ -236,9 +236,11 @@
    - **手在树上，不在入口**：入口自己没有 `bash`/`read`/`write`；它唯一的手是
      `run()` 一棵过了闸门的树。所以它不会变成和树并行的执行者 ——
      它要动手，就必须先交出一个能过校验的形式。
-   - **交形式 ≠ 退场，也没有“附加任务”这一说**：每个 `{"root": …}` 都是任务。
-     跑掉，把结论作为一条外部观测回填，再调模型。形式能过闸门就拿去跑，
+   - **交形式 ≠ 退场，也没有“附加任务”这一说**：每个 `submit_root(root=…)`
+     都是任务。跑掉，把结论作为工具结果回填，再调模型。形式能过闸门就拿去跑，
      跑完继续谈 —— 入口自己不停，停是人的事。
+     通道与节点同构：模型要么说话（content），要么调 `submit_root` 交形式
+     （root 的格子就是 `ChildSpec`，和分配节点写回孩子的是同一套）。
    - **对话的形式不归代码管**：一次问几件事、怎么问、要不要先复述一遍，都是模型的事，
      它是在和真人说话。代码不认识“回合数”，不规定“提问必须带建议”，也不数“同一个问题
      问了几次”（这些曾经都有 —— 全是看模型犯错后婊上去的，后来全删了）。
@@ -273,16 +275,24 @@ Node{ name, detail, notes, accept, kind=dispatch|leaf, gate,
 这类段落标题（它们不是形式字段，是额外塞给它的旧账）。
 字数是提示词里的建议，**代码既不校也不切**。
 
-两个分支，只有两个：
+两个分支，只有两个。模型与程序之间唯一的通道是**三个工具**
+（`protocol/tool_specs.py` 的 schema + `runtime/turn.py` 的实现），
+每次回复必须且只能调用一个；没调 / 调多个 / 调不在本层列表里的 → 当场打回：
 
-- **分配节点**：`{"children":[...]}` 或 `{"conclusion":{}}`。
+- **分配节点**：`create_children(children=[...])` 或 `conclude(...)`。
   **没有 execute 分支** —— "不拆"就是派一个叶子。少一个分支，少一类边界情况。
-- **叶子**：`{"code":"..."}` 或 `{"conclusion":{}}`。
-  它写的是**一段真的 Python 代码**，跑在一个 CPython 子进程里（`runtime/sandbox.py`）：
+- **叶子**：`run_code(code=...)` 或 `conclude(...)`。
+  `run_code` 写的是**一段真的 Python 代码**，跑在一个 CPython 子进程里（`runtime/sandbox.py`）：
   三只手 `bash` / `read` / `write` 永远绑着，命中的**现成做法各自绑成同名函数**
   （`runtime/box.py`），`print` 和最后一行表达式的值就是观测。
   **没有 `need`** —— 现成做法在出生时就由程序塞进来了（§4.3、§5.4）；
   运行时还想找就 `search_tools("...")`，命中什么当场装成函数。
+
+`conclude` 两个节点共用：判定 `满足|未满足|阻塞`、正文、证据、external、artifacts（叶子）。
+参数形状由 pydantic schema 强制（`protocol/tool_specs.py`，经 FastMCP 注册，
+本地/远端同构）；**语义校验仍走 gate**（`clean_spec` / `clean_conclusion`），
+拒绝信息保持中文原文。字段的"本质"说明在 schema 的 description 里
+（provider 会原样喂给模型），`prompts/*.md` 只剩流程与长规则。
 
 每个子任务**除 `notes` 外全部必填**，缺一个当场被拒：
 `name` / `detail` / `accept` / `kind` / `keywords` / `conc_range`。

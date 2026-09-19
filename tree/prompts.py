@@ -20,7 +20,10 @@
 入口（`prompts/intake.md`）是同一个协议的第一环：它交出来的 `root` 要过
  `clean_spec` 加"验收标准必须有可测物理量"，所以它不可能塞进树检查不了的东西。
 
-所以改提示词不用碰代码：直接改 `prompts/*.md`。
+节点与模型之间的**通道是工具调用**（`tree/protocol/tool_specs.py`）：
+字段的"本质"说明在 schema 的 description 里（provider 会原样喂给模型），
+流程与长规则在 `prompts/*.md`。所以改字段含义看 tool_specs.py，
+改"什么时候用什么工具/怎么判断"看 md —— 两边都要和 gate.py 对着看。
 
 设计与不变量的完整版在 `docs/DESIGN.md`；进度与交接在 `docs/HANDOVER.md`。
 """

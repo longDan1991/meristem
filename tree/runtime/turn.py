@@ -1,7 +1,18 @@
-"""一个节点的一回合：问模型 → 过闸门 → 做一个动作 / 再拆一层。
+"""一个节点的一回合：问模型（带工具）→ 按工具调用做一个动作 / 出结论。
 
-这一层因**"回合怎么走"**而变：提示词里模型能说什么、代码要核什么、
-动作怎么记账、原地打转怎么显式化。调度（谁先谁后、门槛、并行）在 scheduler。
+模型与程序之间唯一的通道是**三个工具**（schema 在 `protocol/tool_specs.py`，
+实现在这里）：
+  · create_children —— 分配节点再拆一层（它唯一的动作）
+  · run_code        —— 叶子写一段代码（它唯一的动作）
+  · conclude        —— 出结论（两个节点共用）
+
+每次回复必须调用且只能调用其中一个；没调用 / 调错 / 调多个 = 协议违规（balk）。
+参数形状由 pydantic schema 强制；**语义校验仍走 gate**（clean_spec /
+clean_conclusion）—— schema 只管形状，拒绝信息保持 gate 的中文原文。
+
+工具实现要拿到**每个节点自己的运行时上下文**（节点是并发的）：`_step_binding`
+是 ContextVar，step() 开头写入 (ctx, nid)，工具函数用 `Depends(get_step_binding)`
+注入 —— 每个 asyncio task 的 context 是独立的，并发节点互不串（AGENTS §9 无锁）。
 
 代码只做四件事（都在形式字段上，不是计数器）：
   ① 规范化字段（**不切长度** —— 上限由提示词承诺，代码不再偷偷砍）
@@ -10,15 +21,41 @@
   ④ 判定"满足"却指不出证据 → 降级为"未满足"
 """
 
+import contextvars
 import hashlib
 import os
 
+from fastmcp.dependencies import Depends
+from fastmcp.exceptions import ValidationError as ToolValidationError
+
 from ..effects import (ARTIFACT_EXT, accept_artifacts, classify_paths,
                        effects_of, snapshot_workspace)
-from ..llm import parse_json
-from ..prompts import PROMPT
 from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits
+from ..protocol.tool_specs import Artifact, ChildSpec, mcp, openai_tools
+from ..prompts import PROMPT
 from . import sandbox
+
+
+# ---------------------------------------------------------------- 工具接线
+# 每个节点类型的工具清单（OpenAI 格式，litellm 用）。schema 是静态的，
+# 由 openai_tools() 缓存；这里只记名字，供 step 校验"这次调的是不是本层该调的"。
+_TOOL_NAMES = {"alloc": ("create_children", "conclude"),
+               "leaf": ("run_code", "conclude")}
+
+# step 开头写入 (ctx, nid)；工具函数用 Depends 注入它。每个 asyncio task
+# 的 contextvars 是独立的，所以并发节点拿到的各是各的 ctx。
+_step_binding: contextvars.ContextVar = contextvars.ContextVar(
+    "step_binding", default=None)
+
+
+def get_step_binding():
+    return _step_binding.get()
+
+
+def _current(binding):
+    rctx, nid = binding
+    st = rctx["state"][nid]
+    return st, st["node"], rctx["trace"], rctx["budget"], rctx
 
 
 # ---------------------------------------------------------------- 问模型
@@ -38,17 +75,16 @@ def _log_usage(llm, trace, node_id, phase, budget):
 
 async def ask(llm, trace, node, which, budget):
     trace.add(node.id, "%s_in" % which, node.render())
-    text = await llm.chat([{"role": "system", "content": PROMPT[which]},
-                           {"role": "user", "content": node.render()}])
+    tools = (await openai_tools())[which]
+    msg = await llm.chat([{"role": "system", "content": PROMPT[which]},
+                          {"role": "user", "content": node.render()}],
+                         tools=tools)
     _log_usage(llm, trace, node.id, which, budget)
-    trace.add(node.id, "%s_out" % which, text)
-    try:
-        d = parse_json(text)
-    except ValueError as e:
-        return {"_bad": "输出不是合法 JSON：%s" % e}
-    if not isinstance(d, dict):
-        return {"_bad": "输出必须是一个 JSON 对象"}
-    return d
+    trace.add(node.id, "%s_out" % which,
+              {"text": msg.text,
+               "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
+                              for tc in msg.tool_calls]})
+    return msg
 
 
 # ---------------------------------------------------------------- 原地打转
@@ -83,7 +119,7 @@ def bump(seen, fingerprint, trace, node, what):
 def balk(node, why, trace, st, kids=None):
     """把"这次给的东西用不了"变成一条可见的事实，并且**按重复次数处理**。
 
-    四个地方都要走它：看不懂的输出、被代码拒的分配、不合规的结论。
+    四个地方都要走它：没调工具 / 参数不合形状 / 被代码拒的分配 / 不合规的结论。
     没有它，模型一直给同样的东西，这一回合就原地无限重复 ——
     实测撞过两次（旧协议的键；总缺 accept 的子任务）。那两种情况下
     根本没有动作，所以"重复动作"那个信号永远不会触发：这里必须自己数。
@@ -184,85 +220,24 @@ async def do_code(node, code, trace, box, st, hands):
     return str(obs) + note
 
 
-# ---------------------------------------------------------------- 一回合
-async def step(nid, ctx):
-    """一个节点的一回合。不递归，只返回下一步该干什么。"""
-    st = ctx["state"][nid]
-    node = st["node"]
-    llm, trace, budget = ctx["llm"], ctx["trace"], ctx["budget"]
-    hands = ctx["hands"]
+# ---------------------------------------------------------------- 三个工具
+@mcp.tool
+async def create_children(children: list[ChildSpec],
+                          _b=Depends(get_step_binding)) -> dict:
+    """把任务拆成更小的子任务交给下层节点。调它 = 再拆一层。
 
-    if budget.exhausted():
-        node.close("阻塞", "预算耗尽: " + budget.why(), [])
-        node.status = "failed"
-        trace.add(node.id, "budget_exhausted", node.conclusion)
-        return {"kind": "finished"}
-
-    which = "leaf" if node.kind == "leaf" else "alloc"
-    d = await ask(llm, trace, node, which, budget)
-
-    if d.get("_bad"):
-        # 把非法输出当成一条事实喂回去，让它自己纠正（不加计数器）
-        trace.add(node.id, "bad_output", d["_bad"])
-        return balk(node, d["_bad"], trace, st)
-
-    concl = d.get("conclusion")
-    if isinstance(concl, dict):
-        got, err = clean_conclusion(concl, trace, node, st)
-        if err:
-            trace.add(node.id, "bad_conclusion", err)
-            return balk(node, err, trace, st)
-        accept_artifacts(node, got["artifacts"], trace, st)
-        node.close(got["verdict"], got["content"], got["evidence"], got["external"])
-        trace.add(node.id, "concluded",
-                  {"verdict": got["verdict"], "text": got["content"],
-                   "evidence": got["evidence"], "external": got["external"]})
-        return {"kind": "finished"}
-
-    if node.kind == "leaf":
-        code = d.get("code")
-        if not isinstance(code, str) or not code.strip():
-            return balk(
-                node,
-                "输出里没有能识别的顶层键（你只能给 code 或 conclusion）。"
-                "你给的键是: %s" % (", ".join(sorted(d)) or "(空)"),
-                trace, st)
-        obs = await do_code(node, code, trace, ctx["box"], st, hands)
-        label = code_label(code)
-        # 每一回合的代码只在这一处计数：跑成没成、报不报错，都得过这里，
-        # 所以"同一段代码 + 同一结果 ≥3 告警 / ≥5 停下"没有漏网的路。
-        n, note = bump(st.setdefault("seen_actions", {}),
-                       sig(code, obs), trace, node, label)
-        if n >= 5:
-            st["stalled"] = ("同一段代码重复 %d 次、输出完全一样，没有新信息" % n)
-        if note:
-            obs = str(obs) + note
-        node.observations.append({"action": label, "obs": obs})
-        trace.add(node.id, "code", {"code": code, "obs": obs})
-        stalled = st.pop("stalled", None)
-        if stalled:
-            trace.add(node.id, "stalled", stalled)
-            node.close("未满足", stalled, [])
-            return {"kind": "finished"}
-        return {"kind": "again"}
-
-    # ── 分配节点：再拆一层 ──
-    specs = d.get("children")
-    if not isinstance(specs, list) or not specs:
-        return balk(
-            node,
-            "输出里没有能识别的顶层键（你只能给 children 或 conclusion）。"
-            "你给的键是: %s" % (", ".join(sorted(d)) or "(空)"),
-            trace, st)
-
+    除 notes / gate 外全部必填：缺了或形状不对，这次分配会被代码当场退回，
+    原因写进「本层已有尝试」。一次最多一个 gate。
+    """
+    st, node, trace, budget, rctx = _current(_b)
     kids_spec, reject = [], None
-    for raw in specs:                         # 不砍：拆几个是模型的决定
-        s, why = clean_spec(raw if isinstance(raw, dict) else {})
+    for raw in (c.model_dump() for c in children):
+        s, why = clean_spec(raw)
         if why:
             reject = why
             break
         # ② 子任务的验收标准必须携带父/根的可测物理量
-        ra = ctx["root_anchors"]
+        ra = rctx["root_anchors"]
         ok_parent = inherits(node.accept, s["accept"])
         ok_root = (not ra) or any(x in s["accept"] for x in ra)
         if not (ok_parent and ok_root):
@@ -297,3 +272,105 @@ async def step(nid, ctx):
                "deferred": [s["name"] for s in rest] if gate else []})
     return {"kind": "children", "first": first, "rest": rest,
             "gate_name": gate["name"] if gate else None}
+
+
+@mcp.tool
+async def run_code(code: str, _b=Depends(get_step_binding)) -> dict:
+    """写一段代码。代码是唯一能改变世界的东西，一次一段，次数不限。
+
+    跑在一个真的 Python 进程里（当前工作目录）：bash / read / write 永远都在，
+    「现成做法」里命中的每条已绑定成同名函数。print 和异常都是观测。
+    """
+    st, node, trace, budget, rctx = _current(_b)
+    if not code.strip():
+        return balk(node, "code 是空的：要么写一段代码，要么用 conclude 出结论",
+                    trace, st)
+    obs = await do_code(node, code, trace, rctx["box"], st, rctx["hands"])
+    label = code_label(code)
+    # 每一回合的代码只在这一处计数：跑成没成、报不报错，都得过这里，
+    # 所以"同一段代码 + 同一结果 ≥3 告警 / ≥5 停下"没有漏网的路。
+    n, note = bump(st.setdefault("seen_actions", {}),
+                   sig(code, obs), trace, node, label)
+    if n >= 5:
+        st["stalled"] = ("同一段代码重复 %d 次、输出完全一样，没有新信息" % n)
+    if note:
+        obs = str(obs) + note
+    node.observations.append({"action": label, "obs": obs})
+    trace.add(node.id, "code", {"code": code, "obs": obs})
+    stalled = st.pop("stalled", None)
+    if stalled:
+        trace.add(node.id, "stalled", stalled)
+        node.close("未满足", stalled, [])
+        return {"kind": "finished"}
+    return {"kind": "again"}
+
+
+@mcp.tool
+async def conclude(verdict: str, text: str,
+                   evidence: list[str] | None = None,
+                   external: str = "",
+                   artifacts: list[Artifact] | None = None,
+                   _b=Depends(get_step_binding)) -> dict:
+    """出结论：判定这件事做没做完。分配节点和叶子共用。
+
+    判定「满足」必须指得出真证据（叶子：第几次观测 / 产物路径；分配节点：
+    子任务 name / 产物路径），指不出来会被降级为未满足。
+    叶子的每个产出文件都要在 artifacts 里交代（type=内部 只给自己用的）。
+    """
+    st, node, trace, budget, rctx = _current(_b)
+    concl = {"verdict": verdict, "text": text, "evidence": evidence or [],
+             "external": external,
+             "artifacts": [a.model_dump(by_alias=True) for a in (artifacts or [])]}
+    got, err = clean_conclusion(concl, trace, node, st)
+    if err:
+        trace.add(node.id, "bad_conclusion", err)
+        return balk(node, err, trace, st)
+    accept_artifacts(node, got["artifacts"], trace, st)
+    node.close(got["verdict"], got["content"], got["evidence"], got["external"])
+    trace.add(node.id, "concluded",
+              {"verdict": got["verdict"], "text": got["content"],
+               "evidence": got["evidence"], "external": got["external"]})
+    return {"kind": "finished"}
+
+
+# ---------------------------------------------------------------- 一回合
+async def step(nid, ctx):
+    """一个节点的一回合。不递归，只返回下一步该干什么。"""
+    st = ctx["state"][nid]
+    node = st["node"]
+    llm, trace, budget = ctx["llm"], ctx["trace"], ctx["budget"]
+
+    if budget.exhausted():
+        node.close("阻塞", "预算耗尽: " + budget.why(), [])
+        node.status = "failed"
+        trace.add(node.id, "budget_exhausted", node.conclusion)
+        return {"kind": "finished"}
+
+    which = "leaf" if node.kind == "leaf" else "alloc"
+    _step_binding.set((ctx, nid))
+    msg = await ask(llm, trace, node, which, budget)
+
+    if not msg.tool_calls:
+        hint = ("（你只回了一段文字，开头：%s）" % msg.text[:60]) if msg.text else ""
+        return balk(node,
+                    "这次回复没有调用任何工具%s。你必须调用一个：%s。"
+                    % (hint, " / ".join(_TOOL_NAMES[which])),
+                    trace, st)
+    if len(msg.tool_calls) > 1:
+        return balk(node, "一次只能调用一个工具（你调了 %d 个）"
+                    % len(msg.tool_calls), trace, st)
+    tc = msg.tool_calls[0]
+    if tc.name not in _TOOL_NAMES[which]:
+        return balk(node, "你调用的 %s 不在这一层的工具里（你能用：%s）"
+                    % (tc.name, " / ".join(_TOOL_NAMES[which])), trace, st)
+
+    tool = await mcp.get_tool(tc.name)
+    try:
+        res = await tool.run(tc.arguments)
+    except ToolValidationError as e:
+        # schema 拒的参数（缺必填 / 类型错）：一条可见的事实，让模型改
+        return balk(node, "工具参数不合形状，被退回：%s" % e, trace, st)
+    d = res.structured_content
+    if not isinstance(d, dict):
+        raise TypeError("工具 %s 必须返回 dict（拿到 %r）" % (tc.name, d))
+    return d

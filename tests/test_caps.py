@@ -23,6 +23,7 @@ from tree.memory.caps import Caps                        # noqa: E402
 from tree.effects import contract_problems               # noqa: E402
 from tree.memory.mine import caps_from_node, mine_trace as mine_caps   # noqa: E402
 from tree.memory.verify import eligible, verify                     # noqa: E402
+from tree.llm import Message, ToolCall                   # noqa: E402
 from tree.protocol.fields import Node                    # noqa: E402
 from tree.runtime.trace import Trace                     # noqa: E402
 from tree.runtime import scheduler as R                  # noqa: E402
@@ -62,20 +63,22 @@ class LeafScript:
         self.retried = False
         self.i, self.last_usage = 0, {}
 
-    async def chat(self, messages, temperature=0.2):
+    async def chat(self, messages, temperature=0.2, tools=None):
         user = messages[-1]["content"]
         assert "手上的东西" in user, "这个脚本只能驱动叶子"
         if self.i < len(self.codes):
             c = self.codes[self.i]
             self.i += 1
-            return json.dumps({"code": c}, ensure_ascii=False)
+            return Message(tool_calls=[ToolCall(name="run_code",
+                                                arguments={"code": c})])
         body = {"verdict": self.verdict, "text": "脚本收尾", "evidence": self.evidence}
         if self.omit_first and not self.retried:
             self.retried = True          # 第一次故意不交代工件，看代码拦不拦
-            return json.dumps({"conclusion": body}, ensure_ascii=False)
+            return Message(tool_calls=[ToolCall(name="conclude",
+                                                arguments=body)])
         if self.artifacts:
             body["artifacts"] = self.artifacts
-        return json.dumps({"conclusion": body}, ensure_ascii=False)
+        return Message(tool_calls=[ToolCall(name="conclude", arguments=body)])
 
 
 def leaf_run(caps, codes, verdict="满足", accept="某可观测结果", evidence=None,
