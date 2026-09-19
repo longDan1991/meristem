@@ -67,10 +67,18 @@ class FakeLLM:
 
 
 async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
-                caps=None, index=None, **kwargs):
-    """脚本化的树：只记下跑了哪棵根，给一个可复核的结论。"""
+                caps=None, index=None, on_event=None, **kwargs):
+    """脚本化的树：只记下跑了哪棵根，给一个可复核的结论。
+
+    真调度器每开/关一个节点发一次 on_event，这里也照发两次（出生+出结论），
+    证明入口把 env["on_event"] 一路透传到了 run。
+    """
     RAN.append(root)
+    if on_event:
+        on_event(root)
     root.close("满足", "跑完了：%s" % root.name, ["证据 %s" % root.name])
+    if on_event:
+        on_event(root)
     return root
 
 
@@ -78,21 +86,22 @@ intake_mod.run = fake_run
 
 
 def run_intake(llm, seed, answers):
-    """跑入口；脚本化的用户答完就中止。返回 (问过的话, 旁白)。"""
-    asked, said = [], []
+    """跑入口；脚本化的用户答完就中止。返回 (问过的话, 旁白, 节点事件)。"""
+    asked, said, events = [], [], []
     answers = list(answers)
 
-    def ask(t):
+    async def ask(t):
         asked.append(t)
         if not answers:
             raise Stop()
         return answers.pop(0)
 
+    env = dict(ENV, on_event=events.append)
     try:
-        asyncio.run(intake(llm, seed, ask=ask, env=ENV, on_say=said.append))
+        asyncio.run(intake(llm, seed, ask=ask, env=env, on_say=said.append))
     except Stop:
         pass
-    return asked, said
+    return asked, said, events
 
 
 def root(**over):
@@ -110,8 +119,8 @@ def main():
             "我建议写成：账户权益在 2026-12-31 收盘 >= 本金 x 2")
     llm = FakeLLM([root(accept="系统做好了"), talk, root()])
     RAN.clear()
-    asked, said = run_intake(llm, "帮我做个能赚大钱的A股量化系统（我没说怎么算赚到）",
-                             ["2026-12-31 收盘前"])
+    asked, said, events = run_intake(llm, "帮我做个能赚大钱的A股量化系统（我没说怎么算赚到）",
+                                     ["2026-12-31 收盘前"])
     print("  问过用户: %r" % asked)
     print("  跑过的根: %s" % [r.name for r in RAN])
     line("打了回去，并说了为什么", any("可测物理量" in s for s in said))
@@ -125,13 +134,15 @@ def main():
     line("回填的结论上是判定与证据",
          any("判定: 满足" in s and "证据" in s for s in llm.said))
     line("根的可测物理量被识别出来", bool(anchors(RAN[0].accept)))
+    line("节点事件一路透传到 run（出生+出结论各一次，同一棵根）",
+         len(events) == 2 and all(e is RAN[0] for e in events))
 
     print("=" * 80)
     print("B. 形式不合规 → 打回；改一次就过")
     llm = FakeLLM([root(accept="系统做好了"),   # 没有可测物理量
                    root()])
     RAN.clear()
-    _, said = run_intake(llm, "帮我赚大钱", [])
+    _, said, _ = run_intake(llm, "帮我赚大钱", [])
     line("打回时把原因摆出来了", any("用不了" in x and "可测物理量" in x for x in said))
     line("改一次后过了闸门并被跑掉", len(RAN) == 1)
     line("打回走旁白，不占用户的话轮", not any("用不了" in x for x in
@@ -143,14 +154,14 @@ def main():
     multi = "我先复述一遍你的意思：\n① 做视频\n② 目标是赚钱\n对吗？"
     llm = FakeLLM([multi, root()])
     RAN.clear()
-    asked, _ = run_intake(llm, "帮我做视频赚钱", ["对"])
+    asked, _, _ = run_intake(llm, "帮我做视频赚钱", ["对"])
     line("① 多行的话原样送出去", asked and asked[0] == multi)
 
     # ② 带 JSON 但不是 root（比如模型顺手写了个 ask）→ 还是话
     weird = json.dumps({"ask": {"content": "你要做什么？"}}, ensure_ascii=False)
     llm = FakeLLM([weird, root()])
     RAN.clear()
-    asked, _ = run_intake(llm, "帮我赚大钱", ["做系统"])
+    asked, _, _ = run_intake(llm, "帮我赚大钱", ["做系统"])
     line("② 不是 submit_root → 也当话（代码不认第二种形式）",
          asked and asked[0] == weird)
     line("② 照样跑到了一棵根", len(RAN) == 1)
@@ -158,7 +169,7 @@ def main():
     # ③ 完全不是 JSON
     llm = FakeLLM(["你好，我们聊聊这件事。", root()])
     RAN.clear()
-    asked, _ = run_intake(llm, "帮我赚大钱", ["好"])
+    asked, _, _ = run_intake(llm, "帮我赚大钱", ["好"])
     line("③ 纯聊天不被当成出错", asked and asked[0] == "你好，我们聊聊这件事。")
 
     print("=" * 80)
@@ -166,7 +177,7 @@ def main():
     replies = ["那你要哪个平台？我建议抖音"] * 8 + [root()]
     llm = FakeLLM(replies)
     RAN.clear()
-    asked, _ = run_intake(llm, "帮我赚大钱", ["抖音"] * 8)
+    asked, _, _ = run_intake(llm, "帮我赚大钱", ["抖音"] * 8)
     print("  同一句话说了 %d 次，仍然继续" % sum("平台" in a for a in asked))
     line("说 8 次也没被计数器逼停", sum("平台" in a for a in asked) == 8,
          "说了 %d 次" % sum("平台" in a for a in asked))
@@ -192,7 +203,7 @@ def main():
     print("F. 吐字：话一路出去，交形式（工具调用）一路不吐")
 
     def streamed(reply):
-        def stop_ask(t):
+        async def stop_ask(t):
             raise Stop()
         got = []
         llm = FakeLLM([reply])

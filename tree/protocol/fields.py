@@ -254,3 +254,30 @@ class Node:
         if self.external:
             r["external"] = self.external
         return r
+
+
+def render_tree(root, registry, prefix="", is_last=True, lines=None):
+    """整棵树的视图：每层的拆分 / 判定 / 结论，画成一串带树形标记的行。
+
+    根是入口，registry 是出生时登记的全部节点（id → Node），孩子按 id 查。
+    运行中的节点画成 ·，出过结论的按状态画成 ✓ / ✗。
+    和 Node 的其它 render_* 一样住在数据旁 —— 树长什么样是树的变因，
+    不是调度器的（调度器只编排谁先谁后）。
+    """
+    b = "└─ " if is_last else "├─ "
+    mark = {"done": "✓", "failed": "✗", "running": "·"}.get(root.status, "?")
+    if lines is None:
+        lines = []
+    tag = "%s%s" % ("[分配]" if root.kind == "dispatch" else "[叶子]", " [门槛]" if root.gate else "")
+    lines.append("%s%s%s %s %s" % (prefix, b, mark, tag, root.name))
+    lines.append("%s%s  [%s] %s" % (prefix, "  " if is_last else "│ ",
+                                    root.verdict or "…", root.accept))
+    if root.conclusion:
+        lines.append("%s%s  → %s" % (prefix, "  " if is_last else "│ ",
+                                     root.conclusion))
+    for i, cid in enumerate(root.children):
+        kid = registry.get(cid)
+        if kid:
+            render_tree(kid, registry, prefix + ("   " if is_last else "│  "),
+                        i == len(root.children) - 1, lines)
+    return lines

@@ -21,9 +21,9 @@ from tree import config as cfg
 from tree.llm import LLM, MockLLM
 from tree.memory.caps import Caps
 from tree.memory.index import TreeIndex
-from tree.protocol.fields import Node
+from tree.protocol.fields import Node, render_tree
 from tree.runtime.budget import Budget
-from tree.runtime.scheduler import render_tree, run
+from tree.runtime.scheduler import run
 from tree.runtime.trace import Trace
 from terminal.chat import converse, opening
 
@@ -127,7 +127,7 @@ async def main():
         # 用户没在命令行交底 → 先在终端上等他把话说完，再让入口开口。
         # 种子是空的时候调模型，只会换来一句"你要做什么？" —— 那一次调用
         # 是白花的，而且看起来像程序没等他说话就自作主张（实测）。
-        task = a.task or opening()
+        task = a.task or await opening()
         seed = "用户的任务: %s" % task
         seed += ("\n用户顺口提了一个验收标准: %s（可以参考，但最后写成什么由你形式化）"
                  % a.criteria if a.criteria else
@@ -135,8 +135,7 @@ async def main():
                  "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。")
         await converse(llm, seed, {"trace": trace, "caps": caps, "index": index,
                                  "budget": budget, "workers": a.workers,
-                                 "registry": registry, "on_beat": on_beat,
-                                 "beat": a.progress or 60})
+                                 "registry": registry})
         return 0
 
     root = Node(name=a.task, accept=a.criteria, kind="dispatch")

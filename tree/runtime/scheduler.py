@@ -28,11 +28,15 @@ from .turn import step
 
 
 async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
-              index=None, on_beat=None, beat=60):
+              index=None, on_beat=None, beat=60, on_event=None):
     """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。
 
     真异步（P4）：一个节点的一回合 = 一个 asyncio task，`workers` 是同时在飞
     的任务数。谁先完成谁先被回收（`FIRST_COMPLETED`），慢节点不拖整批。
+
+    on_event(node) 是可选的事件回调：每个节点**出生**和**出结论**各调一次
+    （节点状态当时分别是 running 和 done/failed）。它是给实时展示用的
+    （终端据此重画任务树）—— 调度器只管发事实，怎么显示是消费方的事。
     """
     registry = {} if registry is None else registry
     budget = Budget() if budget is None else budget
@@ -82,6 +86,8 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
                    "hits": hits, "chars": len(text),
                    "bindings": [t["name"] for t in tools]})
         pending.append(node.id)
+        if on_event:
+            on_event(node)
 
     def learn(node, calls, contracts=None):
         skipped = []
@@ -102,6 +108,8 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
         if res["kind"] == "finished":
             st["finished"] = True
             node = st["node"]
+            if on_event:
+                on_event(node)
             if node.verdict in ("满足", "未满足") and caps is not None and st["calls"]:
                 learn(node, st["calls"], st.get("contracts"))
             parent = node.parent
@@ -210,23 +218,3 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
         await hands.close()
         trace.drain()
     return root
-
-
-def render_tree(root, registry, prefix="", is_last=True, lines=None):
-    b = "└─ " if is_last else "├─ "
-    mark = {"done": "✓", "failed": "✗", "running": "·"}.get(root.status, "?")
-    if lines is None:
-        lines = []
-    tag = "%s%s" % ("[分配]" if root.kind == "dispatch" else "[叶子]", " [门槛]" if root.gate else "")
-    lines.append("%s%s%s %s %s" % (prefix, b, mark, tag, root.name))
-    lines.append("%s%s  [%s] %s" % (prefix, "  " if is_last else "│ ",
-                                    root.verdict or "…", root.accept))
-    if root.conclusion:
-        lines.append("%s%s  → %s" % (prefix, "  " if is_last else "│ ",
-                                     root.conclusion))
-    for i, cid in enumerate(root.children):
-        kid = registry.get(cid)
-        if kid:
-            render_tree(kid, registry, prefix + ("   " if is_last else "│  "),
-                        i == len(root.children) - 1, lines)
-    return lines

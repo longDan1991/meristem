@@ -68,7 +68,8 @@ async def submit_root(root: ChildSpec, _b=Depends(get_intake_binding)) -> str:
     await run(rnode, b["llm"], env["trace"], registry=env.get("registry"),
               budget=env.get("budget"), workers=env.get("workers", 6),
               caps=env.get("caps"), index=env.get("index"),
-              on_beat=env.get("on_beat"), beat=env.get("beat", 60))
+              on_beat=env.get("on_beat"), beat=env.get("beat", 60),
+              on_event=env.get("on_event"))
     if b["say"]:
         b["say"]("（跑完了：%s）" % (rnode.verdict or "没有判定"))
     return _result(rnode)
@@ -102,8 +103,10 @@ def _tool_text(res):
 async def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=None):
     """和用户谈，谈到形式就跑，跑完把结论带回来接着谈。**只在用户中止时停。**
 
-    ask(text)          -> 用户的回答（真跑时就是 input()，测试里换成脚本）。
-                          拿到的是模型那一段话的**原文**，代码不改写它。
+    ask(text)          -> 用户回答的 coroutine（真跑时是终端上那次读，测试里换成
+                          脚本）。拿到的是模型那一段话的**原文**，代码不改写它。
+                          返回 coroutine 是因为读在真终端上要等 I/O，不能把
+                          事件循环按住（那期间调度器可能正跑着）。
     env                -> 运行现场（`trace`/`caps`/`index`/`budget`/`workers`/
                           `registry`），`main` 传进来；入口据此跑树。
     on_say(text)       -> 可选的**旁白**回调：打回理由、"接到任务/跑完了"走这里。
@@ -112,6 +115,9 @@ async def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=No
     on_delta(text)     -> 可选的**吐字**回调：模型正在说的话一小口一小口送到这里。
                           交形式那一路不经过它（那是给闸门的，不是给人看的）。
     on_reasoning(text) -> 可选的**思考**回调：模型的 `reasoning_content` 走它。
+
+    env["on_event"](node) 可选：节点**出生 / 出结论**各调一次，给实时展示用
+    （终端据此重画任务树）。入口不解释它，只把它转给 `run()`。
 
     用户中止（不再输入）由 ask 那边抛 EOFError/KeyboardInterrupt 出来，
     这里不拦 —— 中止不是结论。
@@ -132,7 +138,7 @@ async def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=No
             # 在说话：原样送到用户面前，代码不改写它、不往里添字。
             # 这里**不过 norm()** —— 那是形式字段的规范化（会压掉换行），
             # 而这是一段说给人听的话，分行是它意思的一部分。
-            a = ask(str(rmsg.text or "").strip())
+            a = await ask(str(rmsg.text or "").strip())
             msgs.append({"role": "assistant", "content": rmsg.text})
             msgs.append({"role": "user", "content": str(a)})
             continue
