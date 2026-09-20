@@ -15,6 +15,23 @@ import threading
 import time
 
 
+def iter_trace_lines(path):
+    """逐行读一份 trace。最后一行若是被截断的半笔（崩溃时写了一半），
+    跳过 —— 一次崩溃不该把整棵树的成果埋掉。其它位置坏行照样炸（那是真损坏）。"""
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except ValueError:
+            if i == len(lines) - 1:
+                continue
+            raise
+
+
 class Trace:
     def __init__(self, path="trace.jsonl"):
         self.path = path

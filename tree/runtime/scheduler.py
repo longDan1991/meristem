@@ -1,4 +1,4 @@
-"""调度器：广度优先、并行扇出、门槛、学能力 —— 次数不限。
+"""调度器：广度优先、并行扇出、门槛 —— 次数不限。
 
     分配节点：读自己的形式字段 + 本层已有尝试 → 「再做一次分配」或「出结论」
     叶子：  读自己的形式字段 + 观测历史   → 「写一段代码」或「出结论」
@@ -9,7 +9,7 @@
   · 完成与否由上层看证据复核，节点只能说判定，不能自己算数
   · 所以这里没有任何计数器（max_rounds / self_exec / nudged / rejects 全部删除）
 
-这个文件只管**编排**：谁先谁后、门槛过没过、并行几个、什么时候学能力。
+这个文件只管**编排**：谁先谁后、门槛过没过、并行几个。
 "一回合怎么走"在 `turn.py`；协议校验在 `protocol/gate.py`。
 """
 
@@ -17,10 +17,8 @@ import asyncio
 import os
 from collections import deque
 
-from ..memory.mine import caps_from_node
 from ..protocol.fields import Node
 from ..protocol.gate import anchors
-from .box import Box
 from .budget import Budget
 from .hands import Hands
 from .trace import Trace
@@ -46,8 +44,8 @@ def _checkpoint(nid, st, trace):
         "msgs": st.get("msgs", [])})
 
 
-async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
-              index=None, on_beat=None, beat=60, on_event=None,
+async def run(root, llm, trace, registry=None, budget=None, workers=6,
+              on_beat=None, beat=60, on_event=None,
               on_delta=None, on_reasoning=None, resume=None):
     """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。
 
@@ -63,15 +61,14 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
     node_id 送出来，给终端画进树里。没给就不开流式（入口那一路默认要）。
 
     resume：可选 dict {"state", "pending", "root"} —— 一棵跑了一半的树**接着跑**
-    （会话记录里恢复出来的，见 `session.load`；registry 走参数传入，调用方负责
-    把恢复出的节点合进来）。恢复时：已完工的节点不再碰，waiting>0 的继续等下层，
-    其余重新排队（中断时刻在飞的那步作废，节点带着完整的观测/尝试历史重新问模型）。
+    （会话记录里恢复出来的，见 `session.load`）。恢复时：已完工的节点不再碰，
+    waiting>0 的继续等下层，其余重新排队（中断时刻在飞的那步作废，节点带着
+    完整的观测/尝试历史重新问模型）。
     """
-    registry = {} if registry is None else registry
     budget = Budget() if budget is None else budget
+    registry = {} if registry is None else registry
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
-    box = Box(caps, hands)
 
     def rebuild_msgs(node):
         """旧 trace（没有 msgs 检查点）恢复的叶子：把观测历史重建成对话。
@@ -88,16 +85,11 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
 
     if resume is not None:
         state, pending, root = resume["state"], resume["pending"], resume["root"]
-        # 恢复的节点没有出生时的运行时工具绑定（box.search 的结果不落盘），
-        # 按同一组检索键重查一次补回来；先例/现成做法的**文字**已在节点里。
+        # 旧 trace 没有 msgs 检查点：把观测历史重建成对话，别让恢复的叶子失忆
         for nid, st in state.items():
             if st["finished"]:
                 continue
             node = st["node"]
-            q = " ".join(str(x) for x in (node.keywords or [node.name, node.accept]))
-            tools, _text, _hits = box.search(q)
-            st["tools"] = tools
-            # 旧 trace 没有 msgs 检查点：把观测历史重建成对话，别让恢复的叶子失忆
             if node.kind == "leaf" and not st.get("msgs") and node.observations:
                 st["msgs"] = rebuild_msgs(node)
     else:
@@ -106,7 +98,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
     def register(node):
         state[node.id] = {"node": node, "ready": True, "finished": False,
                           "waiting": 0, "rest": [], "gate_id": None,
-                          "gate_name": None, "calls": [], "tools": [],
+                          "gate_name": None, "calls": [],
                           "contracts": [], "artifacts": set(), "art_effects": {},
                           "seen_actions": {}}
         registry[node.id] = node
@@ -114,53 +106,12 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
             "name": node.name, "detail": node.detail, "notes": node.notes,
             "accept": node.accept, "kind": node.kind, "gate": node.gate,
             "depth": node.depth, "parent": node.parent,
-            "keywords": node.keywords, "conc_range": node.conc_range,
+            "conc_range": node.conc_range,
             "workspace": os.path.abspath(os.getcwd())})
-        # 出生即检索：键是**上层给的**（根没有上层，就用它自己的名字+验收标准）。
-        # 检索不花 LLM 调用，也不问模型要不要查 —— 实测它没有理由去查，
-        # 而真正贵的恰恰是大事（DESIGN §5.4）。
-        # **老树只给分配节点查**：先例回答的是"这件事该怎么拆、当年卡在哪"，
-        # 而拆是分配节点的事；叶子要的是工具，老树对它只是噪音。
-        if index is not None and node.kind == "dispatch":
-            qs = node.keywords or ["%s %s" % (node.name, node.accept)]
-            picked, text = index.search(qs, workspace=os.getcwd())
-            if text:
-                node.precedents.append(text)
-            trace.add(node.id, "precedent",
-                      {"queries": qs, "auto": True,
-                       "hits": [p.id for p in picked], "chars": len(text)})
-        # 现成做法也在出生时塞进来（**所有节点**：叶子就是要动手的那个）：
-        # 模型没有动机去主动找工具（它觉得自己都会，§4.3），
-        # 所以没有 need 这个动作 —— 程序按同一组检索键查能力库，直接给它。
-        # 命中的工具同时存成 **绑定**：它们会在子进程里以同名函数出现，
-        # 模型写代码就能直接调（见 runtime/sandbox.py）。
-        q = " ".join(str(x) for x in (node.keywords or [node.name, node.accept]))
-        tools, text, hits = box.search(q)
-        if text:
-            node.caps.append(text)
-        state[node.id]["tools"] = tools
-        trace.add(node.id, "caps_injected",
-                  {"queries": node.keywords or [node.name],
-                   "hits": hits, "chars": len(text),
-                   "bindings": [t["name"] for t in tools]})
         pending.append(node.id)
         _checkpoint(node.id, state[node.id], trace)
         if on_event:
             on_event(node)
-
-    def learn(node, calls, contracts=None):
-        skipped = []
-        for e in caps_from_node(node.id, node.name, calls,
-                                os.path.basename(getattr(trace, "path", "")),
-                                contracts, skipped):
-            box.register(e)
-            trace.add(node.id, "cap_learned",
-                      {"does": e["does"], "keys": e["keys"],
-                       "scope": e.get("scope"),
-                       "可调用": bool((e.get("契约") or {}).get("func"))})
-        # 不收的能力也要说得出来：理由 + 原命令，不悄悄丢
-        for s in skipped:
-            trace.add(node.id, "cap_skipped", s)
 
     def settle(nid, res):
         st = state[nid]
@@ -169,8 +120,6 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
             node = st["node"]
             if on_event:
                 on_event(node)
-            if node.verdict in ("满足", "未满足") and caps is not None and st["calls"]:
-                learn(node, st["calls"], st.get("contracts"))
             _checkpoint(nid, st, trace)
             parent = node.parent
             if parent and parent in state:
@@ -233,7 +182,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
         for s in specs:
             kids.append(Node(name=s["name"], detail=s["detail"], notes=s["notes"],
                              accept=s["accept"], kind=s["kind"], gate=s["gate"],
-                             keywords=s["keywords"], conc_range=s["conc_range"],
+                             conc_range=s["conc_range"],
                              parent=parent.id, depth=parent.depth + 1,
                              # 意图链只加一层，孩子不重新把祖先走一遍（§11）
                              lineage=parent.lineage + [[parent.name, parent.detail]]))
@@ -242,7 +191,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
 
     ctx = {"state": state, "llm": llm, "trace": trace, "budget": budget,
            "root_anchors": anchors(root.accept),
-           "caps": caps, "index": index, "hands": hands, "box": box,
+           "hands": hands,
            "on_delta": on_delta, "on_reasoning": on_reasoning}
 
     def dispatch(nid, res):

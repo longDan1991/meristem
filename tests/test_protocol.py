@@ -8,8 +8,8 @@
   E. 次数不限：反复"再做一次"不被任何计数器阻止，而每次尝试都看得见
   F. 必填项缺一个 → 当场被拒；长字段原样通过（代码不做任何长度检查）
   G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
-  H. 检索键：分配节点一出生就自动查老树，叶子只查能力库
   I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落
+  J. 无进展检测：重复同一段代码、输出一样 → 被停下来
 """
 
 import asyncio
@@ -29,25 +29,11 @@ from tree.runtime import scheduler as R              # noqa: E402
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
 
-class FakeIndex:
-    """假的老树索引：只记下程序发了什么查询。"""
-
-    def __init__(self):
-        self.qs = []
-
-    def search(self, qs, workspace=None):
-        self.qs.append(list(qs))
-        self.workspace = workspace
-        return [], "[先例] 假的老树"
-
-
-def kid(name, accept, kind="leaf", gate=False, keywords=None, rng=None,
+def kid(name, accept, kind="leaf", gate=False, rng=None,
         detail="按上层要求把这件事做完", notes=""):
     """一个合规的子任务形式（所有必填项都在）。"""
     return {"name": name, "detail": detail, "notes": notes, "accept": accept,
-            "kind": kind, "gate": gate,
-            "keywords": keywords or ["kw-" + name, "2026-12-31"],
-            "conc_range": rng or [100, 500]}
+            "kind": kind, "gate": gate, "conc_range": rng or [100, 500]}
 
 
 def run_code(code):
@@ -131,8 +117,7 @@ class Scripted:
                 return conclude(verdict="满足", text="都回来了", evidence=["MID"])
             return create([kid(
                 "MID", "2026-12-31 的权益读数已取到", kind="dispatch",
-                detail="先把数据这条线摸清楚",
-                keywords=["akshare", "回测", "2026-12-31"])])
+                detail="先把数据这条线摸清楚")])
         if self.mode == "recite":
             # 真跑过的孩子回来后，又发了一次用不了的分配（被代码拒），
             # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
@@ -151,14 +136,11 @@ class Scripted:
         if not fresh:
             return conclude(verdict="满足", text="下层都回来了", evidence=["GATE"])
         if self.mode == "anchor":
-            return create([
-                {"name": "跑通就行", "detail": "把代码跑起来", "notes": "",
-                 "accept": "代码能跑起来", "kind": "leaf",
-                 "keywords": ["跑通"], "conc_range": [100, 500]}])
+            return create([kid("跑通就行", "代码能跑起来")])
         if self.mode == "missing":                  # 故意缺 accept（schema 拒）
             return create([{
                 "name": "缺验收标准的孩子", "detail": "d", "kind": "leaf",
-                "keywords": ["x"], "conc_range": [100, 500]}])
+                "conc_range": [100, 500]}])
         if self.mode == "badkind":                  # kind 写成示例里的 "dispatch|leaf"
             s = kid("kind 写错的孩子", "2026-12-31 的权益读数已取到")
             s["kind"] = "dispatch|leaf"
@@ -167,7 +149,7 @@ class Scripted:
             return create([{
                 "name": "区间写错的孩子", "detail": "d", "notes": "",
                 "accept": "2026-12-31 的权益读数已取到", "kind": "leaf",
-                "keywords": ["x"], "conc_range": [500, 100]}])
+                "conc_range": [500, 100]}])
         gate = (self.mode != "noevidence")
         kids = []
         if gate:
@@ -181,7 +163,7 @@ class Scripted:
         return create(kids)
 
 
-def go(mode, accept=C_ANCHORED, kind="dispatch", index=None):
+def go(mode, accept=C_ANCHORED, kind="dispatch"):
     d = tempfile.mkdtemp()
     trace = Trace(os.path.join(d, "t.jsonl"))
     root = Node(name="ROOT", accept=accept, kind=kind)
@@ -189,8 +171,7 @@ def go(mode, accept=C_ANCHORED, kind="dispatch", index=None):
     cwd = os.getcwd()          # 叶子会跑真的 bash：别污染项目目录
     os.chdir(d)
     try:
-        asyncio.run(R.run(root, llm, trace, registry=reg,
-                          workers=2, index=index))
+        asyncio.run(R.run(root, llm, trace, registry=reg, workers=2))
     finally:
         os.chdir(cwd)
     recs = [json.loads(x) for x in open(os.path.join(d, "t.jsonl"))]
@@ -286,7 +267,7 @@ def main():
                "最长 %d 字" % longest)
     root6, reg6, recs6, _ = go("note")
     nl = max((len(n.notes) for n in reg6.values()), default=0)
-    ok &= line("notes 不限字数（它不参与检索）", nl >= 400, "最长 %d 字" % nl)
+    ok &= line("notes 不限字数", nl >= 400, "最长 %d 字" % nl)
 
     print("=" * 80)
     print("G. 分配节点没有 execute 分支")
@@ -317,56 +298,19 @@ def main():
     ok &= line("停下时把原因写清楚", "没有新信息" in (root.conclusion or ""))
 
     print("=" * 80)
-    print("H. 检索键：分配节点一出生就自动查老树，叶子只查能力库")
-    fake = FakeIndex()
-    _, regH, recsH, _ = go("deep", index=fake)
-    mid = [n for n in regH.values() if n.name == "MID"][0]
-    leaf = [n for n in regH.values() if n.name == "LEAF"][0]
-    n_dispatch = len([n for n in regH.values() if n.kind == "dispatch"])
-    pre = [r for r in recsH if r["kind"] == "precedent"]
-    print("  程序发出的查询: %s" % fake.qs)
-    print("  给 MID 注入的先例: %s"
-          % (mid.precedents[0][:40] if mid.precedents else "无"))
-    ok &= line("按上层给的 keywords 查了（不是模型自己想起来的）",
-               any("akshare" in q for qs in fake.qs for q in qs))
-    ok &= line("根没有上层 → 用它自己的名字+验收标准查",
-               any(qs and "ROOT" in qs[0] for qs in fake.qs))
-    ok &= line("老树只给分配节点查（每个 dispatch 一条，叶子零条）",
-               len(pre) == n_dispatch > 0
-               and all(regH[r["node"]].kind == "dispatch" for r in pre)
-               and not leaf.precedents)
-    ok &= line("不再有「先例」这个动作（文档只把它当程序注入的东西）",
-               '"先例"' not in PROMPT["alloc"])
-    # 上层给的 conc_range / keywords 必须**真的出现在下层的提示词里**。
-    # 提示词里只写"如 [100,500]"是不够的 —— 那是举例，不是上层的判断。
-    gin = [r["payload"] for r in recsH
-           if r["kind"] == "leaf_in" and r.get("node") == leaf.id]
-    ok &= line("上层给的 conc_range 落到了孩子提示词里（不是举例）",
-               bool(gin) and "conc_range: [100, 500]" in gin[0])
-    ok &= line("上层给的 keywords 也落到了孩子提示词里",
-               bool(gin) and "keywords: [" in gin[0])
-    ok &= line("叶子的提示词里没有老树（它只要工具）",
-               bool(gin) and "假的老树" not in gin[0])
-    min_ = [r["payload"] for r in recsH
-            if r["kind"] == "alloc_in" and r.get("node") == mid.id]
-    ok &= line("命中结果进了分配节点的提示词",
-               bool(min_) and "假的老树" in min_[0])
-
-    print("=" * 80)
     print("I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
-    KEYS = ("name", "detail", "notes", "accept", "kind", "gate",
-            "keywords", "conc_range")
+    KEYS = ("name", "detail", "notes", "accept", "kind", "gate", "conc_range")
     # 文档承诺给模型看的段落就这几样；在这里**双向**核对：
     #   文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
-    SECTIONS = ("先例", "现成做法", "上层意图链", "本层已有尝试",
-                "观测历史", "手上的东西")
+    SECTIONS = ("上层意图链", "本层已有尝试", "观测历史", "手上的东西")
 
     def filled(kind_, lineage):
         n = Node(name="N", detail="D", notes="X", accept="A 2026-12-31",
-                 kind=kind_, keywords=["akshare"], conc_range=[100, 500],
-                 lineage=lineage)
-        n.precedents.append("[先例] 假的老树")
-        n.caps.append("pip install akshare")
+                 kind=kind_, conc_range=[100, 500], lineage=lineage)
+        n.attempts.append({"children": [kid("子任务A", "A 2026-12-31 的读数",
+                                            gate=True)],
+                           "results": [], "outcome": "等下层"})
+        n.observations.append({"action": "跑了一段代码", "obs": "看到了输出"})
         return n
 
     for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
@@ -378,16 +322,16 @@ def main():
         got = [s for s in SECTIONS if s in text]
         print("  %s: 收到的行首 %s" % (which, head_keys))
         print("       文档点名 %s / 真渲染 %s" % (doc, got))
-        ok &= line("%s 收到的行首 == 自己要写的那 8 个键（同构）" % which,
+        ok &= line("%s 收到的行首 == 自己要写的那 7 个键（同构）" % which,
                    head_keys == list(KEYS), "%s" % head_keys)
-        ok &= line("%s: 收到的 8 个键在文档里都点了名" % which,
+        ok &= line("%s: 收到的 7 个键在文档里都点了名" % which,
                    all(k in PROMPT[which] for k in KEYS))
         ok &= line("%s 的文档段落与渲染段落一致" % which, doc == got)
         ok &= line("%s: conc_range 在文档与渲染里都在" % which,
                    "conc_range" in PROMPT[which]
                    and "conc_range: [100, 500]" in nI.header())
-        ok &= line("%s: 真值都渲染出来了（区间/检索键/意图链）" % which,
-                   all(s in text for s in ("[100, 500]", "akshare",
+        ok &= line("%s: 真值都渲染出来了（区间/意图链）" % which,
+                   all(s in text for s in ("[100, 500]",
                                            "ROOT: 把量化系统做出来",
                                            "MID: 摸清数据这条线")))
     # 分配节点历史里的子任务也要用同一套键 —— 它看到的是自己写过的形式，
@@ -395,22 +339,18 @@ def main():
     nA = filled("dispatch", [])
     nA.attempts.append({
         "children": [{"name": "子任务A", "kind": "leaf", "gate": True,
-                      "accept": "A 2026-12-31 的读数", "keywords": ["akshare"],
+                      "accept": "A 2026-12-31 的读数",
                       "conc_range": [100, 500]}], "results": []})
     hist = nA.render_attempts()
     print("  历史长这样: %s" % hist.splitlines()[-1].strip())
     ok &= line("历史里的子任务用同一套键写（不再有中文标签）",
-               "name: 子任务A" in hist and "gate: true" in hist
-               and "conc_range: [100, 500]" in hist
+               "name: 子任务A" in hist and "kind: leaf" in hist
+               and "gate: true" in hist and "conc_range: [100, 500]" in hist
                and "验收标准:" not in hist and "[门槛]" not in hist)
     ok &= line("alloc 的两个出口 = create_children / conclude",
                all(s in PROMPT["alloc"] for s in ("create_children", "conclude")))
     ok &= line("leaf 的两个出口 = run_code / conclude",
                all(s in PROMPT["leaf"] for s in ("run_code", "conclude")))
-    ok &= line("叶子看不到「先例」（它只要工具）",
-               "先例" not in filled("leaf", []).render())
-    ok &= line("分配节点看得到「先例」",
-               "先例" in filled("dispatch", []).render())
     ok &= line("根没有上层 → 不渲染意图链",
                filled("dispatch", []).render_lineage() == "")
     _, regI, recsI, _ = go("deep")

@@ -42,7 +42,7 @@ def line(tag, cond, detail=""):
 def kid(name, accept="2026-12-31 收盘 >= 1"):
     return {"name": name, "detail": "d", "notes": "",
             "accept": "%s（%s 负责）" % (accept, name), "kind": "leaf",
-            "gate": False, "keywords": ["k"], "conc_range": [1, 10]}
+            "gate": False, "conc_range": [1, 10]}
 
 
 class ScriptLLM:
@@ -70,7 +70,7 @@ async def _run_tree(script, path):
     root = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     llm = ScriptLLM(script)
     try:
-        await run(root, llm, Trace(path), caps=None, index=None)
+        await run(root, llm, Trace(path))
     except RuntimeError:
         pass
     return root
@@ -80,7 +80,7 @@ async def main():
     print("=" * 80)
     print("A. Node 序列化往返：to_dict → from_dict 不丢任何字段")
     n = Node(name="任务", detail="详情", notes="注意", accept="2026-12-31 收盘 >= 1",
-             kind="leaf", gate=True, keywords=["a", "b"], conc_range=[1, 2],
+             kind="leaf", gate=True, conc_range=[1, 2],
              lineage=[["根", "根的详情"]])
     n.attempts = [{"children": [kid("子")], "results": [], "outcome": "等下层"}]
     n.observations = [{"action": "跑了一段", "obs": "看到了输出"}]
@@ -192,7 +192,6 @@ async def main():
                       ("conclude", {"verdict": "满足", "text": "全部完成",
                                     "evidence": ["子A 结论"]})])
     await run(t["root"], llm2, Trace(tp2), registry=t["registry"],
-              caps=None, index=None,
               resume={"state": t["state"], "pending": t["pending"],
                       "root": t["root"]})
     line("没跑完的节点接着跑完了",
@@ -242,7 +241,7 @@ async def main():
                           "arguments": json.dumps({"root": {
                               "name": "根任务", "detail": "", "notes": "",
                               "accept": "2026-12-31 收盘 >= 1",
-                              "kind": "dispatch", "keywords": [], "conc_range": []}})}
+                              "kind": "dispatch", "conc_range": []}})}
              }]
     tr4.add(None, "chat_model", {"text": "好，我来。", "tool_calls": wire})
     tr4.drain()
@@ -259,7 +258,7 @@ async def main():
             raise EOFError            # 第二轮：模拟用户中止
         return "（用户回答 %d）" % ask.n
 
-    env = {"trace": Trace(tp4), "caps": None, "index": None, "budget": None,
+    env = {"trace": Trace(tp4), "budget": None,
            "workers": 2, "registry": dict(sess["in_flight"]["registry"])}
     llm2 = ScriptLLM([("conclude", {"verdict": "满足", "text": "子A做完了",
                                     "evidence": ["证据"]}),
@@ -309,13 +308,13 @@ async def main():
                                            "evidence": ["e"]}),
                              ("conclude", {"verdict": "满足", "text": "任务一完成",
                                            "evidence": ["甲"]})]),
-              Trace(tp6), caps=None, index=None)
+              Trace(tp6))
     r2 = Node(name="任务二", accept="2026-12-31 收盘 >= 2", kind="dispatch")
     try:
         await run(r2, ScriptLLM([("create_children", {"children": [kid("乙")]}),
                                  ("run_code", {"code": "print(2)"}),
                                  RuntimeError("崩")]),
-                  Trace(tp6), caps=None, index=None)
+                  Trace(tp6))
     except RuntimeError:
         pass
     sess = load(tp6)
@@ -330,7 +329,7 @@ async def main():
                                       ("conclude", {"verdict": "满足",
                                                      "text": "任务二完成",
                                                      "evidence": ["乙"]})]),
-              Trace(tp6), registry=t2["registry"], caps=None, index=None,
+              Trace(tp6), registry=t2["registry"],
               resume={"state": t2["state"], "pending": t2["pending"],
                       "root": t2["root"]})
     sess2 = load(tp6)
@@ -403,7 +402,7 @@ async def main():
             name, args = action
             return Message(text="", tool_calls=[ToolCall(name=name, arguments=args)])
 
-    env = {"trace": Trace(tp8), "caps": None, "index": None, "budget": None,
+    env = {"trace": Trace(tp8), "budget": None,
            "workers": 2, "registry": dict(t8["registry"])}
     llm = S2([("conclude", {"verdict": "满足", "text": "回测好了",
                              "evidence": ["第1次观测"]}),

@@ -24,7 +24,7 @@ import glob
 import sys
 
 from tree import config as cfg
-from tree.memory.index import iter_trace_lines
+from tree.runtime.trace import iter_trace_lines
 from tree.protocol.fields import Node
 from tree.runtime.trace import Trace
 
@@ -40,7 +40,6 @@ def _node_from_open(p, nid):
         accept=p.get("accept") or p.get("验收标准") or p.get("criteria") or "",
         kind=kind,
         gate=bool(p.get("gate")),
-        keywords=p.get("keywords") or [],
         conc_range=p.get("conc_range") or [],
         id=nid, parent=p.get("parent"), depth=p.get("depth", p.get("深度", 0)))
 
@@ -60,7 +59,7 @@ def _spec(k):
     """子节点 → 分配尝试里的 children 规格（和渲染用的同一套键）。"""
     return {"name": k.name, "detail": k.detail, "notes": k.notes,
             "accept": k.accept, "kind": k.kind, "gate": k.gate,
-            "keywords": k.keywords, "conc_range": k.conc_range}
+            "conc_range": k.conc_range}
 
 
 def _record(k):

@@ -3,7 +3,7 @@
 `trace.jsonl` 是一场会话的**完整记录**，几类事件按时间顺序混排在同一份
 append-only 文件里：
 
-  - 节点生命周期（open / concluded / code / …）—— 给人看、给索引搜的；
+  - 节点生命周期（open / concluded / code / …）—— 给人看的；
   - `state` 检查点 —— 调度器每次状态一变写一笔（`scheduler._checkpoint`），
     恢复时每个节点取**最后一笔**；
   - `chat_*` —— intake 对话的每一条消息（用户说的、模型回的、工具回填的）。
@@ -20,10 +20,45 @@ append-only 文件里：
     "接着上次停下来的那一步重来"，不是把整棵树重跑一遍。
 """
 
+import os
+import time
 from collections import deque
 
-from ..memory.index import iter_trace_lines
 from ..protocol.fields import Node
+from .trace import iter_trace_lines
+
+
+def session_label(path):
+    """一场会话的一行摘要（时间 + 根任务 + 判定）。给 `-r` 的列表用。
+
+    在跑中的会话没有判定，写"运行中" —— 那正是最值得回去接着跑的。
+    只读记录里本来就有的 open / concluded / done 事件，不编造。
+    """
+    roots = {}
+    for r in iter_trace_lines(path):
+        p = r.get("payload") or {}
+        nid = r.get("node")
+        k = r.get("kind")
+        if k == "open" and nid and not p.get("parent"):
+            roots[nid] = {"name": p.get("name") or p.get("任务名") or p.get("task") or "",
+                          "verdict": "", "t": r.get("t")}
+        elif k == "concluded" and nid in roots:
+            roots[nid]["verdict"] = p.get("verdict") or p.get("判定") or ""
+        elif k == "done" and nid in roots:                # 旧格式
+            roots[nid]["verdict"] = roots[nid]["verdict"] or "满足"
+        elif k in ("failed", "crashed", "budget_exhausted") and nid in roots:
+            roots[nid]["verdict"] = roots[nid]["verdict"] or "阻塞"
+    mtime = os.path.getmtime(path)
+    if not roots:
+        return "%s （没读到的任务）" % time.strftime(
+            "%m-%d %H:%M", time.localtime(mtime))
+    earliest = min(roots.values(), key=lambda x: x["t"] or mtime)
+    name = (earliest["name"] or "(无任务名)")[:40]
+    verdict = earliest["verdict"] or "运行中"
+    extra = "" if len(roots) == 1 else "（+%d 棵任务）" % (len(roots) - 1)
+    return "%s %s [%s]%s" % (time.strftime(
+        "%m-%d %H:%M", time.localtime(earliest["t"] or mtime)),
+        name, verdict, extra)
 
 
 def session_context(trees):
@@ -83,7 +118,7 @@ def load(path):
                       "calls": p["calls"], "contracts": p["contracts"],
                       "artifacts": set(p["artifacts"]),
                       "art_effects": p["art_effects"],
-                      "tools": [], "seen_actions": {},
+                      "seen_actions": {},
                       "msgs": p.get("msgs", [])}
 
     pending = deque()

@@ -67,7 +67,7 @@ class FakeLLM:
 
 
 async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
-                caps=None, index=None, on_event=None, **kwargs):
+                on_event=None, **kwargs):
     """脚本化的树：只记下跑了哪棵根，给一个可复核的结论。
 
     真调度器每开/关一个节点发一次 on_event，这里也照发两次（出生+出结论），
@@ -107,7 +107,7 @@ def run_intake(llm, seed, answers):
 def root(**over):
     r = {"name": "做一个能赚钱的量化系统", "detail": "先拆再干", "notes": "",
          "accept": "账户权益在2026-12-31收盘 >= 本金 x 2", "kind": "dispatch",
-         "keywords": ["A股", "回测", "2026-12-31"], "conc_range": [100, 500]}
+         "conc_range": [100, 500]}
     r.update(over)
     return {"root": r}
 
@@ -187,7 +187,6 @@ def main():
     print("E. 闸门：缺字段 / 没有可测物理量，都当场说不")
     for spec, tag in (
             (root(accept="系统做好了")["root"], "没有可测物理量"),
-            (root(keywords=[])["root"], "keywords 是空的"),
             (root(conc_range=[500, 100])["root"], "conc_range 形状不对"),
             (root(name="")["root"], "name 是空的"),
             (root(kind="dispatch|leaf")["root"], "kind 写成示例里的两种之一"),

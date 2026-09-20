@@ -2,7 +2,7 @@
 
 它是这个程序**唯一的入口**（`main` 默认就是它，`-r` 恢复会话也回到这里）。和"引导 LLM"不是一回事：
 那条路要模型猜用户的话**指哪个节点**（路由），这条路只做入口，产物必须过
-和分配节点**同一台闸门**（`protocol/gate.py` 的 `clean_spec` + "验收标准必须有
+和节点**同一台闸门**（`protocol/gate.py` 的 `clean_spec` + "验收标准必须有
 可测物理量"），所以它不可能偷偷塞进树检查不了的东西。
 
 它自己没有手（没有 bash / read / write）。**手在树上**：谈成一个能过闸门的
@@ -17,7 +17,7 @@
 
 **通道与节点同构**：模型要么说话（content，流式送给用户），要么调工具
 `submit_root(root=...)` 交形式 —— 和节点层"调工具 = 动作、回文本 = 判断"
-是同一个分流，root 的格子就是分配节点写回孩子的那套 `ChildSpec`。
+是同一个分流，root 的格子就是节点写回孩子的那套 `ChildSpec`。
 所以这里不再有"从文本里猜 JSON 是话还是形式"的识别规则
 （旧 `_Spoken` / `root_in` 就是为那个猜法写的，现在删了）。
 它是在和真人说话，不是在填表 —— 代码不认识"回合数"，也不规定"一次只能问一个"。
@@ -49,7 +49,7 @@ def get_intake_binding():
 async def submit_root(root: ChildSpec, _b=Depends(get_intake_binding)) -> str:
     """把谈成的任务交出去当场跑。返回跑完的结论（作为工具结果回填给对话）。
 
-    root 的结构和分配节点给孩子的**完全一样** —— 你本来就是根节点的"上层下发"。
+    root 的结构和节点给孩子的**完全一样** —— 你本来就是根节点的"上层下发"。
     除 notes / gate 外全部必填；accept 必须带上可测物理量（日期、两位以上数字、
     标识符），否则会被当场退回。
     """
@@ -64,7 +64,7 @@ async def submit_root(root: ChildSpec, _b=Depends(get_intake_binding)) -> str:
     env = b["env"]
     rnode = Node(name=got["name"], detail=got["detail"], notes=got["notes"],
                  accept=got["accept"], kind=got["kind"],
-                 keywords=got["keywords"], conc_range=got["conc_range"])
+                 conc_range=got["conc_range"])
     await _run_tree(rnode, env, b["llm"])
     if b["say"]:
         b["say"]("（跑完了：%s）" % (rnode.verdict or "没有判定"))
@@ -77,7 +77,6 @@ async def _run_tree(rnode, env, llm, resume=None):
     有就给（接着跑被打断的树），没有就新跑。"""
     await run(rnode, llm, env["trace"], registry=env.get("registry"),
               budget=env.get("budget"), workers=env.get("workers", 6),
-              caps=env.get("caps"), index=env.get("index"),
               on_beat=env.get("on_beat"), beat=env.get("beat", 60),
               on_event=env.get("on_event"),
               on_delta=env.get("on_delta"), on_reasoning=env.get("on_reasoning"),
@@ -115,7 +114,7 @@ def _root_spec(root):
     """根节点 → ChildSpec 形状（给恢复时补的交形式用）。"""
     return {"name": root.name, "detail": root.detail, "notes": root.notes,
             "accept": root.accept, "kind": root.kind,
-            "keywords": root.keywords, "conc_range": root.conc_range}
+            "conc_range": root.conc_range}
 
 
 def _tool_text(res):
@@ -134,8 +133,8 @@ async def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=No
                           脚本）。拿到的是模型那一段话的**原文**，代码不改写它。
                           返回 coroutine 是因为读在真终端上要等 I/O，不能把
                           事件循环按住（那期间调度器可能正跑着）。
-    env                -> 运行现场（`trace`/`caps`/`index`/`budget`/`workers`/
-                          `registry`），`main` 传进来；入口据此跑树。
+    env                -> 运行现场（`trace`/`budget`/`workers`/`registry`），
+                          `main` 传进来；入口据此跑树。
     on_say(text)       -> 可选的**旁白**回调：打回理由、"接到任务/跑完了"走这里。
                           模型说的话走 ask 通道 —— 两条通道分开，
                           终端才不会把同一句话显示两遍。

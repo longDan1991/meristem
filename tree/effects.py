@@ -98,8 +98,7 @@ CONTRACT_KEYS = ("type", "name", "func", "args", "params", "return",
                  "external")
 
 # params 是**可调用**那一半：`func` 里的 `__名字__` 就是占位符，params 说它是什么类型。
-# 只有声明了 params 的 func 才能被盒子当成 API 调用（见 runtime/box.py）；
-# 没有 params 的仍是一条能直接粘上就跑的命令（= 今天的用法）。
+# 没有 params 的仍是一条能直接粘上就跑的命令。
 PARAM_TYPES = ("int", "str", "float", "bool")
 PLACEHOLDER_RE = re.compile(r"__([A-Za-z_][A-Za-z0-9_]*)__")
 
@@ -229,7 +228,7 @@ def contract_problems(path, contract, base=None):
 #   · 它的代码里 open()/os.open() 写过的（子进程自己报上来，见 sandbox.BOOTSTRAP）
 #   · 它真跑过的命令（走协议回调宿主的那几次）里解析出来的目标
 # 然后逐个 stat，和“跑之前的快照”对比，分 create / modify。
-SKIP_DIRS = ("__pycache__", ".git", ".venv", ".tree", "caps_scripts")
+SKIP_DIRS = ("__pycache__", ".git", ".venv", ".tree")
 SKIP_SUFFIX = (".meta.json",)
 
 
@@ -237,7 +236,7 @@ def snapshot_workspace(root, skip=()):
     """{绝对路径: (mtime_ns, 大小)}。只走一遍，不读文件内容。
 
     它在一次动作**之前**跑，用来回答两个问题：这个路径原来存不存在（create vs
-    modify）、它变没变。skip：程序自己的账本（trace / caps），它们每回合都在改。
+    modify）、它变没变。skip：程序自己的账本（trace），它每回合都在改。
     """
     skip = {os.path.realpath(p) for p in skip if p}
     snap = {}

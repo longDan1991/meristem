@@ -45,7 +45,7 @@ class ChildSpec(BaseModel):
         description="≤240 字。本质是**上下文**：孩子看不见你的脑子，只能看你写的字。")
     notes: str = Field(
         default="",
-        description="可选，不限字数。写其它字段里放不下的判断依据；不参与老树检索。")
+        description="可选，不限字数。写其它字段里放不下的判断依据。")
     accept: str = Field(
         description="验收标准 ≤140 字。本质是**可机械核对**：它是唯一能替你判定"
                     "「做没做完」的东西，必须原样带上你验收标准里的可测物理量"
@@ -59,10 +59,6 @@ class ChildSpec(BaseModel):
         description="可选，一次最多一个。本质是**轻重缓急**：这件事不先做，"
                     "其余全是白做。它会第一个做，在它通过之前其余子任务一律不启动。"
                     "想不出作废条件就别标。")
-    keywords: list[str] = Field(
-        description="一个以上检索键。本质是**不浪费已经做过的工作**：孩子一出生，"
-                    "程序就拿这几个键扫所有老树 + 能力库。写包名、命令动词、文件名、"
-                    "数字、标识符，不要形容词。")
     conc_range: list[int] = Field(
         description="对孩子结论的字数建议区间，如 [100,500] 或 [1000,2000]。"
                     "本质是判断你想要的成果规模：一句话能说清就给窄区间，"

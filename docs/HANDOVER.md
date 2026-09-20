@@ -5,6 +5,13 @@
 **这份只讲进度与交接**：怎么跑、东西在哪、做到哪一步、还剩什么、踩过哪些坑。
 **设计上的本质与不变量在 `DESIGN.md`** —— 这里不重复它们。
 
+> **2026-09 删除：keywords 检索层整体移除。** 老树索引（先例）、能力库/盒子
+> （现成做法、`search_tools`、出生即注入）全部删掉，`keywords` 字段不再存在；
+> 分配节点 / 叶子节点的分工保留（`alloc.md` / `leaf.md` 还在，内容已去掉
+> 检索相关段落）。对应模块 `tree/memory/`、`tree/runtime/box.py` 与测试
+> `test_caps.py` / `test_index.py` / `test_box.py` 已删除；`session_label`
+> 迁到 `tree/runtime/session.py`，`iter_trace_lines` 迁到 `tree/runtime/trace.py`。
+
 ---
 
 ## 0. 现在到哪一步了
@@ -62,7 +69,7 @@ python3 main.py -r
 # 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
 
 # 测试
-for t in protocol caps index tools box intake cli tty; do python3 tests/test_$t.py; done
+for t in protocol tools intake compression resume cli tty; do python3 tests/test_$t.py; done
 ```
 
 **`.env` 是唯一的事实来源**（`tree/config.py` 读它）：
@@ -109,14 +116,8 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
 | `tree/runtime/turn.py` | 369 | 一个节点的一回合：问模型（带工具）→ 工具函数做动作 / 出结论。三个工具的实现在这里（ContextVar 注入每节点 ctx） |
-| `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、学能力、进度回调、**节点开/关事件回调（`on_event`）与节点级吐字回调（`on_delta/on_reasoning`，给终端实时画树）** |
-| `tree/runtime/box.py` | 180 | **盒子**：`register` / `search` / `call` —— 能力库里的 cap 变成可调用的 API |
+| `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调、**节点开/关事件回调（`on_event`）与节点级吐字回调（`on_delta/on_reasoning`，给终端实时画树）** |
 | `tree/runtime/sandbox.py` | 367 | **executor**：一段代码在 CPython 子进程里跑，工具走 JSON 行协议回调宿主（真异步） |
-| `tree/memory/text.py` | 47 | 词法匹配（token / 2-gram），索引与能力库共用 |
-| `tree/memory/index.py` | 270 | 老树索引 + 整树检索（返回**路径**；阻塞枝带回"卡在哪"） |
-| `tree/memory/caps.py` | 244 | 能力库（单线程门 + 队列；失败自动退休、幂等回填）+ 签名/参数渲染 |
-| `tree/memory/mine.py` | 409 | 从 trace 挖能力（在线增量 + 离线批量共用；认 `code_call`） |
-| `tree/memory/verify.py` | 96 | **主动重验**：把 general 的 cap 重新跑一遍，烂的先记 fails（喂给自动退休）；project / 依赖目录的不冤枉 |
 | `docs/DESIGN.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
@@ -137,13 +138,12 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 │   └── ...                    （那次跑出来的 workspace：fulltext.txt、char_index.pkl…）
 ├── runs/verify{2,3,4}/        ← 校验跑
 ├── runs/mock*/ runs/sum/ ...  ← 小实验
-├── caps.jsonl                 ← 能力库（从 29748 行真实 trace 挖出 68 条，48 条自带脚本）
-├── caps_scripts/              ← 挖出来的脚本本体（50 个）
+├── caps.jsonl                 ← 旧能力库（已删检索层，文件留着不动）
 └── trace*.jsonl / output/ / data/ / strategies/ / backtest_engine.py / run_backtest.py
                                ← 更早（还没有工作区概念时）跑出来的散件
 ```
 
-**别删 `runs/night_quant/trace.jsonl`** —— `tests/test_caps.py` 的 A 段直接吃它。
+**别删 `runs/night_quant/trace.jsonl`** —— 它是历史会话资产（旧能力库就是从它挖的）。
 
 ---
 
@@ -221,9 +221,9 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 - **✅ 形式化协议换成英文键**（`node.py` / `run.py` / `prompts/`）。
   老 trace 的中文键照样能读（`index.py` 做了兼容），
   否则 `night_quant` 那棵树就变成死数据了。
-- **✅ `keywords` 出生即检索**：`先例` 动作和 `need` 动作都没了，
-  老树先例（**只给分配节点** —— 先例回答的是"该怎么拆、当年卡在哪"）
-  + 能力库现成做法（所有节点）在同一时刻由程序塞进提示词（`register`）。
+- **✅ `keywords` 出生即检索 —— 已于 2026-09 整个删除**：老树索引 + 能力库
+  （`先例` / `need` / `search_tools` / 现成做法注入）全部移除，`keywords`
+  字段不再存在。分配节点 / 叶子节点的分工保留。
 - **✅ `conc_range` + 必填项**：缺一项当场拒（含 `kind`：写错不再默默当 dispatch）；
   区间是建议不是配额，但上层给的具体区间会真渲染进下层的提示词（`Node.header`）。
 - **✅ 收到的键 == 要写的键**（同构，`Node.header`）：user 消息的行首就是
@@ -247,10 +247,8 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 ## 4. 明确不做的（别再讨论）
 
-- **negative caps / deadend 层** —— 理由见 `DESIGN.md` §2.7、§4.2 和 §6。
-  原来提的两个落点都作废：`TreeIndex.search` **别**给阻塞枝加抑制性权重
-  （它只给 `满足` +1、对阻塞不加权也不减权，这已经是对的）；
-  `tree/memory/caps.py` **别**收"负能力"。
+- **negative caps / deadend 层** —— 已随检索层整体删除（`DESIGN.md` §2.7 的
+  理由仍有效，但落点 `TreeIndex` / `caps.py` 已不存在）。
 - **引导 LLM（常驻的第二个 agent）** —— 理由见 `DESIGN.md` §2.8。
   入口是唯一的顶层循环，但它不是第二个 agent：手在树上（`run`），
   它自己只会谈和交形式。
@@ -316,31 +314,22 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 - 无进展检测的阈值 3 / 5 是**拍的**，没有依据
 - `EXTERNAL_CLASSES` 是硬编码的四类（在 `tree/protocol/fields.py`，和 `VIEW` 放一起）；
   按设计它只应作"提议"，由人确认
-- caps 的 `name` 继承只做了一半
 - 观测历史的可见预算（最近 10 次 / 单条 1500 / 总 6000 字）是拍的
-- **检索的语义局限**：现在是词重叠（中文 2-gram + 拉丁前缀 + 数字），噪音还在。
-  实测：查询"回测 扣费后 正期望"命中了"从任务配置或上下文中获取**期望**余额A的具体数值"。
-  出路已定（偏召回 + `cap_outcome` 反馈 + 模型判断一次），但没做成一个可度量的东西。
-- **兼容代码的清理窗口**：`index.py` 为了读 2026-09 之前的老 trace，
-  双读中英文键。哪天确定不再需要读老 trace，这里可以删掉一半。
 
 ---
 
-## 6. 测试（265 个断言，全离线）
+## 6. 测试（全离线）
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
 | `tests/test_protocol.py` | 54 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、**老树只给分配节点查**、无进展停下、分配节点没有 execute、**收到的行首 == 要写的 8 个键**、**文档点名的段落 == 真渲染的段落**、**意图链两种节点都有** |
-| `tests/test_caps.py` | 51 | 能力库：挖掘质量、不封顶、出生即注入 → 照做 → 成功、失败退休、不收的能力要说得出来；契约核对（绝对路径、`cd` 后的相对路径、URL 不算文件） |
-| `tests/test_index.py` | 20 | 返回路径、同脉去重、老格式兼容、排除自己、**工作目录只在跟当前目录相同时才这么叫**、阻塞枝带回证据/外部需求/卡在哪条命令、`notes` 不参与检索 |
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_box.py` | 39 | **盒子与 code-mode**：注册/搜索/签名（有契约才可调用）、填模板与错参当场抛、绑定名净化与保留名、print=观测、超时是观测、运行时 `search_tools` 当场装函数、**产出靠工作区 diff**（`open()` 直接写也跑不掉）、两条复用路径都记账 |
 | `tests/test_intake.py` | 28 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
 | `tests/test_cli.py` | 11 | `main.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
 | `tests/test_tty.py` | 52 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
 
 ```bash
-for t in protocol caps index tools box intake cli tty; do python3 tests/test_$t.py; done
+for t in protocol tools intake compression resume cli tty; do python3 tests/test_$t.py; done
 ```
 
 **待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）；主动重验的定时跑法还没接进 `main.py`（现在是 `python -m tree.memory.verify <caps.jsonl>` 手动跑）。

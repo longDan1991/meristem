@@ -149,11 +149,11 @@ async def converse(llm, seed, env, session=None, resume=None):
     所以这里没有"交棒"这一步 —— 跑树是 `tree/intake.py` 的事，
     终端只负责介质与话轮。
 
-    env 是运行现场（trace/caps/index/budget/workers/registry），终端不解释它，
+    env 是运行现场（trace/budget/workers/registry），终端不解释它，
     只转给入口；session 是读的那条通道（测试把管道驱动的会话塞进来）。
 
     resume：可选的恢复包（`session.load` 出来的）—— 会话重启后接着谈：
-    先把老树画给人看（"加载并显示"），再让入口从恢复的对话继续。
+    先把已加载的会话画给人看（"加载并显示"），再让入口从恢复的对话继续。
     """
     session = session or _session()
     # 上不上色交给 rich 判断：isatty / NO_COLOR / 颜色系统它都处理。

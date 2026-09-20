@@ -176,7 +176,7 @@ def balk(node, why, trace, st, kids=None):
             node.observations[-1]["obs"] += note
         else:
             node.attempts[-1]["rejected"] += note
-    # feedback：选项 B 的叶子对话要把它写回（step 会配对成 tool/user 消息），
+    # feedback：叶子的对话要把它写回（step 会配对成 tool/user 消息），
     # 不然模型下一回合看不到自己为什么被拒。分配节点不用（单发 render 自带历史）。
     return {"kind": "again", "feedback": why + note}
 
@@ -196,7 +196,7 @@ def _merged_effects(calls):
     """把这一段代码里**真跑过的每一条命令**的 effects 合起来。
 
     这里来的是文件清单看不见的那一半：装了什么包、连了哪个网、起了常驻进程 ——
-    能力库的「前置条件」靠它，而复用失败最常见的原因就是前提不成立。
+    契约的「前置条件」靠它。
     create/modify 先按命令里写的收下来，真正的认定（是否真发生）由
     `effects.classify_paths` 对比快照做。"""
     eff = {"fs": {"create": [], "modify": [], "delete": []},
@@ -216,23 +216,19 @@ def _merged_effects(calls):
     return eff, pre
 
 
-async def do_code(node, code, trace, box, st, hands):
+async def do_code(node, code, trace, st, hands):
     """跑一段代码。它是唯一能改变世界的东西，也是这一回合的观测来源。
 
     产出记账不再靠解析工具参数（代码模式下没有参数可解析）：候选 = 子进程自己
     报的写入 ∪ 真跑过的命令里解析出的目标，再逐个 stat 和跑之前的快照对比。
     这样**并发节点写的东西不会被算到它头上**（全局 diff 会 —— 见 `effects.classify_paths`）。
-    这一段代码真发生过的调用（走协议回调宿主的那几次）同时是能力库的原料。
     """
     cwd = os.getcwd()
-    # 自己的账本（trace / caps）每回合都在改，不能算成模型的产出
+    # 自己的账本（trace）每回合都在改，不能算成模型的产出
     skip = [getattr(trace, "path", None)]
-    if getattr(box, "caps", None) is not None:
-        skip.append(getattr(box.caps, "path", None))
     before = snapshot_workspace(cwd, skip)
     obs, calls, wrote = await sandbox.run(
-        code, st.get("tools") or [], box, hands, trace=trace,
-        node_id=node.id, cwd=cwd)
+        code, hands, trace=trace, node_id=node.id, cwd=cwd)
     eff, pre = _merged_effects(calls)
     candidates = list(wrote)
     for p in eff["fs"]["create"] + eff["fs"]["modify"]:
@@ -317,14 +313,14 @@ async def create_children(children: list[ChildSpec],
 async def run_code(code: str, _b=Depends(get_step_binding)) -> dict:
     """写一段代码。代码是唯一能改变世界的东西，一次一段，次数不限。
 
-    跑在一个真的 Python 进程里（当前工作目录）：bash / read / write 永远都在，
-    「现成做法」里命中的每条已绑定成同名函数。print 和异常都是观测。
+    跑在一个真的 Python 进程里（当前工作目录）：bash / read / write 永远都在。
+    print 和异常都是观测。
     """
     st, node, trace, budget, rctx = _current(_b)
     if not code.strip():
         return balk(node, "code 是空的：要么写一段代码，要么用 conclude 出结论",
                     trace, st)
-    obs = await do_code(node, code, trace, rctx["box"], st, rctx["hands"])
+    obs = await do_code(node, code, trace, st, rctx["hands"])
     label = code_label(code)
     # 每一回合的代码只在这一处计数：跑成没成、报不报错，都得过这里，
     # 所以"同一段代码 + 同一结果 ≥3 告警 / ≥5 停下"没有漏网的路。

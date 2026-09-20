@@ -26,7 +26,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 
-# 形式字段的词表是**英文键 + 中文取值**：键是机器词汇（模型输出 / trace / 索引
+# 形式字段的词表是**英文键 + 中文取值**：键是机器词汇（模型输出 / trace
 # 共用同一套，中间没有翻译层可以漂移），取值和渲染标签保持中文。
 #
 # 这里**没有任何长度限制**。提示词里的字数只是建议 ——
@@ -77,7 +77,6 @@ def spec_line(c):
         "kind: %s" % (c.get("kind") or "(无)"),
         "gate: %s" % as_json(bool(c.get("gate"))),
         "conc_range: %s" % as_json(c.get("conc_range")),
-        "keywords: %s" % as_json(c.get("keywords")),
         "accept: %s" % (c.get("accept") or "(无)")])
 
 
@@ -90,7 +89,6 @@ class Node:
     accept: str = ""                  # 验收标准：必须可被观测
     kind: str = "dispatch"            # dispatch | leaf
     gate: bool = False                # 轻重缓急：它不成立，整个分支作废
-    keywords: list = field(default_factory=list)   # 上层给的检索键 → 出生时自动查老树
     conc_range: list = field(default_factory=list)  # 上层要求的结论字数区间，如 [100,500]
     # ── 结构 ──
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
@@ -102,9 +100,7 @@ class Node:
     lineage: list = field(default_factory=list)
     # ── 看得见的历史（程序填，模型只读）──
     attempts: list = field(default_factory=list)     # 分配节点：每次分配 + 下层结论
-    observations: list = field(default_factory=list)  # 叶子：每次动作的真实返回
-    precedents: list = field(default_factory=list)   # 出生时按检索键查到的老树先例
-    caps: list = field(default_factory=list)         # 出生时按同一组键查到的现成做法
+    observations: list = field(default_factory=list)  # 叶子：每次 run_code 的真实返回
     # ── 结局 ──
     children: list = field(default_factory=list)
     verdict: str = ""                 # 满足 | 未满足 | 阻塞
@@ -129,9 +125,6 @@ class Node:
             "accept: %s" % (self.accept or "(无)"),
             "kind: %s" % (self.kind or "(无)"),
             "gate: %s" % as_json(bool(self.gate)),
-            # 查了什么就说什么：叶子不查老树（老树是"该怎么拆"的判据），
-            # 那句话在 prompts 里说，这里只给键和值。
-            "keywords: %s" % as_json(self.keywords),
             "conc_range: %s" % as_json(self.conc_range)])
 
     def render_lineage(self):
@@ -206,49 +199,24 @@ class Node:
             head += "（下面只列最近 %d 次）" % len(shown)
         return "\n".join([head] + rows)
 
-    def render_precedents(self):
-        if not self.precedents:
-            return ""
-        return ("\n\n先例（上层给的检索键自动查出来的老树，仅供参考，不是事实 —— "
-                "判据和环境都可能已经变了）:\n" + "\n\n".join(self.precedents))
-
-    def render_caps(self):
-        """出生时按检索键查到的现成做法。
-
-        **没有 need 这个动作**：模型不会主动去找工具（它觉得自己都会），
-        所以由程序直接塞给它 —— 和先例同理（DESIGN §4.3、§5.4）。
-        每一条都已经在子进程里**绑定成同名函数**（见 `runtime/sandbox.py`），
-        这里给的是签名和前提 —— 写代码时先看这里。
-        """
-        if not self.caps:
-            return ""
-        return ("\n\n现成做法（以往真实成功过的，每一条都已绑定成同名函数，"
-                "直接在代码里调用；仍要自己看一眼结果对不对）:\n"
-                + "\n".join(self.caps))
-
     def render(self):
         if self.kind == "leaf":
-            # 叶子不看老树：先例是"这件事该怎么拆、当年卡在哪"的判据，拆是分配节点的事；
-            # 叶子只要工具（现成做法）+ 自己的观测。所以这里没有 render_precedents()。
-            return ("%s%s%s\n\n手上的东西: bash / read / write（永远都在）"
-                    "+ 上面「现成做法」里的同名函数\n%s" % (
-                        self.header(), self.render_lineage(), self.render_caps(),
-                        self.render_observations()))
-        return "%s%s%s%s\n\n%s" % (self.header(), self.render_lineage(),
-                                   self.render_precedents(), self.render_caps(),
-                                   self.render_attempts())
+            return ("%s%s\n\n手上的东西: bash / read / write（永远都在）\n%s"
+                    % (self.header(), self.render_lineage(),
+                       self.render_observations()))
+        return "%s%s\n\n%s" % (self.header(), self.render_lineage(),
+                                 self.render_attempts())
 
     def render_wire(self):
         """叶子对话的**基础** user 消息（选项 B 的线上形态）。
 
         不含观测历史 —— 观测走真 role=tool 消息（turn.step 每回合追加），
-        所以这里只有出生后永不变的东西：形式字段 + 意图链 + 现成做法 + 手上的东西。
+        所以这里只有出生后永不变的东西：形式字段 + 意图链 + 手上的东西。
         字节稳定 ⇒ 既是协议字段的家，也让 provider KV 缓存前缀命中。
-        render() 仍用于 trace（给人看、给索引搜的完整视图）；这个是实际发送的。
+        render() 仍用于 trace（给人看的完整视图）；这个是实际发送的。
         """
-        return ("%s%s%s\n\n手上的东西: bash / read / write（永远都在）"
-                "+ 上面「现成做法」里的同名函数" % (
-                    self.header(), self.render_lineage(), self.render_caps()))
+        return ("%s%s\n\n手上的东西: bash / read / write（永远都在）"
+                % (self.header(), self.render_lineage()))
 
     # ---------------------------------------------------------------- 结局
     def close(self, verdict, conclusion, evidence, external=None):
@@ -264,11 +232,10 @@ class Node:
         重建 Node，attempts/observations 一字不差地回到模型眼前。"""
         return {"name": self.name, "detail": self.detail, "notes": self.notes,
                 "accept": self.accept, "kind": self.kind, "gate": self.gate,
-                "keywords": self.keywords, "conc_range": self.conc_range,
+                "conc_range": self.conc_range,
                 "id": self.id, "parent": self.parent, "depth": self.depth,
                 "lineage": self.lineage, "attempts": self.attempts,
-                "observations": self.observations, "precedents": self.precedents,
-                "caps": self.caps, "children": self.children,
+                "observations": self.observations, "children": self.children,
                 "verdict": self.verdict, "conclusion": self.conclusion,
                 "evidence": self.evidence, "external": self.external,
                 "status": self.status}

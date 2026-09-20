@@ -1,14 +1,9 @@
-"""部署配置：工作区在哪、能力库在哪、索引扫哪里。
+"""部署配置：工作区在哪、历史会话扫哪里。
 
 **这是全项目唯一能定义这些路径的地方，而且必须是显式配置**
 （AGENTS §7）：`.env`（或环境变量）说了算，代码不替它推算。
 业务代码一律 `from tree.config import WORKSPACE` —— 不许自己拼路径、
 不许 `Path(__file__).parent.parent / "data"`、不许拿 cwd 当数据根。
-
-三条路径的关系（都在工作区里面）：
-    TREE_WORKSPACE=<绝对路径>        agent 的 cwd + 历史 trace 的堆放地
-    TREE_CAPS=<工作区>/caps.jsonl    能力库（跨 session 复用）
-    TREE_INDEX=<工作区>/runs/*/trace.jsonl   要索引的老树
 
 跑出来的东西**一律落在工作区**：工作区既是 agent 的 cwd（上次写的代码和数据
 还在），也是历史 trace 的堆放地。项目目录里只有代码。
@@ -44,13 +39,11 @@ def _required(name):
 
 # 工作区：持久工作目录。同一个任务族共用它，上次写的代码和数据就还在。
 WORKSPACE = _abs(_required("TREE_WORKSPACE"))
-# 能力库：跨 session 复用的现成做法。默认在工作区里。
-CAPS_PATH = _abs(os.environ.get("TREE_CAPS") or os.path.join(WORKSPACE, "caps.jsonl"))
 # 代码沙箱落临时脚本和观测日志的地方：工作区里的隐藏目录，
 # 不往模型的 cwd 里扔垃圾，也不会被工作区 diff 记成它的产出。
 SNIPPET_DIR = _abs(os.environ.get("TREE_SNIPPET_DIR")
                    or os.path.join(WORKSPACE, ".tree"))
-# 要索引的老树：默认扫工作区里所有历史 trace。执行树就是成果树。
+# 历史会话的堆放地：`-r` 从这里列老会话。执行树就是成果树。
 INDEX_GLOB = os.environ.get("TREE_INDEX") or os.path.join(
     WORKSPACE, "runs", "*", "trace.jsonl")
 

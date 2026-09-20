@@ -113,7 +113,7 @@ class FakeLLM:
 
 
 async def fake_run(root, llm, trace, registry=None, budget=None, workers=6,
-                caps=None, index=None, on_event=None, **kwargs):
+                on_event=None, **kwargs):
     """脚本化的树：记下跑了哪棵根，给一个可复核的结论。
 
     真调度器每开/关一个节点发一次 on_event，这里也照发（出生+出结论），
@@ -132,7 +132,7 @@ intake_mod.run = fake_run
 
 
 async def slow_stream_run(root, llm, trace, registry=None, budget=None, workers=6,
-                          caps=None, index=None, on_event=None, on_delta=None,
+                          on_event=None, on_delta=None,
                           on_reasoning=None, **kwargs):
     """慢跑的树替身：按 node_id 吐字、给够时间让跑阶段的输入会话活一阵。
 
@@ -158,7 +158,7 @@ async def slow_stream_run(root, llm, trace, registry=None, budget=None, workers=
 
 
 async def multi_stream_run(root, llm, trace, registry=None, budget=None, workers=6,
-                            caps=None, index=None, on_event=None, on_delta=None,
+                            on_event=None, on_delta=None,
                             on_reasoning=None, **kwargs):
     """慢跑的多节点树替身：根 + 三个孩子并发吐字（各自不同的内容）。
 
@@ -178,7 +178,7 @@ async def multi_stream_run(root, llm, trace, registry=None, budget=None, workers
                          ("子任务B", "B在2026-12-31 >= 1"),
                          ("子任务C", "C在2026-12-31 >= 1")]:
         n = Node(name=name, detail="d", notes="", accept=accept, kind="leaf",
-                 gate=False, keywords=[], conc_range=[], parent=root.id, depth=1)
+                 gate=False, conc_range=[], parent=root.id, depth=1)
         root.children.append(n.id)
         if registry is not None:
             registry[n.id] = n
@@ -186,7 +186,7 @@ async def multi_stream_run(root, llm, trace, registry=None, budget=None, workers
         if on_event:
             on_event(n)
     thinks = {"子任务A": "孩子A在琢磨验收标准怎么定",
-              "子任务B": "孩子B在看老树有没有先例",
+              "子任务B": "孩子B在琢磨验收标准怎么定",
               "子任务C": "孩子C准备写第一段代码"}
 
     async def stream(kid, txt):
@@ -321,7 +321,7 @@ def run_session(keys, replies, reasoning="", tty=False, seed="帮我赚大钱"):
 def root(**over):
     r = {"name": "做一个能赚钱的量化系统", "detail": "先拆再干", "notes": "",
          "accept": "账户权益在2026-12-31收盘 >= 本金 x 2", "kind": "dispatch",
-         "keywords": ["A股", "回测", "2026-12-31"], "conc_range": [100, 500]}
+         "conc_range": [100, 500]}
     r.update(over)
     return {"root": r}
 
@@ -495,7 +495,7 @@ def main():
              ["子任务A", "子任务B", "子任务C"]))
     line("三路思考都画进树（每节点一行）",
          all(x in scr.plain() for x in
-             ["孩子A在琢磨", "孩子B在看老树", "孩子C准备写"]))
+             ["孩子A在琢磨", "孩子B在琢磨", "孩子C准备写"]))
     line("根的吐字也在自己那行", "根在想怎么拆" in scr.plain())
     line("跑完切回详细帧（判定 + 验收标准都在）",
          "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())

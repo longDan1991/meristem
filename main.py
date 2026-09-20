@@ -5,7 +5,7 @@
     python3 main.py "帮我做一个能赚大钱的A股量化系统" -c "..." --workers 6
     python3 main.py -r                           # 选一个老会话加载成当前会话
 
-路径全部来自配置文件（.env）：工作区在哪、能力库在哪、索引扫哪里。
+路径全部来自配置文件（.env）：工作区在哪、历史会话扫哪里。
 跑出来的东西**一律落在工作区**（包括这次的 trace），项目目录里只有代码。
 
 会话是可续跑的：`-r` 挑一个老会话加载成当前会话 —— 对话接着谈，
@@ -22,10 +22,8 @@ import time
 
 from tree import config as cfg
 from tree.llm import LLM
-from tree.memory.caps import Caps
-from tree.memory.index import TreeIndex, session_label
 from tree.runtime.budget import Budget
-from tree.runtime.session import load, session_context
+from tree.runtime.session import load, session_context, session_label
 from tree.runtime.trace import Trace
 from terminal.chat import converse, opening
 from terminal.picker import pick_session
@@ -47,10 +45,6 @@ async def main():
     ap.add_argument("--max-hours", type=float, default=0, help="0=不限")
     ap.add_argument("--trace", default=None,
                     help="默认 <工作区>/runs/<时间>-<任务>/trace.jsonl")
-    ap.add_argument("--caps", default=cfg.CAPS_PATH,
-                    help="能力库（TREE_CAPS）。放工作区里，所以跨 session 复用")
-    ap.add_argument("--index", default=cfg.INDEX_GLOB,
-                    help="要索引的老树（TREE_INDEX）。执行树就是成果树")
     ap.add_argument("--progress", type=int, default=60,
                     help="每多少秒打一行进度，0=关闭")
     a = ap.parse_args()
@@ -66,7 +60,7 @@ async def main():
     resume = None
     if a.resume:
         # `-r`：列出老会话（最近的在前），挑一个加载成当前会话
-        traces = sorted(glob.glob(a.index or cfg.INDEX_GLOB),
+        traces = sorted(glob.glob(cfg.INDEX_GLOB),
                         key=os.path.getmtime, reverse=True)
         if not traces:
             print("没有可加载的老会话：工作区里还没有跑过任何树。", flush=True)
@@ -88,11 +82,6 @@ async def main():
                           .hexdigest()[:6])
         a.trace = os.path.join(ws, "runs", slug, "trace.jsonl")
 
-    # 索引：老树当先例。恢复时把当前会话也索引进去 —— 它的旧内容在恢复前
-    # 已完整落盘，快照干净；新会话的 trace 还不存在，glob 碰不到它。
-    index = TreeIndex(sorted(glob.glob(a.index or cfg.INDEX_GLOB)),
-                      exclude=[] if resume else ([a.trace] if a.trace else []))
-
     llm = LLM()
     print("[模型] %s @ %s" % (llm.model, llm.base_url), flush=True)
 
@@ -103,7 +92,6 @@ async def main():
         registry.update(resume["in_flight"]["registry"])
     budget = Budget(max_nodes=a.max_nodes or None, max_tokens=a.max_tokens or None,
                     max_hours=a.max_hours or None)
-    caps = Caps(a.caps)
 
     print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
     print("[并发] %d" % a.workers, flush=True)
@@ -112,13 +100,7 @@ async def main():
     os.chdir(ws)
     print("[工作目录] %s" % ws, flush=True)
 
-    # 老树索引：把所有历史 trace 当成成果树
-    print("[索引] %d 棵老树，%d 个节点 %s"
-          % (len(index.trees), index.stats["节点"],
-             dict((k, v) for k, v in index.stats.items() if k != "节点")), flush=True)
-
     print("[trace] %s\n" % os.path.abspath(a.trace), flush=True)
-    print("[能力库] %s  %s" % (a.caps, caps.stats()), flush=True)
 
     def beat():
         # 只在调度线程里被调 —— 它就是唯一改 budget / registry 的线程，
@@ -131,7 +113,7 @@ async def main():
               % (time.strftime("%H:%M:%S"), s["nodes"], s["minutes"],
                  s["tokens"], st), flush=True)
 
-    env = {"trace": trace, "caps": caps, "index": index, "budget": budget,
+    env = {"trace": trace, "budget": budget,
            "workers": a.workers, "registry": registry,
            "on_beat": beat if a.progress > 0 else None,
            "beat": a.progress or 60}

@@ -8,13 +8,10 @@
     "最多一个门槛"                →  门槛先做，不成立则分支作废
     "判定满足必须指得出证据"      →  指不出来就降级为未满足
     kind                          →  clean_spec：只能是 dispatch / leaf，不给兜底
-    keywords                      →  出生时 register() 拿它扫老树（只给分配节点）
-                                     + 能力库（所有节点）
     conc_range / lineage          →  上层给的区间、从根到上层的意图链，都会渲染进下层的形式字段
     渲染的段落                     →  文档点名的段落 == 真渲染的段落
                                      （tests/test_protocol.py 的 I 段双向核对）
-    收到的行首                     →  就是 name/detail/notes/accept/kind/gate/
-                                     keywords/conc_range 这 8 个键（同构）
+    收到的行首                     →  就是 name/detail/notes/accept/kind/gate/conc_range 这 7 个键（同构）
     外部需求四类                  →  EXTERNAL_CLASSES（tree/protocol/fields.py）
 
 入口（`prompts/intake.md`）是同一个协议的第一环：它交出来的 `root` 要过
@@ -39,8 +36,8 @@ def load(name):
         return f.read()
 
 
-ALLOC_SYS = load("alloc")
+NODE_SYS = load("alloc")
 LEAF_SYS = load("leaf")
 INTAKE_SYS = load("intake")      # 唯一入口：谈成一个形式就跑、结论带回再谈
 
-PROMPT = {"alloc": ALLOC_SYS, "leaf": LEAF_SYS, "intake": INTAKE_SYS}
+PROMPT = {"alloc": NODE_SYS, "leaf": LEAF_SYS, "intake": INTAKE_SYS}

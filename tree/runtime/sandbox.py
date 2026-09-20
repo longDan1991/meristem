@@ -36,7 +36,6 @@ import sys
 import time
 
 from ..config import SNIPPET_DIR
-from ..tools import ok_obs
 
 # 一段代码自己能跑多久（不含等宿主的时间）。这是**活性兜底**，不是预算：
 # 一个死循环会把整个节点钉死，和 bash 必须有超时是同一件事。
@@ -46,16 +45,15 @@ HOST_GRACE = 30
 
 PRIMITIVES = ("bash", "read", "write")
 
-# 三只手永远都在（它们是**逃生口**：没做过的事只能靠它们，做过的事靠 cap）。
-# 每行后面那句就是模型在代码里看到的用法 —— 和 `prompts/leaf.md` 说的同一套。
+# 三只手永远都在（它们是**逃生口**：没做过的事只能靠它们）。
+# 每行后面那句就是模型在代码里看到的用法 —— 和 `prompts/node.md` 说的同一套。
 PRIMITIVE_BINDINGS = (
     'bash  = _api("bash")    # bash(cmd="...", timeout=120)：默认 120 秒，上限 3600 秒',
     'read  = _api("read")    # read(path="...", offset=0, limit=2000)：返回里写清还有多少字',
     'write = _api("write")   # write(path="...", content="...")',
 )
 
-# 拼在模型代码前面的那段。它定义 `_call` / `_api` / `search_tools`，
-# 以及几行 `<名字> = _api("<tool_id>")` 的绑定（由 `Box.bindings` 生成）。
+# 拼在模型代码前面的那段。它定义 `_call` / `_api`。
 # 超时从环境变量读，免得往这段源码里做模板替换。
 BOOTSTRAP = '''\
 import atexit
@@ -113,15 +111,6 @@ def _call(tool, **args):
 
 def _api(tool):
     return functools.partial(_call, tool)
-
-
-def search_tools(query):
-    """运行时找工具：命中什么，就当场装成可调用的函数。"""
-    r = _call("search", query=query)
-    for t in r["tools"]:
-        globals()[t["name"]] = _api(t["id"])
-    names = ", ".join(t["name"] for t in r["tools"]) or "(没有命中可以调用的工具)"
-    return "已装成函数: %s" % names + chr(10) + r["text"]
 
 
 # 自己报产出：宿主据此知道“这个节点写了什么”，不需要去 diff 整个工作区
@@ -193,16 +182,11 @@ def _with_result(src):
     return ast.unparse(tree)
 
 
-def _header(tools, box):
-    caps = box.bindings(tools)
-    hint = ("# 上面的 %d 行是检索命中的现成做法；想再找就调 search_tools(\"...\")"
-            % len(caps)) if caps else \
-           "# 本次没有命中现成工具；用 bash / read / write 动手，或 search_tools(\"...\") 再找"
-    return (BOOTSTRAP + "\n".join(list(PRIMITIVE_BINDINGS) + caps) + "\n"
-            + hint + "\n\n")
+def _header():
+    return BOOTSTRAP + "\n".join(list(PRIMITIVE_BINDINGS)) + "\n\n"
 
 
-async def _pump(proc, box, hands, calls, wrote, trace, node_id, deadline):
+async def _pump(proc, hands, calls, wrote, trace, node_id, deadline):
     """边读边答。**不能攒着一起处理** —— 子进程发完一次调用就阻塞着等回答。
 
     用 `read(65536)` 攒着拆行，而不是 readline：管道有数据不等于有一整行，
@@ -226,7 +210,7 @@ async def _pump(proc, box, hands, calls, wrote, trace, node_id, deadline):
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
             await _answer(proc, line.decode("utf-8", "replace"),
-                          box, hands, calls, wrote, trace, node_id)
+                          hands, calls, wrote, trace, node_id)
     return timed_out
 
 
@@ -256,11 +240,10 @@ def _observe(log_path, timed_out, rc):
     return out or "(没有输出)"
 
 
-async def run(code, tools, box, hands, trace=None, node_id=None, cwd=None):
+async def run(code, hands, trace=None, node_id=None, cwd=None):
     """跑一段模型写的代码。返回 (观测文本, 这次真的发生过的调用列表)。
 
-    调用列表的每一项是 (tool, args, obs)，形状和旧的动作记录一样 ——
-    能力挖掘（`mine.caps_from_node`）读的就是它，所以学能力的回路没变。
+    调用列表的每一项是 (tool, args, obs)。
     真异步（P4）：`asyncio.create_subprocess_exec`，不占线程。
     """
     os.makedirs(SNIPPET_DIR, exist_ok=True)
@@ -268,7 +251,7 @@ async def run(code, tools, box, hands, trace=None, node_id=None, cwd=None):
     script = os.path.join(SNIPPET_DIR, "snippet_%s.py" % stamp)
     log = os.path.join(SNIPPET_DIR, "snippet_%s.log" % stamp)
     with open(script, "w", encoding="utf-8") as f:
-        f.write(_header(tools, box) + _with_result(code))
+        f.write(_header() + _with_result(code))
 
     env = dict(os.environ, TREE_SNIPPET_TIMEOUT=str(SNIPPET_TIMEOUT),
                PYTHONIOENCODING="utf-8")
@@ -283,7 +266,7 @@ async def run(code, tools, box, hands, trace=None, node_id=None, cwd=None):
                 start_new_session=True)
             try:
                 timed_out = await _pump(
-                    proc, box, hands, calls, wrote, trace, node_id,
+                    proc, hands, calls, wrote, trace, node_id,
                     time.monotonic() + SNIPPET_TIMEOUT + HOST_GRACE)
                 if timed_out:
                     _kill(proc)
@@ -313,7 +296,7 @@ async def run(code, tools, box, hands, trace=None, node_id=None, cwd=None):
     return obs, calls, wrote
 
 
-async def _answer(proc, line, box, hands, calls, wrote, trace, node_id):
+async def _answer(proc, line, hands, calls, wrote, trace, node_id):
     """把子进程的一次调用转给宿主，并把结果写回去。"""
     try:
         req = json.loads(line)
@@ -322,19 +305,16 @@ async def _answer(proc, line, box, hands, calls, wrote, trace, node_id):
     tool = str(req.get("call") or "")
     args = req.get("args") or {}
     try:
-        reply, event = await _dispatch(tool, args, box, hands, calls, wrote)
+        reply = await _dispatch(tool, args, hands, calls, wrote)
     except (ValueError, KeyError, OSError) as e:
         # 参数不对 / 世界不给做 → 变成子进程里的一个异常，模型看得见并据此改路。
         # **编程错误不在里面**（TypeError 之类照旧往上炸，§2）。
-        reply, event = {"error": "%s: %s" % (type(e).__name__, e)}, None
+        reply = {"error": "%s: %s" % (type(e).__name__, e)}
     if trace is not None:
-        # obs 一并落盘：离线挖能力（`mine.mine_trace`）读的就是它 ——
-        # "成功的命令"这个判据在观测里（工具出错 / exit 码）。
+        # obs 一并落盘（tool / args / obs 是给 trace 消费方看的事实）
         trace.add(node_id, "code_call",
                   {"tool": tool, "args": args, "obs": reply.get("result"),
                    "error": reply.get("error")})
-        if event:
-            trace.add(node_id, "cap_outcome", event)
     try:
         proc.stdin.write((json.dumps(reply, ensure_ascii=False) + "\n").encode())
         await proc.stdin.drain()
@@ -342,28 +322,15 @@ async def _answer(proc, line, box, hands, calls, wrote, trace, node_id):
         pass                                  # 子进程已经死了：没有下家了
 
 
-async def _dispatch(tool, args, box, hands, calls, wrote):
-    """执行一次调用。返回 (给子进程的回复, 要记进 trace 的复用事件)。"""
+async def _dispatch(tool, args, hands, calls, wrote):
+    """执行一次调用。返回给子进程的回复。"""
     if tool in PRIMITIVES:
         obs = str(await hands.run(tool, args))
         calls.append((tool, args, obs))
-        event = None
-        if tool == "bash":
-            # 把配方照抄到 bash 里跑，也算用过了那条能力（自清洁靠它）
-            ok = ok_obs(obs)
-            eid = box.note_reuse(args.get("cmd"), ok)
-            event = {"cap": eid, "ok": ok} if eid else None
-        return {"result": obs}, event
+        return {"result": obs}
     if tool == "wrote":
         # 子进程自己报它写了哪些文件（代码里直接 open 的那部分）
         wrote.extend(args.get("paths") or [])
-        return {"result": None}, None
-    if tool == "search":
-        tools, text, _ = box.search(args.get("query", ""))
-        return {"result": {"tools": tools, "text": text}}, None
-    if tool.startswith("cap:"):
-        obs, cmd = await box.call(tool, args)
-        calls.append(("bash", {"cmd": cmd}, obs))
-        return {"result": obs}, {"cap": tool.split(":", 1)[1], "ok": ok_obs(obs)}
-    return {"error": "没有这个工具: %s（只有 %s，以及上面列出的 cap）"
-                     % (tool, " / ".join(PRIMITIVES))}, None
+        return {"result": None}
+    return {"error": "没有这个工具: %s（只有 %s）"
+                     % (tool, " / ".join(PRIMITIVES))}

@@ -34,20 +34,6 @@ def inherits(parent_accept, child_accept):
     return any(x in (child_accept or "") for x in a)
 
 
-def parse_keywords(v):
-    """检索键。键用可执行形状（包名/命令动词/数字/脚本名），不是形容词。"""
-    if isinstance(v, str):
-        v = [v]
-    if not isinstance(v, list):
-        return []
-    out = []
-    for x in v:
-        s = norm(x)
-        if s and s not in out:
-            out.append(s)
-    return out
-
-
 def parse_range(v):
     """结论字数区间 [下限, 上限]。它是上层对下层回复粒度的要求，不是字数警察。"""
     if not isinstance(v, (list, tuple)) or len(v) != 2:
@@ -64,9 +50,8 @@ def parse_range(v):
 def clean_spec(spec):
     """规范化一个子任务的形式字段。**没有任何长度检查**（提示词里的字数只是建议）。
 
-    必填：name / detail / accept / kind / keywords / conc_range。
-    选填：notes —— 而且它**不参与老树检索**（§5.2：检索键要用可执行形状，
-    自由发挥的判断依据放进去只会污染词法匹配）。gate 是个开关，默认 false。
+    必填：name / detail / accept / kind / conc_range。
+    选填：notes、gate（默认 false）。
 
     必填就是真必填：`kind` 写错（或根本没写）当场拒，不默认成 dispatch ——
     兜底会把"模型没说清"变成"叶子/分配节点"这个既成事实，错误就消失了。
@@ -78,7 +63,6 @@ def clean_spec(spec):
            "accept": norm(spec.get("accept")),
            "kind": kind,
            "gate": bool(spec.get("gate")),
-           "keywords": parse_keywords(spec.get("keywords")),
            "conc_range": parse_range(spec.get("conc_range"))}
     why = []
     missing = [k for k in ("name", "detail", "accept") if not out[k]]
@@ -88,8 +72,6 @@ def clean_spec(spec):
     # 是**没填对**，兜底会把错误藏起来（提示词也写着它必填）。
     if kind not in ("dispatch", "leaf"):
         why.append("kind 必须是 dispatch 或 leaf（给的是 %r）" % kind)
-    if not out["keywords"]:
-        why.append("keywords 必须是非空数组（它是下层自己去查老树的检索键）")
     if not out["conc_range"]:
         why.append("conc_range 必须是 [下限, 上限] 两个正整数，如 [100,500]")
     return out, ("; ".join(why) or None)

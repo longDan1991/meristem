@@ -73,7 +73,7 @@ def go(codes):
     cwd = os.getcwd()
     os.chdir(d)
     try:
-        asyncio.run(R.run(node, llm, trace, registry={}, caps=None, index=None))
+        asyncio.run(R.run(node, llm, trace, registry={}))
     finally:
         os.chdir(cwd)
     recs = [json.loads(x) for x in open(os.path.join(d, "t.jsonl"))]
