@@ -17,7 +17,12 @@ import signal
 import subprocess
 import time
 
-BASH_CAP = 4000
+# 单次工具输出的可见上限（字）。原来是 4000 —— 叶子输出大了就截掉、
+# 尾部（常有 FATAL 行）永久丢失。选项 B（tree/compression.py）让压缩取代截断：
+# 日志 run-collapse / JSON 无损折叠在发送边界把大输出压回来，CCR 可逆。
+# 所以这里大幅放宽：压缩得动的内容（日志/JSON，命令输出的主体）不怕大，
+# 压不动的内容（少见）最多以 ~8K token 的身份进一次上下文。再大仍会截断（可见）。
+BASH_CAP = 32768
 READ_CAP = 2000
 
 # bash 必须带超时：没有它，一条卡住的命令会把整棵树钉死在那里。

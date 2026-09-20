@@ -83,7 +83,8 @@ def load(path):
                       "calls": p["calls"], "contracts": p["contracts"],
                       "artifacts": set(p["artifacts"]),
                       "art_effects": p["art_effects"],
-                      "tools": [], "seen_actions": {}}
+                      "tools": [], "seen_actions": {},
+                      "msgs": p.get("msgs", [])}
 
     pending = deque()
     for nid, st in state.items():

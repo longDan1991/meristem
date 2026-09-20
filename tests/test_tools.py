@@ -61,7 +61,7 @@ def main():
 
     print("=" * 78)
     print("C. bash 输出过长 → 明说被截了")
-    big = bash("python3 -c \"print('x' * 9000)\"")
+    big = bash("python3 -c \"print('x' * 70000)\"")
     line("有截断标记", "截断" in big and "共" in big)
     line("给了替代手段", "head" in big or "grep" in big)
 

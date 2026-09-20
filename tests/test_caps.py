@@ -64,7 +64,9 @@ class LeafScript:
         self.i, self.last_usage = 0, {}
 
     async def chat(self, messages, temperature=0.2, tools=None):
-        user = messages[-1]["content"]
+        # 叶子（选项 B）是对话：user 是基础形式字段，观测走 role=tool 消息
+        user = next((m["content"] for m in messages
+                     if m.get("role") == "user"), "")
         assert "手上的东西" in user, "这个脚本只能驱动叶子"
         if self.i < len(self.codes):
             c = self.codes[self.i]

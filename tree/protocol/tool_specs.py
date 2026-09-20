@@ -24,6 +24,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from fastmcp import FastMCP
 from fastmcp.utilities.json_schema import replace_refs
 
+from .. import config as cfg
+from ..compression import RETRIEVE_TOOL
+
 # 工具都在同一个实例上注册。它只在进程内当"工具定义表"用，
 # 不跑 server、不建 client —— 传输层等 MCP 需求来了再激活。
 mcp = FastMCP("tree")
@@ -129,13 +132,18 @@ async def openai_tools():
     """每个节点类型的工具清单（OpenAI 格式，给 litellm）。只建一次。
 
     schema 与节点无关，是静态的；工具实现（turn.py）在 import 时已注册到 mcp。
+    叶子多挂一个 `headroom_retrieve`（取回被压过的工具输出原文）——
+    压缩开着才挂（compression.py 的实现与 store 都在，关了就没有标记可取）。
     """
     global _openai_cache
     if _openai_cache is None:
+        leaf_tools = [await _openai_spec("run_code"),
+                      await _openai_spec("conclude")]
+        if cfg.COMPRESS:
+            leaf_tools.append(RETRIEVE_TOOL)
         _openai_cache = {
             "alloc": [await _openai_spec("create_children"),
                       await _openai_spec("conclude")],
-            "leaf": [await _openai_spec("run_code"),
-                     await _openai_spec("conclude")],
+            "leaf": leaf_tools,
         }
     return _openai_cache

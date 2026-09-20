@@ -53,3 +53,8 @@ SNIPPET_DIR = _abs(os.environ.get("TREE_SNIPPET_DIR")
 # 要索引的老树：默认扫工作区里所有历史 trace。执行树就是成果树。
 INDEX_GLOB = os.environ.get("TREE_INDEX") or os.path.join(
     WORKSPACE, "runs", "*", "trace.jsonl")
+
+# 叶子工具输出的线上压缩（选项 B）。0/false/no/off = 关：压缩是 lossy 功能，
+# 这是个保险阀（故障排查 / 复现时关掉，让模型看原文）。关闭后取回工具也不再挂。
+COMPRESS = os.environ.get("TREE_COMPRESS", "1").strip().lower() not in \
+    ("0", "false", "no", "off")

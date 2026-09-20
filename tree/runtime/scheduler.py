@@ -42,7 +42,8 @@ def _checkpoint(nid, st, trace):
         "calls": [list(c) for c in st["calls"]],
         "contracts": st["contracts"],
         "artifacts": sorted(st["artifacts"]),
-        "art_effects": st["art_effects"]})
+        "art_effects": st["art_effects"],
+        "msgs": st.get("msgs", [])})
 
 
 async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
@@ -71,6 +72,20 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
     box = Box(caps, hands)
+
+    def rebuild_msgs(node):
+        """旧 trace（没有 msgs 检查点）恢复的叶子：把观测历史重建成对话。
+
+        只写 user 消息（不带悬空 tool_call_id —— provider 会拒）。压缩只在
+        发送边界做，存储（observations）永远是原文，所以重建不丢信息。
+        """
+        out = []
+        for i, o in enumerate(node.observations, 1):
+            out.append({"role": "user",
+                        "content": "（你第 %d 次做了：%s）" % (i, o.get("action", ""))})
+            out.append({"role": "user", "content": o.get("obs", "")})
+        return out
+
     if resume is not None:
         state, pending, root = resume["state"], resume["pending"], resume["root"]
         # 恢复的节点没有出生时的运行时工具绑定（box.search 的结果不落盘），
@@ -82,6 +97,9 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
             q = " ".join(str(x) for x in (node.keywords or [node.name, node.accept]))
             tools, _text, _hits = box.search(q)
             st["tools"] = tools
+            # 旧 trace 没有 msgs 检查点：把观测历史重建成对话，别让恢复的叶子失忆
+            if node.kind == "leaf" and not st.get("msgs") and node.observations:
+                st["msgs"] = rebuild_msgs(node)
     else:
         state, pending = {}, deque()
 

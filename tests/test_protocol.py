@@ -71,9 +71,17 @@ class Scripted:
 
     async def chat(self, messages, temperature=0.2, tools=None):
         self.calls += 1
-        user = messages[-1]["content"]
+        # 叶子（选项 B）是对话：user 是基础形式字段（render_wire），
+        # 观测走 role=tool 消息 —— 所以找 user 消息，不用 messages[-1]。
+        user = next((m["content"] for m in messages
+                     if m.get("role") == "user"), "")
         name = (re.search(r"^name:\s*(.+)$", user, re.M) or [None, "?"])[1].strip()
-        fresh = "(还没有)" in user
+        # "是不是第一次"：叶子看有没有 tool 消息（还没有 = 该动手），
+        # 分配节点看"本层已有尝试"是不是空的（它是单发 render，永远没有 tool）。
+        if "手上的东西" in user:
+            fresh = not any(m.get("role") == "tool" for m in messages)
+        else:
+            fresh = "(还没有)" in user
         m = re.search(r"本层已有尝试: 共 (\d+) 次", user)
         attempts = int(m.group(1)) if m else 0
 

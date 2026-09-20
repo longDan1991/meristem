@@ -23,6 +23,7 @@ clean_conclusion）—— schema 只管形状，拒绝信息保持 gate 的中�
 
 import contextvars
 import hashlib
+import json
 import os
 
 from fastmcp.dependencies import Depends
@@ -33,6 +34,8 @@ from ..effects import (ARTIFACT_EXT, accept_artifacts, classify_paths,
 from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits
 from ..protocol.tool_specs import Artifact, ChildSpec, mcp, openai_tools
 from ..prompts import PROMPT
+from .. import config as cfg
+from ..compression import RETRIEVE_NAME, compress_messages, retrieve_original
 from . import sandbox
 
 
@@ -40,7 +43,7 @@ from . import sandbox
 # 每个节点类型的工具清单（OpenAI 格式，litellm 用）。schema 是静态的，
 # 由 openai_tools() 缓存；这里只记名字，供 step 校验"这次调的是不是本层该调的"。
 _TOOL_NAMES = {"alloc": ("create_children", "conclude"),
-               "leaf": ("run_code", "conclude")}
+               "leaf": ("run_code", "conclude", RETRIEVE_NAME)}
 
 # step 开头写入 (ctx, nid)；工具函数用 Depends 注入它。每个 asyncio task
 # 的 contextvars 是独立的，所以并发节点拿到的各是各的 ctx。
@@ -73,12 +76,18 @@ def _log_usage(llm, trace, node_id, phase, budget):
     budget.add_tokens(total)
 
 
-async def ask(llm, trace, node, which, budget, ctx=None):
+async def ask(llm, trace, node, which, budget, ctx=None, st=None):
     """问模型。节点级的实时吐字从这里接出去：调度器把终端给的
     `on_delta` / `on_reasoning` 放进 ctx，这里按节点包一层再传给 llm.chat ——
     节点是并发的，回调不带 node.id 就分不清是谁在说话（§11 不建共享计数器，
     只是给回调做标记）。没给就不开流式：入口那一路默认开，节点级没有实时展示
-    不背 SSE 的开销。"""
+    不背 SSE 的开销。
+
+    叶子（选项 B）走**真对话**：基础 user 消息（render_wire，字节稳定）
+    + 累积的 asst/tool 消息，发送前交给 headroom 路由压缩 —— 只压 role=tool
+    的工具输出，user/system 一字不动。压缩统计写进 trace（wire_compressed），
+    预算计的是 API 真实用量，节省自动反映。分配节点照旧单发 render。
+    """
     trace.add(node.id, "%s_in" % which, node.render())
     tools = (await openai_tools())[which]
     stream_kw = {}
@@ -87,9 +96,24 @@ async def ask(llm, trace, node, which, budget, ctx=None):
             stream_kw["on_delta"] = lambda t: ctx["on_delta"](node.id, t)
         if ctx.get("on_reasoning"):
             stream_kw["on_reasoning"] = lambda t: ctx["on_reasoning"](node.id, t)
-    msg = await llm.chat([{"role": "system", "content": PROMPT[which]},
-                          {"role": "user", "content": node.render()}],
-                         tools=tools, **stream_kw)
+    if which == "leaf" and st is not None:
+        msgs = st.setdefault("msgs", [])
+        wire = [{"role": "system", "content": PROMPT["leaf"]},
+                {"role": "user", "content": node.render_wire()}] + msgs
+        if cfg.COMPRESS and any(m.get("role") == "tool" for m in msgs):
+            result = await compress_messages(wire, getattr(llm, "model", ""))
+            wire = result.messages
+            if result.tokens_saved > 0:
+                trace.add(node.id, "wire_compressed", {
+                    "before": result.tokens_before, "after": result.tokens_after,
+                    "saved": result.tokens_saved,
+                    "ratio": (round(result.tokens_saved / result.tokens_before, 3)
+                               if result.tokens_before else 0.0),
+                    "transforms": result.transforms_applied})
+    else:
+        wire = [{"role": "system", "content": PROMPT[which]},
+                {"role": "user", "content": node.render()}]
+    msg = await llm.chat(wire, tools=tools, **stream_kw)
     _log_usage(llm, trace, node.id, which, budget)
     trace.add(node.id, "%s_out" % which,
               {"text": msg.text,
@@ -152,7 +176,9 @@ def balk(node, why, trace, st, kids=None):
             node.observations[-1]["obs"] += note
         else:
             node.attempts[-1]["rejected"] += note
-    return {"kind": "again"}
+    # feedback：选项 B 的叶子对话要把它写回（step 会配对成 tool/user 消息），
+    # 不然模型下一回合看不到自己为什么被拒。分配节点不用（单发 render 自带历史）。
+    return {"kind": "again", "feedback": why + note}
 
 
 # ---------------------------------------------------------------- 动手
@@ -315,7 +341,8 @@ async def run_code(code: str, _b=Depends(get_step_binding)) -> dict:
         trace.add(node.id, "stalled", stalled)
         node.close("未满足", stalled, [])
         return {"kind": "finished"}
-    return {"kind": "again"}
+    # obs 随结果带回：选项 B 的 step 要把它写成 role=tool 消息（观测在对话里）。
+    return {"kind": "again", "obs": obs}
 
 
 @mcp.tool
@@ -348,7 +375,14 @@ async def conclude(verdict: str, text: str,
 
 # ---------------------------------------------------------------- 一回合
 async def step(nid, ctx):
-    """一个节点的一回合。不递归，只返回下一步该干什么。"""
+    """一个节点的一回合。不递归，只返回下一步该干什么。
+
+    叶子（选项 B）维护一段真对话（st["msgs"]）：assistant 消息每回合先入账，
+    之后工具结果 / 打回理由按 OpenAI 协议配对成 tool 消息 —— 每个 tool_call id
+    都必须有一条 tool 回话，悬空的 id 会让 provider 报错。run_code 的观测就是
+    tool 消息；没调工具时的打回理由没有 id 可配对，就写 user 消息
+    （对话不能断在两个 assistant 之间）。分配节点照旧单发 render，不记账。
+    """
     st = ctx["state"][nid]
     node = st["node"]
     llm, trace, budget = ctx["llm"], ctx["trace"], ctx["budget"]
@@ -361,29 +395,78 @@ async def step(nid, ctx):
 
     which = "leaf" if node.kind == "leaf" else "alloc"
     _step_binding.set((ctx, nid))
-    msg = await ask(llm, trace, node, which, budget, ctx)
+    msg = await ask(llm, trace, node, which, budget, ctx, st)
+
+    # ── 选项 B：叶子对话。assistant 消息先入账（无论回什么）──
+    wire = st.get("msgs") if node.kind == "leaf" else None
+    if wire is not None:
+        # id 用模型给的；没有（mock/个别 provider）就按对话长度回退 ——
+        # 每回合都从 0 数会让同一条对话里出现重复的 call_0（provider 会拒或串）。
+        ids = [tc.id or "call_%d" % (len(wire) + i)
+               for i, tc in enumerate(msg.tool_calls)]
+        wire.append({"role": "assistant", "content": msg.text or None,
+                     "tool_calls": [
+                         {"id": i, "type": "function",
+                          "function": {"name": tc.name,
+                                        "arguments": json.dumps(
+                                            tc.arguments, ensure_ascii=False)}}
+                         for i, tc in zip(ids, msg.tool_calls)] or None})
+
+        def feedback(text, ids=ids):
+            # 有 tool_call 就用 tool 回话配对；纯文本回复没有 id，写 user 消息
+            if ids:
+                for i in ids:
+                    wire.append({"role": "tool", "tool_call_id": i,
+                                 "content": text})
+            else:
+                wire.append({"role": "user", "content": text})
+    else:
+        feedback = None
 
     if not msg.tool_calls:
         hint = ("（你只回了一段文字，开头：%s）" % msg.text[:60]) if msg.text else ""
-        return balk(node,
-                    "这次回复没有调用任何工具%s。你必须调用一个：%s。"
-                    % (hint, " / ".join(_TOOL_NAMES[which])),
-                    trace, st)
+        why = ("这次回复没有调用任何工具%s。你必须调用一个：%s。"
+               % (hint, " / ".join(_TOOL_NAMES[which])))
+        if feedback:
+            feedback(why)
+        return balk(node, why, trace, st)
     if len(msg.tool_calls) > 1:
-        return balk(node, "一次只能调用一个工具（你调了 %d 个）"
-                    % len(msg.tool_calls), trace, st)
+        why = "一次只能调用一个工具（你调了 %d 个）" % len(msg.tool_calls)
+        if feedback:
+            feedback(why)
+        return balk(node, why, trace, st)
     tc = msg.tool_calls[0]
     if tc.name not in _TOOL_NAMES[which]:
-        return balk(node, "你调用的 %s 不在这一层的工具里（你能用：%s）"
-                    % (tc.name, " / ".join(_TOOL_NAMES[which])), trace, st)
+        why = ("你调用的 %s 不在这一层的工具里（你能用：%s）"
+               % (tc.name, " / ".join(_TOOL_NAMES[which])))
+        if feedback:
+            feedback(why)
+        return balk(node, why, trace, st)
+
+    # 取回工具：把被压过的工具输出原文写回对话（作为 tool 结果）
+    if tc.name == RETRIEVE_NAME:
+        if wire is not None:
+            wire.append({"role": "tool", "tool_call_id": ids[0],
+                         "content": retrieve_original(tc.arguments)})
+        return {"kind": "again"}
 
     tool = await mcp.get_tool(tc.name)
     try:
         res = await tool.run(tc.arguments)
     except ToolValidationError as e:
         # schema 拒的参数（缺必填 / 类型错）：一条可见的事实，让模型改
-        return balk(node, "工具参数不合形状，被退回：%s" % e, trace, st)
+        why = "工具参数不合形状，被退回：%s" % e
+        if feedback:
+            feedback(why)
+        return balk(node, why, trace, st)
     d = res.structured_content
     if not isinstance(d, dict):
         raise TypeError("工具 %s 必须返回 dict（拿到 %r）" % (tc.name, d))
+    if wire is not None:
+        if d.get("obs") is not None:
+            wire.append({"role": "tool", "tool_call_id": ids[0],
+                         "content": d["obs"]})
+        elif d.get("feedback"):
+            wire.append({"role": "tool", "tool_call_id": ids[0],
+                         "content": d["feedback"]})
     return d

@@ -238,6 +238,18 @@ class Node:
                                    self.render_precedents(), self.render_caps(),
                                    self.render_attempts())
 
+    def render_wire(self):
+        """叶子对话的**基础** user 消息（选项 B 的线上形态）。
+
+        不含观测历史 —— 观测走真 role=tool 消息（turn.step 每回合追加），
+        所以这里只有出生后永不变的东西：形式字段 + 意图链 + 现成做法 + 手上的东西。
+        字节稳定 ⇒ 既是协议字段的家，也让 provider KV 缓存前缀命中。
+        render() 仍用于 trace（给人看、给索引搜的完整视图）；这个是实际发送的。
+        """
+        return ("%s%s%s\n\n手上的东西: bash / read / write（永远都在）"
+                "+ 上面「现成做法」里的同名函数" % (
+                    self.header(), self.render_lineage(), self.render_caps()))
+
     # ---------------------------------------------------------------- 结局
     def close(self, verdict, conclusion, evidence, external=None):
         self.verdict = verdict
