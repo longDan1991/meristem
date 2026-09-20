@@ -38,6 +38,23 @@ class Node:
                  "workspace", "score", "name_t", "acc_t", "det_t", "con_t")
 
 
+def iter_trace_lines(path):
+    """逐行读一份 trace。最后一行若是被截断的半笔（崩溃时写了一半），
+    跳过 —— 一次崩溃不该把整棵树的成果埋掉。其它位置坏行照样炸（那是真损坏）。"""
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except ValueError:
+            if i == len(lines) - 1:
+                continue
+            raise
+
+
 def _load_tree(path):
     """读一棵树。
 
@@ -48,57 +65,52 @@ def _load_tree(path):
     """
     nodes = {}
     workspace = None
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            p, nid = r.get("payload") or {}, r.get("node")
-            k = r.get("kind")
-            if k == "open":
-                n = Node()
-                n.tree, n.id, n.parent = path, nid, p.get("parent")
-                # 英文键是新协议的；中文键是历史 trace 的。两种都必须认 ——
-                # 否则昨晚那些树就变成死数据了。
-                n.depth = p.get("depth", p.get("深度", 0))
-                n.name = p.get("name") or p.get("任务名") or p.get("task") or ""
-                n.detail = p.get("detail") or p.get("任务详情") or ""
-                n.notes = p.get("notes") or p.get("注意事项") or ""
-                n.accept = p.get("accept") or p.get("验收标准") or p.get("criteria") or ""
-                kk = p.get("kind") or p.get("类型") or "dispatch"
-                n.kind = "leaf" if kk == "evidence" else kk
-                n.verdict, n.conclusion, n.external, n.evidence = "", "", [], []
-                n.actions, n.t_open, n.t_end = [], r.get("t"), None
-                n.workspace = p.get("workspace") or p.get("工作目录")
-                if n.parent is None and n.workspace:
-                    workspace = n.workspace
-                n.score = 0.0
-                nodes[nid] = n
-            elif k == "concluded" and nid in nodes:
-                nodes[nid].verdict = p.get("verdict") or p.get("判定", "")
-                nodes[nid].conclusion = p.get("text") or p.get("内容", "")
-                nodes[nid].external = p.get("external") or p.get("外部需求") or []
-                nodes[nid].evidence = p.get("evidence") or p.get("证据") or []
-                nodes[nid].t_end = r.get("t")
-            elif k in ("action", "leaf_tool") and nid in nodes:
-                # 一次动作 + 世界回了什么。两种键名（新格式 / 老格式）都要认 ——
-                # 阻塞枝靠它回答"卡在哪条命令"，没有它，一条阻塞先例就只是
-                # 一句没有探测方式的断言（DESIGN §2.7）。
-                nodes[nid].actions.append((
-                    p.get("工具") or p.get("tool") or "",
-                    p.get("参数") or p.get("args") or {},
-                    p.get("观测") or p.get("obs") or ""))
-            elif k == "done" and nid in nodes:          # 旧格式
-                nodes[nid].verdict = nodes[nid].verdict or "满足"
-                nodes[nid].conclusion = nodes[nid].conclusion or str(p.get("result", ""))
-                nodes[nid].t_end = r.get("t")
-            elif k in ("failed", "crashed", "budget_exhausted") and nid in nodes:
-                nodes[nid].verdict = nodes[nid].verdict or "阻塞"
-                # 老格式的 failed 里原因在 result；直接 str(p) 会把整行 dump 出来
-                why = p.get("result") if isinstance(p, dict) else None
-                nodes[nid].conclusion = nodes[nid].conclusion or str(why if why else p)
-                nodes[nid].t_end = r.get("t")
+    for r in iter_trace_lines(path):
+        p, nid = r.get("payload") or {}, r.get("node")
+        k = r.get("kind")
+        if k == "open":
+            n = Node()
+            n.tree, n.id, n.parent = path, nid, p.get("parent")
+            # 英文键是新协议的；中文键是历史 trace 的。两种都必须认 ——
+            # 否则昨晚那些树就变成死数据了。
+            n.depth = p.get("depth", p.get("深度", 0))
+            n.name = p.get("name") or p.get("任务名") or p.get("task") or ""
+            n.detail = p.get("detail") or p.get("任务详情") or ""
+            n.notes = p.get("notes") or p.get("注意事项") or ""
+            n.accept = p.get("accept") or p.get("验收标准") or p.get("criteria") or ""
+            kk = p.get("kind") or p.get("类型") or "dispatch"
+            n.kind = "leaf" if kk == "evidence" else kk
+            n.verdict, n.conclusion, n.external, n.evidence = "", "", [], []
+            n.actions, n.t_open, n.t_end = [], r.get("t"), None
+            n.workspace = p.get("workspace") or p.get("工作目录")
+            if n.parent is None and n.workspace:
+                workspace = n.workspace
+            n.score = 0.0
+            nodes[nid] = n
+        elif k == "concluded" and nid in nodes:
+            nodes[nid].verdict = p.get("verdict") or p.get("判定", "")
+            nodes[nid].conclusion = p.get("text") or p.get("内容", "")
+            nodes[nid].external = p.get("external") or p.get("外部需求") or []
+            nodes[nid].evidence = p.get("evidence") or p.get("证据") or []
+            nodes[nid].t_end = r.get("t")
+        elif k in ("action", "leaf_tool") and nid in nodes:
+            # 一次动作 + 世界回了什么。两种键名（新格式 / 老格式）都要认 ——
+            # 阻塞枝靠它回答"卡在哪条命令"，没有它，一条阻塞先例就只是
+            # 一句没有探测方式的断言（DESIGN §2.7）。
+            nodes[nid].actions.append((
+                p.get("工具") or p.get("tool") or "",
+                p.get("参数") or p.get("args") or {},
+                p.get("观测") or p.get("obs") or ""))
+        elif k == "done" and nid in nodes:          # 旧格式
+            nodes[nid].verdict = nodes[nid].verdict or "满足"
+            nodes[nid].conclusion = nodes[nid].conclusion or str(p.get("result", ""))
+            nodes[nid].t_end = r.get("t")
+        elif k in ("failed", "crashed", "budget_exhausted") and nid in nodes:
+            nodes[nid].verdict = nodes[nid].verdict or "阻塞"
+            # 老格式的 failed 里原因在 result；直接 str(p) 会把整行 dump 出来
+            why = p.get("result") if isinstance(p, dict) else None
+            nodes[nid].conclusion = nodes[nid].conclusion or str(why if why else p)
+            nodes[nid].t_end = r.get("t")
     if workspace is None:
         workspace = os.path.dirname(os.path.abspath(path))
     for n in nodes.values():
@@ -108,6 +120,25 @@ def _load_tree(path):
         n.det_t = tokens(n.detail)
         n.con_t = tokens(n.conclusion)
     return nodes
+
+
+def session_label(path):
+    """一场会话的一行摘要（时间 + 根任务 + 判定）。给 `-r` 的列表用。
+
+    在跑中的会话没有判定，写"运行中" —— 那正是最值得回去接着跑的。"""
+    nodes = _load_tree(path)
+    roots = [n for n in nodes.values() if n.parent is None]
+    roots.sort(key=lambda n: n.t_open or 0)
+    mtime = os.path.getmtime(path)
+    if not roots:
+        return "%s （没读到的任务）" % time.strftime(
+            "%m-%d %H:%M", time.localtime(mtime))
+    t = roots[0].t_open or mtime
+    name = (roots[0].name or "(无任务名)")[:40]
+    verdict = roots[0].verdict or "运行中"
+    extra = "" if len(roots) == 1 else "（+%d 棵任务）" % (len(roots) - 1)
+    return "%s %s [%s]%s" % (time.strftime("%m-%d %H:%M", time.localtime(t)),
+                              name, verdict, extra)
 
 
 class TreeIndex:

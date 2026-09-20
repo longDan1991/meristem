@@ -27,6 +27,15 @@
 > 无法建立权益基线；2026-12-31尚未到来，时间流逝不可由工具触发。
 > 模拟账户或历史回测不能作为该验收标准的证据，故任务阻塞。
 
+**会话可续跑**（最近加的）：`trace.jsonl` 升级成统一会话记录（节点生命周期 +
+`state` 检查点 + `chat_*` 对话混排，append-only）。入口默认就是 intake；
+`python3 main.py -r` 列表选一个老会话加载成当前会话 —— 对话接着谈、
+没跑完的树接着跑（中断时在飞的那一步作废，节点带完整历史重新问模型）。
+`--intake` / `--mock` / MockLLM / 直跑模式已删（入口是唯一顶层，且要真模型）。
+**老会话（本功能之前的 trace，没有 state 检查点）用 `uv run python migrate_sessions.py`
+一次性迁移成新格式** —— 运行时只认一种格式，没有任何兼容层；旧格式只在这个
+迁移脚本里出现一次，没跑完的节点迁移后带着字段重新跑。
+
 测试：**265 个断言，全离线，不调模型**（见 §6）。
 
 ---
@@ -36,19 +45,19 @@
 ```bash
 cd /Users/wxlong/MYCode/humanoid
 
-# 冒烟（不花钱，MockLLM）
-python3 main.py "演示" -c "演示完成" --mock --progress 0
-
-# 真跑（路径全部来自 .env）
+# 真跑（路径全部来自 .env，入口默认就是 intake）
 python3 main.py "帮我做一个能赚大钱的A股量化系统" \
     -c "账户权益在2026-12-31收盘 >= 本金 x 2" --workers 3 --progress 0
 
 # 入口：和你谈，谈成一个任务就当场跑掉、把结论带回来接着谈（不退场，Ctrl-D 停）
 # 不给 -c 就是「我还没定验收标准，入口去问」—— 不许拿默认值当用户的话
-python3 main.py "帮我自动做视频赚钱" --intake
+python3 main.py "帮我自动做视频赚钱"
 
 # 连任务都没想好：先让你在终端上把开场白说完，再让入口开口
-python3 main.py --intake
+python3 main.py
+
+# 接着上次的会话：列表选一个加载成当前会话，对话接着谈、没跑完的树接着跑
+python3 main.py -r
 
 # 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
 
@@ -84,13 +93,13 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 161 | 入口/CLI。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
-| `terminal/` | 218 | **终端会话**（介质与话轮）：`--intake` 的对话从这里走，控制面也落这里。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
+| `main.py` | 161 | 入口/CLI。默认就是 intake；`-r` 恢复老会话。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
+| `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。流程与长规则；字段"本质"在 `tool_specs.py` |
 | `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
 | `tree/intake.py` | 150 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈 |
 | `tree/config.py` | 65 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
-| `tree/llm.py` | 200 | LLM + MockLLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
+| `tree/llm.py` | 200 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
 | `tree/tools.py` | 148 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
 | `tree/effects.py` | 309 | effects 抽取 + 契约核对 / `.meta.json` 落盘 + **工作区快照与 diff**（产出认定） |
 | `tree/protocol/fields.py` | 256 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
@@ -175,8 +184,7 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
   “从文本里猜 JSON 是话还是形式”的识别规则（旧 `_Spoken`/`root_in` 删了）；
   交形式不过 `norm()`，说话也不改它的分行。
   **用户不会给你验收标准**：那是入口的使命，不是用户的任务。
-- **✅ 终端会话**（`terminal/`）：`python3 main.py ... --intake`
-  就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由 / “接到任务 /
+- **✅ 终端会话**（`terminal/`）：`python3 main.py` 默认就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由 / “接到任务 /
   跑完了”走旁白，**任务跑的时候终端把当前整棵树实时画出来**（每开/关一个
   节点重画一次：真终端用 rich Live 原地重画，非终端逐帧追加；跑完那帧就是
   完整结果，树的视图在 `tree/protocol/fields.py`）。**实时视图每节点一行铺开**
@@ -194,7 +202,7 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
   敲的字、上下键翻历史、粘贴多行当一条、要分几行写按 Alt-Enter；
   Ctrl-D / Ctrl-C 中止时返回 `None`，不抛 traceback。这一段不再自己拿 `input()` 拼
   —— 那是把成本转给用户：敲完的行改不了、没历史、粘多行被拆成好几次读。
-  **没在命令行交底（裸 `--intake`）→ 先在终端上让你把开场白说完，再让入口开口**：
+  **没在命令行交底（裸 `main.py`）→ 先在终端上让你把开场白说完，再让入口开口**：
   否则种子是空的，那一次模型调用只够换来一句"你要做什么？"（实测）——
   看起来就像程序没等你说话就自作主张。
   **模型的吐字是真流式**（`LLM.chat(on_delta=…)` 读 SSE，一个字一个字写屏），
@@ -298,7 +306,7 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 ### ④ 入口在真模型上跑一次
 
-- `python3 main.py "帮我自动做视频赚钱" --intake`
+- `python3 main.py "帮我自动做视频赚钱"`
 - 看三件事：会不会真的问用户（而不是自己编一个目标）；
   谈出来的 `accept` 有没有可测物理量；它会不会自己提一条标准（而不是问用户要）；
   看着做不成的事，它会不会老老实实谈成一件可验收的事。
@@ -328,7 +336,7 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 | `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
 | `tests/test_box.py` | 39 | **盒子与 code-mode**：注册/搜索/签名（有契约才可调用）、填模板与错参当场抛、绑定名净化与保留名、print=观测、超时是观测、运行时 `search_tools` 当场装函数、**产出靠工作区 diff**（`open()` 直接写也跑不掉）、两条复用路径都记账 |
 | `tests/test_intake.py` | 28 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
-| `tests/test_cli.py` | 11 | `main.py` 的参数契约：没给 `-c` 当场报错（不许用默认值顶替）、什么都没给就报错、`--intake` 与 `--mock` 互斥；**守门**：硬编码的默认任务/标准不许回到源码里 |
+| `tests/test_cli.py` | 11 | `main.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
 | `tests/test_tty.py` | 52 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
 
 ```bash

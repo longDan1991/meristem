@@ -142,7 +142,7 @@ def _fit(lines, max_h):
     return out[:max_h]
 
 
-async def converse(llm, seed, env, session=None):
+async def converse(llm, seed, env, session=None, resume=None):
     """和入口一直谈下去，直到用户在终端上中止（返回 `None`）。
 
     入口现在**不退场**：每谈成一个任务就跑掉、把结论带回来接着谈。
@@ -151,6 +151,9 @@ async def converse(llm, seed, env, session=None):
 
     env 是运行现场（trace/caps/index/budget/workers/registry），终端不解释它，
     只转给入口；session 是读的那条通道（测试把管道驱动的会话塞进来）。
+
+    resume：可选的恢复包（`session.load` 出来的）—— 会话重启后接着谈：
+    先把老树画给人看（"加载并显示"），再让入口从恢复的对话继续。
     """
     session = session or _session()
     # 上不上色交给 rich 判断：isatty / NO_COLOR / 颜色系统它都处理。
@@ -180,6 +183,12 @@ async def converse(llm, seed, env, session=None):
     line("\n[入口] 把预期谈定，能过闸门就当场拿去跑，跑完接着谈。")
     line("       回车发送；想分几行写就按 Alt-Enter；跑任务时底下仍可输入。")
     line("       灰色的字是它在想。不想聊了按 Ctrl-D。\n")
+
+    if resume is not None:
+        line("\n[会话] 已加载：%s" % resume["path"])
+        for t in resume["trees"]:
+            narrate("\n".join(render_tree(t["root"], t["registry"])))
+        line("")
 
     spoke = [False]                # 这一轮模型有没有往屏幕上吐过话
     thinking = [False]             # 这一轮刚吐过的是不是思考
@@ -358,14 +367,17 @@ async def converse(llm, seed, env, session=None):
                 live_ref[0] = None
 
     # 节点级吐字只对真终端开：管道 / 重定向没有 Live，也没有人会看见它，
-    # 不给节点级的 llm.chat 平白开 SSE（main 直跑那一路也不开）。
+    # 不给节点级的 llm.chat 平白开 SSE。
     env = dict(env, on_event=on_event)
     if sys.stdout.isatty():
         env = dict(env, on_delta=node_delta, on_reasoning=node_reasoning)
 
+    msgs = (resume["chat_msgs"] or None) if resume is not None else None
+    resume_tree = resume["in_flight"] if resume is not None else None
     intake_task[0] = asyncio.ensure_future(
         intake(llm, seed, ask=ask, env=env,
-               on_say=narrate, on_delta=on_delta, on_reasoning=on_reasoning))
+               on_say=narrate, on_delta=on_delta, on_reasoning=on_reasoning,
+               msgs=msgs, resume_tree=resume_tree))
     try:
         await intake_task[0]
     except _Quit:

@@ -27,9 +27,27 @@ from .trace import Trace
 from .turn import step
 
 
+def _checkpoint(nid, st, trace):
+    """把节点状态写进会话记录（trace 的 `state` 事件），恢复时据此重建。
+
+    每次状态一变就落一笔：节点全字段 + 调度器的编排字段。恢复只认这个 ——
+    不再从 open/concluded 那些展示事件里猜（那些是给人看的，这里是事实本身）。
+    calls 是 (工具, 参数, 观测) 元组，转成列表才好序列化；加载后解包不碍事。
+    """
+    trace.add(nid, "state", {
+        "node": st["node"].to_dict(),
+        "ready": st["ready"], "finished": st["finished"],
+        "waiting": st["waiting"], "rest": st["rest"],
+        "gate_id": st["gate_id"], "gate_name": st["gate_name"],
+        "calls": [list(c) for c in st["calls"]],
+        "contracts": st["contracts"],
+        "artifacts": sorted(st["artifacts"]),
+        "art_effects": st["art_effects"]})
+
+
 async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None,
               index=None, on_beat=None, beat=60, on_event=None,
-              on_delta=None, on_reasoning=None):
+              on_delta=None, on_reasoning=None, resume=None):
     """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。
 
     真异步（P4）：一个节点的一回合 = 一个 asyncio task，`workers` 是同时在飞
@@ -41,14 +59,31 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
 
     on_delta(node_id, text) / on_reasoning(node_id, text) 是可选的**节点级
     实时吐字**回调：每个节点问模型时，把它吐的每一口（content / 思考）按
-    node_id 送出来，给终端画进树里。没给就不开流式（main 直跑那一路不要）。
+    node_id 送出来，给终端画进树里。没给就不开流式（入口那一路默认要）。
+
+    resume：可选 dict {"state", "pending", "root"} —— 一棵跑了一半的树**接着跑**
+    （会话记录里恢复出来的，见 `session.load`；registry 走参数传入，调用方负责
+    把恢复出的节点合进来）。恢复时：已完工的节点不再碰，waiting>0 的继续等下层，
+    其余重新排队（中断时刻在飞的那步作废，节点带着完整的观测/尝试历史重新问模型）。
     """
     registry = {} if registry is None else registry
     budget = Budget() if budget is None else budget
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
     box = Box(caps, hands)
-    state, pending = {}, deque()
+    if resume is not None:
+        state, pending, root = resume["state"], resume["pending"], resume["root"]
+        # 恢复的节点没有出生时的运行时工具绑定（box.search 的结果不落盘），
+        # 按同一组检索键重查一次补回来；先例/现成做法的**文字**已在节点里。
+        for nid, st in state.items():
+            if st["finished"]:
+                continue
+            node = st["node"]
+            q = " ".join(str(x) for x in (node.keywords or [node.name, node.accept]))
+            tools, _text, _hits = box.search(q)
+            st["tools"] = tools
+    else:
+        state, pending = {}, deque()
 
     def register(node):
         state[node.id] = {"node": node, "ready": True, "finished": False,
@@ -91,6 +126,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
                    "hits": hits, "chars": len(text),
                    "bindings": [t["name"] for t in tools]})
         pending.append(node.id)
+        _checkpoint(node.id, state[node.id], trace)
         if on_event:
             on_event(node)
 
@@ -117,6 +153,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
                 on_event(node)
             if node.verdict in ("满足", "未满足") and caps is not None and st["calls"]:
                 learn(node, st["calls"], st.get("contracts"))
+            _checkpoint(nid, st, trace)
             parent = node.parent
             if parent and parent in state:
                 pst = state[parent]
@@ -140,8 +177,10 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
                     if not pst["finished"]:
                         pst["ready"] = True
                         pending.append(parent)
+                    _checkpoint(parent, pst, trace)
                     return
                 pst["waiting"] -= 1
+                _checkpoint(parent, pst, trace)
                 if pst["waiting"] <= 0 and not pst["finished"]:
                     if pn.attempts:
                         pn.attempts[-1]["outcome"] = "下层已全部返回"
@@ -153,19 +192,23 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
                         for k in kids:
                             register(k)
                         pst["waiting"] = len(kids)
+                        _checkpoint(parent, pst, trace)
                     else:
                         pst["ready"] = True
                         pending.append(parent)
+                        _checkpoint(parent, pst, trace)
         elif res["kind"] == "children":
             for k in res["kids"]:
                 register(k)
             st["waiting"] = len(res["kids"])
             st["rest"] = res.get("rest") or []
             st["gate_id"] = res.get("gate_id")
+            _checkpoint(nid, st, trace)
         else:                                      # again：接着再来一回合
             if not st["finished"]:
                 st["ready"] = True
                 pending.append(nid)
+                _checkpoint(nid, st, trace)
 
     def _spawn(parent, specs):
         kids = []
@@ -200,7 +243,8 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6, caps=None
 
     inflight = {}
     try:
-        register(root)
+        if resume is None:
+            register(root)
         while pending or inflight:
             while pending and len(inflight) < workers:
                 nid = pending.popleft()

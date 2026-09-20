@@ -77,7 +77,7 @@ async def ask(llm, trace, node, which, budget, ctx=None):
     """问模型。节点级的实时吐字从这里接出去：调度器把终端给的
     `on_delta` / `on_reasoning` 放进 ctx，这里按节点包一层再传给 llm.chat ——
     节点是并发的，回调不带 node.id 就分不清是谁在说话（§11 不建共享计数器，
-    只是给回调做标记）。没给就不开流式：main 直跑那一路没有实时展示，
+    只是给回调做标记）。没给就不开流式：入口那一路默认开，节点级没有实时展示
     不背 SSE 的开销。"""
     trace.add(node.id, "%s_in" % which, node.render())
     tools = (await openai_tools())[which]
@@ -222,7 +222,9 @@ async def do_code(node, code, trace, box, st, hands):
         if not str(p).lower().endswith(ARTIFACT_EXT):
             continue
         st.setdefault("artifacts", set()).add(os.path.realpath(p))
-        st.setdefault("art_effects", {})[os.path.realpath(p)] = (eff, pre)
+        # dict 形状（不是元组）：会话状态检查点要序列化，元组不是 JSON。
+        st.setdefault("art_effects", {})[os.path.realpath(p)] = {
+            "effects": eff, "preconditions": pre}
         if p in created:
             made.append(os.path.basename(p))
     st.setdefault("calls", []).extend(calls)

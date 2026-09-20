@@ -246,6 +246,29 @@ class Node:
         self.external = external or []
         self.status = "done"
 
+    # ------------------------------------------------------------ 序列化
+    def to_dict(self):
+        """整棵节点的快照（全字段）。给会话状态检查点用 —— 恢复时按原样
+        重建 Node，attempts/observations 一字不差地回到模型眼前。"""
+        return {"name": self.name, "detail": self.detail, "notes": self.notes,
+                "accept": self.accept, "kind": self.kind, "gate": self.gate,
+                "keywords": self.keywords, "conc_range": self.conc_range,
+                "id": self.id, "parent": self.parent, "depth": self.depth,
+                "lineage": self.lineage, "attempts": self.attempts,
+                "observations": self.observations, "precedents": self.precedents,
+                "caps": self.caps, "children": self.children,
+                "verdict": self.verdict, "conclusion": self.conclusion,
+                "evidence": self.evidence, "external": self.external,
+                "status": self.status}
+
+    @classmethod
+    def from_dict(cls, d):
+        n = cls()
+        for k, v in (d or {}).items():
+            if hasattr(n, k):
+                setattr(n, k, v)
+        return n
+
     def record(self):
         """回给上层的形式化记录。上层据此复核，不采信自报。"""
         r = {"name": self.name, "accept": self.accept, "outcome": self.verdict,

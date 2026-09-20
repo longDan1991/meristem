@@ -307,7 +307,8 @@ def accept_artifacts(node, artifacts, trace, st):
         rp = os.path.realpath(path)
         contract = contract_of(a)
         internal = contract.get("type") == "内部"
-        eff, pre = (st or {}).get("art_effects", {}).get(rp, (None, None))
+        entry = (st or {}).get("art_effects", {}).get(rp) or {}
+        eff, pre = entry.get("effects"), entry.get("preconditions")
         problems = [] if internal else contract_problems(path, contract)
         trace.add(node.id, "contract", {"path": path, "contract": contract,
                                         "problems": problems, "source": "conclusion",

@@ -11,7 +11,6 @@ litellm 把它透传给任何 OpenAI 兼容端点。
 给了 `on_delta`（没给 tools）就换成流式：内容一个字一个字回调，同时照旧
 返回整段文本。`on_reasoning` 另开一条：推理模型的 `reasoning_content`（思考）
 走它，和回答分开，终端才能把思考画成灰的、回答画成亮的。
-MockLLM 让整棵树在没有 API key 的情况下也能跑通（它发工具调用）。
 
 `last_usage` 是**线程本地**的：每个 worker 记自己那一次调用的用量，
 `turn._log_usage` 立刻读走，所以这里不需要共享计数器、也不需要锁（AGENTS §9）。
@@ -19,7 +18,6 @@ MockLLM 让整棵树在没有 API key 的情况下也能跑通（它发工具调
 
 import json
 import os
-import re
 import threading
 from dataclasses import dataclass, field
 
@@ -172,48 +170,3 @@ def _usage_dict(resp):
         return u.dict()
     return dict(u)
 
-
-class MockLLM:
-    """不调模型也能跑通整棵树：分配节点先发一次 create_children、拿到下层结论
-    就发 conclude；叶子先发 run_code 再做 conclude。"""
-
-    def __init__(self):
-        self.calls = 0
-
-    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
-                   tools=None):
-        self.calls += 1
-        self.last_usage = {"total_tokens": 0}
-        user = messages[-1]["content"]
-        fresh = "(还没有)" in user
-
-        if tools is None:                            # 入口那一路（mock 模式到不了）
-            return Message(text="{}")
-        if "手上的东西" in user:                      # 叶子
-            if fresh:
-                return Message(tool_calls=[ToolCall(
-                    name="run_code",
-                    arguments={"code": "print(bash(cmd='echo mock'))"})])
-            return Message(tool_calls=[ToolCall(
-                name="conclude",
-                arguments={"verdict": "满足", "text": "叶子做完了（mock）",
-                           "evidence": ["第1次观测"]})])
-        if fresh:                                    # 分配节点：拆一次
-            # 子任务的 accept 必须**带着父的那条可测物理量**（gate 会核对），
-            # 所以从父的 accept 上长出来，而不是编一句固定的 —— 编的那句会被
-            # 判成“把任务换成了别的东西”，mock 就永远拆不开。
-            m = re.search(r"^accept:\s*(.+)$", user, re.M)
-            acc = (m.group(1).strip() if m else "") or "可观测结果"
-
-            def kid(n):
-                return {"name": n, "detail": "mock 详情", "notes": "",
-                        "accept": "%s（%s 负责）" % (acc, n), "kind": "leaf",
-                        "gate": False, "keywords": ["mock", "echo"],
-                        "conc_range": [50, 200]}
-            return Message(tool_calls=[ToolCall(
-                name="create_children",
-                arguments={"children": [kid("子任务A"), kid("子任务B")]})])
-        return Message(tool_calls=[ToolCall(
-            name="conclude",
-            arguments={"verdict": "满足", "text": "下层都回来了（mock）",
-                       "evidence": ["子任务A 的结论"]})])
