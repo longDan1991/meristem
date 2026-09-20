@@ -1,10 +1,11 @@
 """叶子的手。叶子只能通过这些工具接触世界，所以事实必须从这里产生。
 
-一条硬纪律：**截断必须可见。**
+工具输出**不截断**：跑出多少就是多少，完整流到压缩层（tree/compression.py）——
+日志/JSON 在发送边界被无损折叠，模型收到的永远是被压过的完整内容。
+截断会毁掉压缩救不回来的数据（尾部 FATAL 行、超出部分的 JSON），所以没有。
 
-静默截断等于对模型撒谎 —— 它会以为"这就是全部输出"，然后反复重读同一个
-东西。这不是假设：实测一个叶子把同一个文件读了 25 次，只因为提示词里
-每条观测只给模型看前 200 字，而它不知道那是截断。模型不傻，是我们没给它信息。
+read 是**翻页**不是截断：它按 offset/limit 给一段，并明说"本段在哪、还有多少、
+下一段怎么取"—— 那是工具契约，不是静默丢弃。
 
 另一条：**环境失败是观测，不是异常。** 文件不存在、命令跑不动，是"世界说不行",
 要让模型看见并据此换路；所以工具在这里就地把它变成观测文本返回。
@@ -17,12 +18,6 @@ import signal
 import subprocess
 import time
 
-# 单次工具输出的可见上限（字）。原来是 4000 —— 叶子输出大了就截掉、
-# 尾部（常有 FATAL 行）永久丢失。选项 B（tree/compression.py）让压缩取代截断：
-# 日志 run-collapse / JSON 无损折叠在发送边界把大输出压回来，CCR 可逆。
-# 所以这里大幅放宽：压缩得动的内容（日志/JSON，命令输出的主体）不怕大，
-# 压不动的内容（少见）最多以 ~8K token 的身份进一次上下文。再大仍会截断（可见）。
-BASH_CAP = 32768
 READ_CAP = 2000
 
 # bash 必须带超时：没有它，一条卡住的命令会把整棵树钉死在那里。
@@ -31,21 +26,6 @@ READ_CAP = 2000
 # 不说清楚，模型会把超时当成"工具坏了"，于是原样重试。
 BASH_TIMEOUT = 120        # 默认：一条命令最多跑这么久
 BASH_TIMEOUT_MAX = 3600   # 上限：更久的事请改成后台 + 轮询（提示词里写明了）
-
-
-def truncate_visible(text, total=None):
-    """截断必须可见：一个地方说清"你看到的是前 N 字、总共有多少"。
-
-    bash 的输出和代码沙箱的观测都走这里 —— 两处各写一份措辞，
-    模型迟早会遇到两种不一样的"我怎么知道这是全部"。
-    total：真实总量（沙箱只读了前 BASH_CAP 字，len(text) 不等于它）。
-    """
-    n = len(text) if total is None else max(int(total), len(text))
-    if n <= BASH_CAP:
-        return text
-    return text[:BASH_CAP] + (
-        "\n…[截断：输出共 %d 字，这里只显示了前 %d 字。"
-        "要精确取用 head/tail/grep/sed -n]" % (n, BASH_CAP))
 
 
 def ok_obs(obs):
@@ -102,7 +82,6 @@ async def bash(cmd, timeout=None):
             p.kill()
     out = b"".join(chunks).decode("utf-8", "replace").strip()
     rc = await p.wait()
-    out = truncate_visible(out)
     if timed_out:
         note = ("\n[超时] 这条命令跑了 %d 秒还没结束，已经被连同它起的子进程一起杀掉。"
                 % t)

@@ -11,8 +11,8 @@ Python 子集（没有 pandas / numpy / glob / async with），而我们整个�
     子 → 宿主   {"call": "<tool_id>", "args": {...}}
     宿主 → 子   {"result": ...} / {"error": "..."}
 
-子进程的 `print` 走 stderr —— **整份 stderr 就是观测**，和 bash 用同一套
-可见截断（`tools.truncate_visible`）、同一套成败判定（`tools.ok_obs`）。
+子进程的 `print` 走 stderr —— **整份 stderr 就是观测**，不截断（跑出多少
+就是多少，完整流到压缩层），成败判定用 `tools.ok_obs`（工具出错 / exit 码）。
 
 两件事是刻意的：
   · 观测落**文件**不落管道：子进程话多的时候，管道写满就会把它卡死。
@@ -36,7 +36,7 @@ import sys
 import time
 
 from ..config import SNIPPET_DIR
-from ..tools import BASH_CAP, ok_obs, truncate_visible
+from ..tools import ok_obs
 
 # 一段代码自己能跑多久（不含等宿主的时间）。这是**活性兜底**，不是预算：
 # 一个死循环会把整个节点钉死，和 bash 必须有超时是同一件事。
@@ -238,14 +238,16 @@ def _kill(proc):
 
 
 def _observe(log_path, timed_out, rc):
-    """观测 = 子进程的 stderr（+ 超时 / 退出码这两条事实）。"""
+    """观测 = 子进程的 stderr（+ 超时 / 退出码这两条事实）。
+
+    不截断：跑出多少就是多少，完整流到压缩层。超时/退出码是运行事实，照记。
+    """
     try:
-        total = os.path.getsize(log_path)
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            out = f.read()
     except OSError:
-        total = 0
-    with open(log_path, encoding="utf-8", errors="replace") as f:
-        out = f.read(BASH_CAP)
-    out = truncate_visible(out, total=total).strip()
+        out = ""
+    out = out.strip()
     if timed_out:
         out = (out + "\n[宿主侧超时] 这段代码超过 %d 秒被硬杀（连 SIGALRM 都没被打断）。"
                % (SNIPPET_TIMEOUT + HOST_GRACE)).strip()

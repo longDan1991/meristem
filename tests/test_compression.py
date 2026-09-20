@@ -171,6 +171,21 @@ def main():
          r.stdout.strip()[:60] or r.stderr.strip()[-120:])
 
     print("=" * 80)
+    print("E. 不截断：压不动的大内容也完整到达模型（不丢数据）")
+    big_unique = ("\n".join("第 %d 行：这条是唯一的正文，不重复，压不动 %s"
+                              % (i, "x" * 40) for i in range(2000)))
+    node3, llm3, recs3 = go(["print('''%s''')" % big_unique,
+                             "print('小输出2')", "print('小输出3')"])
+    raw3 = next(r["payload"]["obs"] for r in recs3
+                if r["kind"] == "code" and "压不动" in str(r["payload"]["obs"]))
+    wire3b = llm3.seen[1]                        # 第二回合：这条刚进对话
+    t = next(m for m in wire3b if m.get("role") == "tool"
+             and m.get("tool_call_id") == "call_0")
+    line("压不动的大输出完整到达（无截断标记）",
+         len(t["content"]) == len(raw3) and "截断" not in t["content"],
+         "%d 字全量" % len(t["content"]))
+
+    print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")
     return 0 if all(OK) else 1
 
