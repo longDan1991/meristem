@@ -15,8 +15,10 @@
 "怎么渲成消息给模型看"是 `tree/prompts/messages.py` —— **class Node 里没有任何
 消息拼接**，全部提出去放到该放的地方。
 
-`base_user` / `full_view` 渲哪几段、每段叫什么名字，`tree/prompts/prose.py` 的
-input 节函数里都逐段点了名（`tests/test_protocol.py` 的 I 段**双向核对**）。
+`base_user` 渲哪几段、每段叫什么名字，`tree/prompts/prose.py` 的
+input 节函数里都逐段点了名（`tests/test_protocol.py` 的 I 段**双向核对**；
+prose 里的「观测历史 / 本层已有尝试 / 手上的东西」是线上对话机制与工具清单的
+说明 —— 分别由 tool 消息、分配记录、工具列表承担 —— 不渲染成视图）。
 形式字段那几行的行首就是字段名，与模型自己要写的键是同一个词 ——
 "收到的东西与要交出去的东西同构"。
 """
@@ -39,7 +41,7 @@ def norm(text):
     """形式字段的规范化：压掉换行和多余空白。**不管长度。**
 
     提示词里写的字数（名字 ≤20 之类）只是建议 —— 代码不校、不记、更不切。
-    「要么可见要么别截」那条纪律只作用于视图（messages.py 的 VIEW）；
+    「要么可见要么别截」那条纪律只作用于线上视图（`base_user`）；
     这里既然决定了不截，就什么也不用做。
     """
     s = ("" if text is None else str(text)).strip().replace("\n", " ")
@@ -77,7 +79,7 @@ class Node:
 
     # ---------------------------------------------------------------- 结局
     # 消息拼接一律不在 Node —— 在 tree/prompts/messages.py（header / lineage /
-    # attempts / observations / base_user / full_view）。Node 只装数据 + 协议逻辑。
+    # base_user）。Node 只装数据 + 协议逻辑。
     def close(self, verdict, conclusion, evidence, external=None):
         self.verdict = verdict
         self.conclusion = conclusion

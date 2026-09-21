@@ -27,8 +27,8 @@ from tree.protocol.tool_specs import mcp             # noqa: E402
 from tree.runtime.trace import Trace                 # noqa: E402
 from tree.prompts import (build_system_sections, render_system,  # noqa: E402
                           render_turn)
-from tree.prompts.messages import (attempts, full_view, header,  # noqa: E402
-                                   lineage)
+from tree.prompts.messages import (base_user, header, lineage,  # noqa: E402
+                                   spec_line)
 from tree.runtime import scheduler as R              # noqa: E402
 from tree import config as cfg                       # noqa: E402
 
@@ -315,9 +315,11 @@ def main():
     print("=" * 80)
     print("I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
     KEYS = ("name", "detail", "notes", "accept", "kind", "gate", "conc_range")
-    # 文档承诺给模型看的段落就这几样；在这里**双向**核对：
-    #   文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
-    SECTIONS = ("上层意图链", "本层已有尝试", "观测历史", "手上的东西")
+    # 文档承诺给模型看的**静态**段落 vs 线上真正发出去的基础消息（base_user）。
+    # 在这里**双向**核对：文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
+    # 「本层已有尝试 / 观测历史 / 手上的东西」不在这 —— 它们是线上对话机制与
+    # 工具清单的说明（分配记录、tool 消息、工具列表各自承担），不渲进基础消息。
+    SECTIONS = ("上层意图链",)
 
     def sys_text(which):
         """该节点回合的 system 文本（= tree/prompts/ 的节组装结果，render_turn 的第一条消息）。"""
@@ -327,47 +329,37 @@ def main():
     def filled(kind_, lineage):
         n = Node(name="N", detail="D", notes="X", accept="A 2026-12-31",
                  kind=kind_, conc_range=[100, 500], lineage=lineage)
-        n.attempts.append({"children": [kid("子任务A", "A 2026-12-31 的读数",
-                                            gate=True)],
-                           "results": [], "outcome": "等下层"})
-        n.observations.append({"action": "跑了一段代码", "obs": "看到了输出"})
         return n
 
     for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
         nI = filled(kind_, [["ROOT", "把量化系统做出来"],
                             ["MID", "摸清数据这条线"]])
-        text = full_view(nI)
+        text = base_user(nI)
         head_keys = [ln.split(":")[0] for ln in header(nI).splitlines()]
         sys_txt = sys_text(which)
         doc = [s for s in SECTIONS if s in sys_txt]
         got = [s for s in SECTIONS if s in text]
         print("  %s: 收到的行首 %s" % (which, head_keys))
-        print("       文档点名 %s / 真渲染 %s" % (doc, got))
+        print("       文档点名 %s / 基础消息里有 %s" % (doc, got))
         ok &= line("%s 收到的行首 == 自己要写的那 7 个键（同构）" % which,
                    head_keys == list(KEYS), "%s" % head_keys)
         ok &= line("%s: 收到的 7 个键在文档里都点了名" % which,
                    all(k in sys_txt for k in KEYS))
-        ok &= line("%s 的文档段落与渲染段落一致" % which, doc == got)
-        ok &= line("%s: conc_range 在文档与渲染里都在" % which,
+        ok &= line("%s: 文档点名的静态段落 == 基础消息里有的" % which, doc == got)
+        ok &= line("%s: conc_range 在文档与基础消息里都在" % which,
                    "conc_range" in sys_txt
                    and "conc_range: [100, 500]" in header(nI))
         ok &= line("%s: 真值都渲染出来了（区间/意图链）" % which,
                    all(s in text for s in ("[100, 500]",
                                            "ROOT: 把量化系统做出来",
                                            "MID: 摸清数据这条线")))
-    # 分配节点历史里的子任务也要用同一套键 —— 它看到的是自己写过的形式，
-    # 不是另一套中文标签。
-    nA = filled("dispatch", [])
-    nA.attempts.append({
-        "children": [{"name": "子任务A", "kind": "leaf", "gate": True,
-                      "accept": "A 2026-12-31 的读数",
-                      "conc_range": [100, 500]}], "results": []})
-    hist = attempts(nA)
-    print("  历史长这样: %s" % hist.splitlines()[-1].strip())
-    ok &= line("历史里的子任务用同一套键写（不再有中文标签）",
-               "name: 子任务A" in hist and "kind: leaf" in hist
-               and "gate: true" in hist and "conc_range: [100, 500]" in hist
-               and "验收标准:" not in hist and "[门槛]" not in hist)
+    # 分配记录里的子任务也用同一套键 —— 模型看到的是自己写过的形式，不是中文标签。
+    sl = spec_line({"name": "子任务A", "kind": "leaf", "gate": True,
+                    "accept": "A 2026-12-31 的读数", "conc_range": [100, 500]})
+    ok &= line("分配记录里的子任务用同一套键写（不再有中文标签）",
+               "name: 子任务A" in sl and "kind: leaf" in sl
+               and "gate: true" in sl and "conc_range: [100, 500]" in sl
+               and "验收标准:" not in sl and "[门槛]" not in sl)
     ok &= line("alloc 的两个出口 = create_children / conclude",
                all(s in sys_text("alloc") for s in ("create_children", "conclude")))
     ok &= line("leaf 的出口 = bash / read / write / conclude",

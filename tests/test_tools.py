@@ -8,26 +8,22 @@
   · read 是**翻页不是截断**：报出总量、本段区间、怎么取下一段（A/B）
   · bash 输出**不截断**：跑出多少就是多少（C）—— 压缩在发送边界处理它，
     截断会毁掉压缩救不回来的数据。
-  · 观测历史的**视图**（render_observations）只影响 trace 展示，不截线上（D）
-  · bash 必须带超时，超时是可见的事实（E）
+  · bash 必须带超时，超时是可见的事实（D）
 """
 
 import asyncio
 import os
-import re
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tree.tools as T                        # noqa: E402
 from tree.tools import read                  # noqa: E402
-from tree.prompts.messages import VIEW, observations    # noqa: E402
 
 
 def bash(*a, **k):
     """bash 现在是真异步（P4），测试里用同步壳调它。"""
     return asyncio.run(T.bash(*a, **k))
-from tree.protocol.fields import Node         # noqa: E402
 
 OK = []
 
@@ -65,31 +61,7 @@ def main():
          "%d 字" % len(big))
 
     print("=" * 78)
-    print("D. 观测历史截断可见 + 新观测优先")
-    n = Node(name="x", accept="y", kind="leaf")
-    n.observations = [{"action": "read %d" % i, "obs": str(i) * 4000}
-                      for i in range(1, 9)]
-    r = observations(n)
-    # 只比观测正文，不比前缀/标题行（那是测试写法的伪差异）
-    bodies = [row.split("→ ", 1)[-1] for row in r.split("\n  [") if "→ " in row]
-    sizes = [len(b) for b in bodies]
-    total = sum(4000 for _ in range(8))
-    print("  限额 %d，%d 份原始共 %d 字，实际给了 %s"
-          % (VIEW["max_obs_chars"], len(n.observations), total, sizes))
-    line("明说被截断", "截断" in r)
-    nums = [int(x) for x in re.findall(r"截断：这一次共 (\d+) 字", r)]
-    line("说清原始长度", bool(nums) and max(nums) >= 4000, "标明 %s 字" % nums)
-    # 总额度 = 限额 + 每条最低 200 的保护线
-    line("总额度受控",
-         sum(sizes) <= VIEW["max_obs_chars"] + 200 * VIEW["max_obs_shown"])
-    line("越新的观测拿到越多额度",
-         len(sizes) == len(n.observations) and sizes == sorted(sizes),
-         "旧→新 %s" % sizes)
-    line("最新那次没有被压短", sizes and sizes[-1] >= VIEW["obs_entry"],
-         "最新 %d 字（上限 %d）" % (sizes[-1], VIEW["obs_entry"]))
-
-    print("=" * 78)
-    print("E. bash 必须带超时，而且超时是可见的 / 可调的 / 会连子进程一起杀")
+    print("D. bash 必须带超时，而且超时是可见的 / 可调的 / 会连子进程一起杀")
     out = bash("echo 先打一行; sleep 30", timeout=2)
     print("  超时观测（末两行）: %s" % " / ".join(out.strip().splitlines()[-2:]))
     line("明说是超时，不是「工具出错」", "[超时]" in out and "工具出错" not in out)

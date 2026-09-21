@@ -46,7 +46,7 @@ from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits
 from ..protocol.tool_specs import (Artifact, ChildSpec, NODE_TOOLS, mcp,
                                    openai_tools)
 from ..prompts import render_turn
-from ..prompts.messages import full_view, spec_line
+from ..prompts.messages import base_user, spec_line
 from .. import config as cfg
 from ..compression import RETRIEVE_NAME, compress_messages, retrieve_original
 
@@ -103,7 +103,7 @@ async def ask(llm, trace, node, which, budget, ctx=None, st=None):
     user/system 一字不动。压缩统计写进 trace（wire_compressed），预算计的是
     API 真实用量，节省自动反映。
     """
-    trace.add(node.id, "%s_in" % which, full_view(node))
+    trace.add(node.id, "%s_in" % which, base_user(node))
     tools = (await openai_tools())[which]
     stream_kw = {}
     if ctx:

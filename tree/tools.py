@@ -28,12 +28,6 @@ BASH_TIMEOUT = 120        # 默认：一条命令最多跑这么久
 BASH_TIMEOUT_MAX = 3600   # 上限：更久的事请改成后台 + 轮询（提示词里写明了）
 
 
-def ok_obs(obs):
-    """这次动作算不算成了。只认工具自己给的事实（工具出错 / exit 码）。"""
-    s = str(obs)
-    return "工具出错" not in s and ("[exit=" not in s or "[exit=0]" in s)
-
-
 async def bash(cmd, timeout=None):
     """跑一条命令。**总是有超时**，但超时是可见的、可调的、会连子进程一起杀。
 
