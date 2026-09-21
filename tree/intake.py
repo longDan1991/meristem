@@ -11,7 +11,7 @@
   ① **交形式 ≠ 退场。** 每交一个 `root` 就跑一次、结论喂回，然后再次调模型。
      入口永不退场 —— 谈和跑交替进行，直到用户自己在终端上中止。
      所以没有"最终根"与"附加任务"之分：**每个 root 都是任务**。
-     行不行不是聊出来的判断，而是树跑出来的事实（§2.7）。
+     行不行不是聊出来的判断，而是树跑出来的事实。
   ② 用不了的东西当场打回，并把**为什么**说给它听，让它自己改 ——
      和树里同一个规矩：摆事实，不用计数器逼停。
 
@@ -32,7 +32,7 @@ from fastmcp.exceptions import ValidationError as ToolValidationError
 from .protocol.fields import Node
 from .protocol.gate import validate_root
 from .protocol.tool_specs import ChildSpec, mcp, openai_spec
-from .prompts import INTAKE_SYS
+from .prompts import render_turn
 from .runtime.scheduler import run
 
 # submit_root 的运行时接线：intake() 开头写入 {"env", "llm", "say"}，
@@ -159,13 +159,12 @@ async def intake(llm, msg, ask, env, on_say=None, on_delta=None, on_reasoning=No
             on_say(t)
 
     _intake_binding.set({"env": env, "llm": llm, "say": say})
+    base = render_turn("intake")
     if msgs is None:
-        msgs = [{"role": "system", "content": INTAKE_SYS},
-                {"role": "user", "content": msg}]
+        msgs = base + [{"role": "user", "content": msg}]
         _chat(env, "chat_user", {"text": msg})
     else:
-        msgs = [{"role": "system", "content": INTAKE_SYS}] + \
-               [m for m in msgs if m["role"] != "system"]
+        msgs = base + [m for m in msgs if m["role"] != "system"]
     submit = await openai_spec("submit_root")
 
     # 恢复：有一棵没跑完的树 → 先把它接着跑完，结论回填，再接着谈。

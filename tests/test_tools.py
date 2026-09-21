@@ -21,12 +21,13 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tree.tools as T                        # noqa: E402
 from tree.tools import read                  # noqa: E402
+from tree.prompts.messages import VIEW, observations    # noqa: E402
 
 
 def bash(*a, **k):
     """bash 现在是真异步（P4），测试里用同步壳调它。"""
     return asyncio.run(T.bash(*a, **k))
-from tree.protocol.fields import Node, VIEW   # noqa: E402
+from tree.protocol.fields import Node         # noqa: E402
 
 OK = []
 
@@ -68,7 +69,7 @@ def main():
     n = Node(name="x", accept="y", kind="leaf")
     n.observations = [{"action": "read %d" % i, "obs": str(i) * 4000}
                       for i in range(1, 9)]
-    r = n.render_observations()
+    r = observations(n)
     # 只比观测正文，不比前缀/标题行（那是测试写法的伪差异）
     bodies = [row.split("→ ", 1)[-1] for row in r.split("\n  [") if "→ " in row]
     sizes = [len(b) for b in bodies]

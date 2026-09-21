@@ -16,15 +16,21 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tree.llm import Message, ToolCall                      # noqa: E402
 from tree.protocol.fields import Node                # noqa: E402
+from tree.protocol.tool_specs import mcp             # noqa: E402
 from tree.runtime.trace import Trace                 # noqa: E402
-from tree.prompts import PROMPT                      # noqa: E402
+from tree.prompts import (build_system_sections, render_system,  # noqa: E402
+                          render_turn)
+from tree.prompts.messages import (attempts, full_view, header,  # noqa: E402
+                                   lineage)
 from tree.runtime import scheduler as R              # noqa: E402
+from tree import config as cfg                       # noqa: E402
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
@@ -36,8 +42,8 @@ def kid(name, accept, kind="leaf", gate=False, rng=None,
             "kind": kind, "gate": gate, "conc_range": rng or [100, 500]}
 
 
-def run_code(code):
-    return Message(tool_calls=[ToolCall(name="run_code", arguments={"code": code})])
+def bash_call(cmd):
+    return Message(tool_calls=[ToolCall(name="bash", arguments={"cmd": cmd})])
 
 
 def create(children):
@@ -50,34 +56,41 @@ def conclude(**kw):
 
 
 class Scripted:
-    """按渲染出来的形式字段回话（发工具调用）。mode 决定行为。"""
+    """按平铺对话回话（发工具调用）。mode 决定行为。
+
+    每个节点（分配节点和叶子一样）都是完整的 Loop：user 是基础形式字段
+    （base_user = 形式字段 + 意图链），观测 / 尝试 / 下层结论以对话消息
+    （assistant 的 tool_call + tool 回话 + 注入的 user）累积。
+    """
 
     def __init__(self, mode):
         self.mode, self.calls, self.last_usage = mode, 0, {}
 
+    @staticmethod
+    def _count(messages, tname):
+        """对话里调过某个工具几次（平铺记录数）。"""
+        return sum(
+            1 for m in messages if m.get("role") == "assistant"
+            and m.get("tool_calls")
+            and any(tc.get("function", {}).get("name") == tname
+                    for tc in m["tool_calls"]))
+
     async def chat(self, messages, temperature=0.2, tools=None):
         self.calls += 1
-        # 叶子（选项 B）是对话：user 是基础形式字段（render_wire），
-        # 观测走 role=tool 消息 —— 所以找 user 消息，不用 messages[-1]。
         user = next((m["content"] for m in messages
                      if m.get("role") == "user"), "")
         name = (re.search(r"^name:\s*(.+)$", user, re.M) or [None, "?"])[1].strip()
-        # "是不是第一次"：叶子看有没有 tool 消息（还没有 = 该动手），
-        # 分配节点看"本层已有尝试"是不是空的（它是单发 render，永远没有 tool）。
-        if "手上的东西" in user:
-            fresh = not any(m.get("role") == "tool" for m in messages)
-        else:
-            fresh = "(还没有)" in user
-        m = re.search(r"本层已有尝试: 共 (\d+) 次", user)
-        attempts = int(m.group(1)) if m else 0
+        # 对话里还没有任何 tool 回话 = 还没动过手（分配节点和叶子同一条判据）。
+        fresh = not any(m.get("role") == "tool" for m in messages)
+        n_alloc = Scripted._count(messages, "create_children")
 
-        if "手上的东西" in user:                        # ── 叶子
+        if "kind: leaf" in user:                        # ── 叶子
             if self.mode == "loop":
                 # 永远做同一个动作，观测也永远一样
-                return run_code("print(bash(cmd='echo same'))")
+                return bash_call("echo same")
             if name.startswith("GATE"):
                 if self.mode == "gate_pass" and fresh:
-                    return run_code("print(bash(cmd='echo gate-ok'))")
+                    return bash_call("echo gate-ok")
                 v = "满足" if self.mode == "gate_pass" else "阻塞"
                 ev = ["第1次观测"] if v == "满足" else []
                 return conclude(verdict=v,
@@ -90,16 +103,16 @@ class Scripted:
             if name.startswith("EARLY"):
                 # 第一轮拆出来的孩子：真的做过、真的出过结论
                 if fresh:
-                    return run_code("print(bash(cmd='echo early'))")
+                    return bash_call("echo early")
                 return conclude(verdict="满足", text="早期子任务干完了",
                                 evidence=["第1次观测"])
             if self.mode == "deep":
                 if fresh:
-                    return run_code("print(bash(cmd='echo deep'))")
+                    return bash_call("echo deep")
                 return conclude(verdict="满足", text="收盘价读到了",
                                 evidence=["第1次观测"])
             if self.mode == "many" and fresh:
-                return run_code("print(bash(cmd='echo sib'))")
+                return bash_call("echo sib")
             return conclude(verdict="满足", text="兄弟干完了",
                             evidence=["第1次观测"])
 
@@ -121,18 +134,20 @@ class Scripted:
         if self.mode == "recite":
             # 真跑过的孩子回来后，又发了一次用不了的分配（被代码拒），
             # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
-            if attempts == 0:
+            if n_alloc == 0:
                 return create([kid("EARLY", "2026-12-31 的权益读数已取到")])
-            if attempts == 1:
+            if n_alloc == 1 and not any(
+                    "没有调用任何工具" in str(m.get("content", ""))
+                    for m in messages):
                 return Message(text="我什么都不想调")   # 没调任何工具 → 被拒
             return conclude(verdict="满足", text="下层都回来了", evidence=["EARLY"])
         if self.mode == "many":
-            if attempts >= 3:
+            if n_alloc >= 3:
                 return conclude(verdict="未满足", text="试了三种拆法都不行",
                                 evidence=[])
             return create([kid(
-                "SIB%d" % (attempts + 1),
-                "2026-12-31 的权益读数已取到（第%d次尝试）" % (attempts + 1))])
+                "SIB%d" % (n_alloc + 1),
+                "2026-12-31 的权益读数已取到（第%d次尝试）" % (n_alloc + 1))])
         if not fresh:
             return conclude(verdict="满足", text="下层都回来了", evidence=["GATE"])
         if self.mode == "anchor":
@@ -287,7 +302,7 @@ def main():
     root, reg, recs, _ = go("loop", accept="某可观测结果", kind="leaf")
     np_ = [r for r in recs if r["kind"] == "no_progress"]
     stl = [r for r in recs if r["kind"] == "stalled"]
-    acts = [r["payload"]["obs"] for r in recs if r["kind"] == "code"]
+    acts = [r["payload"]["obs"] for r in recs if r["kind"] == "tool"]
     print("  代码段数: %d | 无进展告警: %d | 停下: %s"
           % (len(acts), len(np_), root.verdict))
     print("  告警长这样: %s" % (acts[-1] if acts else "").replace("\n", " "))
@@ -304,6 +319,11 @@ def main():
     #   文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
     SECTIONS = ("上层意图链", "本层已有尝试", "观测历史", "手上的东西")
 
+    def sys_text(which):
+        """该节点回合的 system 文本（= tree/prompts/ 的节组装结果，render_turn 的第一条消息）。"""
+        n = filled("leaf" if which == "leaf" else "dispatch", [])
+        return render_turn(which, n)[0]["content"]
+
     def filled(kind_, lineage):
         n = Node(name="N", detail="D", notes="X", accept="A 2026-12-31",
                  kind=kind_, conc_range=[100, 500], lineage=lineage)
@@ -316,20 +336,21 @@ def main():
     for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
         nI = filled(kind_, [["ROOT", "把量化系统做出来"],
                             ["MID", "摸清数据这条线"]])
-        text = nI.render()
-        head_keys = [ln.split(":")[0] for ln in nI.header().splitlines()]
-        doc = [s for s in SECTIONS if s in PROMPT[which]]
+        text = full_view(nI)
+        head_keys = [ln.split(":")[0] for ln in header(nI).splitlines()]
+        sys_txt = sys_text(which)
+        doc = [s for s in SECTIONS if s in sys_txt]
         got = [s for s in SECTIONS if s in text]
         print("  %s: 收到的行首 %s" % (which, head_keys))
         print("       文档点名 %s / 真渲染 %s" % (doc, got))
         ok &= line("%s 收到的行首 == 自己要写的那 7 个键（同构）" % which,
                    head_keys == list(KEYS), "%s" % head_keys)
         ok &= line("%s: 收到的 7 个键在文档里都点了名" % which,
-                   all(k in PROMPT[which] for k in KEYS))
+                   all(k in sys_txt for k in KEYS))
         ok &= line("%s 的文档段落与渲染段落一致" % which, doc == got)
         ok &= line("%s: conc_range 在文档与渲染里都在" % which,
-                   "conc_range" in PROMPT[which]
-                   and "conc_range: [100, 500]" in nI.header())
+                   "conc_range" in sys_txt
+                   and "conc_range: [100, 500]" in header(nI))
         ok &= line("%s: 真值都渲染出来了（区间/意图链）" % which,
                    all(s in text for s in ("[100, 500]",
                                            "ROOT: 把量化系统做出来",
@@ -341,24 +362,125 @@ def main():
         "children": [{"name": "子任务A", "kind": "leaf", "gate": True,
                       "accept": "A 2026-12-31 的读数",
                       "conc_range": [100, 500]}], "results": []})
-    hist = nA.render_attempts()
+    hist = attempts(nA)
     print("  历史长这样: %s" % hist.splitlines()[-1].strip())
     ok &= line("历史里的子任务用同一套键写（不再有中文标签）",
                "name: 子任务A" in hist and "kind: leaf" in hist
                and "gate: true" in hist and "conc_range: [100, 500]" in hist
                and "验收标准:" not in hist and "[门槛]" not in hist)
     ok &= line("alloc 的两个出口 = create_children / conclude",
-               all(s in PROMPT["alloc"] for s in ("create_children", "conclude")))
-    ok &= line("leaf 的两个出口 = run_code / conclude",
-               all(s in PROMPT["leaf"] for s in ("run_code", "conclude")))
-    ok &= line("根没有上层 → 不渲染意图链",
-               filled("dispatch", []).render_lineage() == "")
+               all(s in sys_text("alloc") for s in ("create_children", "conclude")))
+    ok &= line("leaf 的出口 = bash / read / write / conclude",
+               all(s in sys_text("leaf") for s in ("bash", "read", "write", "conclude")))
+    # 双向核对换成**节名集合**（docs/PROMPTS.md §5.6）：文档点名的节 == 真渲染的节。
+    # 恒在节按 §3.2；条件节按出生时静态属性（gate / COMPRESS）。
+    DOC_SECTIONS = {"preamble", "process", "tools", "rules", "input"}
+
+    def section_names(sys_t):
+        names = set(re.findall(r"<([a-z][a-z0-9_-]*)>", sys_t))
+        if not sys_t.startswith("<"):
+            names.add("preamble")          # preamble 无标签、放在最前
+        return names
+
+    for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
+        nS = filled(kind_, [])
+        got = section_names(render_turn(which, nS)[0]["content"])
+        expect = set(DOC_SECTIONS)
+        if which == "leaf" and cfg.COMPRESS:
+            expect.add("skill_compression")
+        ok &= line("%s: 文档点名的节 == 真渲染的节" % which,
+                   got == expect, "%s" % sorted(got))
+    ok &= line("intake: 文档点名的节 == 真渲染的节（无条件节）",
+               section_names(render_turn("intake")[0]["content"])
+               == set(DOC_SECTIONS))
+    ok &= line("根没有上层 → 不渲染意图链", lineage(filled("dispatch", [])) == "")
     _, regI, recsI, _ = go("deep")
     lin = [r["payload"] for r in recsI if r["kind"] == "leaf_in"
            and regI[r["node"]].name == "LEAF"]
     ok &= line("叶子的提示词里带着从根到它上层的整条意图链",
                bool(lin) and "上层意图链" in lin[0] and "ROOT" in lin[0]
                and "MID" in lin[0])
+
+    def _raises(fn):
+        try:
+            fn()
+        except ValueError:
+            return True
+        return False
+
+    async def _mcp_prompt_names():
+        return {p.name for p in await mcp.list_prompts()}
+
+    print("=" * 80)
+    print("K. 命名分节 wire：system 与 user 分开、intake 只有 system、参数校验")
+
+    def _wire(which):
+        return [m["role"] for m in render_turn(which, filled(
+            "leaf" if which == "leaf" else "dispatch", []))]
+
+    k_roles = _wire("leaf")
+    k_roles_alloc = _wire("alloc")
+    k_roles_intake = [m["role"] for m in render_turn("intake")]
+    ok &= line("leaf 的线上 wire = [system, user]（分开，不混装）",
+               k_roles == ["system", "user"], str(k_roles))
+    ok &= line("alloc 的线上 wire = [system, user]",
+               k_roles_alloc == ["system", "user"], str(k_roles_alloc))
+    ok &= line("intake 只有 system（它的 user 是用户的话，在对话里）",
+               k_roles_intake == ["system"], str(k_roles_intake))
+    ok &= line("未知节点类型当场报错",
+               _raises(lambda: render_turn("wat")))
+    ok &= line("system 不走 @mcp.prompt（mcp 上只剩工具）",
+               set() == asyncio.run(_mcp_prompt_names()))
+
+    print("=" * 80)
+    print("K2. 命名分节：节在场性 / 字节稳定 / 节名校验")
+
+    def sec_sys(kind_, gate=False):
+        n = filled(kind_, [])
+        n.gate = gate
+        return render_turn("leaf" if kind_ == "leaf" else "alloc", n
+                           )[0]["content"]
+
+    n_plain = sec_sys("leaf", False)
+    n_gate = sec_sys("leaf", True)
+    n_alloc = sec_sys("dispatch", True)
+    ok &= line("preamble 在最前无标签，节按固定顺序包同名标签",
+               not n_plain.startswith("<") and "<process>" in n_plain
+               and n_plain.index("<tools>") < n_plain.index("<rules>")
+               < n_plain.index("<input>"))
+    ok &= line("gate=False → 无 <skill_gate> 节", "<skill_gate>" not in n_plain)
+    ok &= line("gate=True → 有 <skill_gate> 节", "<skill_gate>" in n_gate
+               and "<skill_gate>" in n_alloc)
+    ok &= line("COMPRESS 默认开 → 叶子有 <skill_compression>、分配节点没有",
+               cfg.COMPRESS and "<skill_compression>" in n_plain
+               and "<skill_compression>" not in n_alloc)
+    n_leaf = filled("leaf", [])
+    ok &= line("同一节点两次组装字节一致",
+               render_system(build_system_sections("leaf", n_leaf))
+               == render_system(build_system_sections("leaf", n_leaf)))
+    try:
+        render_system({"preamble": "x", "bad name": "y"})
+        ok &= line("节名违反 [a-z][a-z0-9_-]* 当场报错", False)
+    except ValueError:
+        ok &= line("节名违反 [a-z][a-z0-9_-]* 当场报错", True)
+    # COMPRESS 关：config 在 import 时固化，用子进程验（TREE_COMPRESS=0）
+    script = (
+        "import os; os.environ['TREE_COMPRESS'] = '0'; "
+        "from tree.protocol.fields import Node; "
+        "from tree.prompts import build_system_sections, render_system; "
+        "n = Node(name='N', accept='A 2026-12-31', kind='leaf'); "
+        "s = render_system(build_system_sections('leaf', n)); "
+        "assert '<skill_gate>' not in s and '<skill_compression>' not in s, s; "
+        "n2 = Node(name='N', accept='A 2026-12-31', kind='leaf', gate=True); "
+        "s2 = render_system(build_system_sections('leaf', n2)); "
+        "assert '<skill_gate>' in s2 and '<skill_compression>' not in s2; "
+        "print('ok')")
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                       text=True, cwd=os.path.dirname(os.path.dirname(
+                           os.path.abspath(__file__))))
+    ok &= line("COMPRESS 关 → 叶子无 <skill_compression>，gate=True 有 <skill_gate>",
+               r.returncode == 0 and r.stdout.strip() == "ok",
+               r.stderr.strip()[-160:])
 
     print("=" * 80)
     print("全部通过" if ok else "有失败项")

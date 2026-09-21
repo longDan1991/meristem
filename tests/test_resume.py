@@ -181,7 +181,7 @@ async def main():
     tp2 = os.path.join(d2, "trace.jsonl")
     root = await _run_tree(
         [("create_children", {"children": [kid("子A")]}),
-         ("run_code", {"code": "print(1)"}),
+         ("bash", {"cmd": "echo hi"}),
          RuntimeError("模拟崩溃")], tp2)
     sess = load(tp2)
     t = sess["in_flight"]
@@ -196,7 +196,7 @@ async def main():
                       "root": t["root"]})
     line("没跑完的节点接着跑完了",
          t["root"].verdict == "满足" and t["root"].conclusion == "全部完成")
-    line("孩子没被重跑（观测只有一次 run_code）",
+    line("孩子没被重跑（观测只有一次 bash）",
          len(t["registry"][t["root"].children[0]].observations) == 1)
     sess2 = load(tp2)
     line("再次 load：全部完工，没有 in_flight",
@@ -232,7 +232,7 @@ async def main():
     tp4 = os.path.join(d4, "trace.jsonl")
     root = await _run_tree(
         [("create_children", {"children": [kid("子A")]}),
-         ("run_code", {"code": "print(1)"}),
+         ("bash", {"cmd": "echo hi"}),
          RuntimeError("模拟崩溃")], tp4)
     tr4 = Trace(tp4)
     tr4.add(None, "chat_user", {"text": "用户的任务: 根任务"})
@@ -312,7 +312,7 @@ async def main():
     r2 = Node(name="任务二", accept="2026-12-31 收盘 >= 2", kind="dispatch")
     try:
         await run(r2, ScriptLLM([("create_children", {"children": [kid("乙")]}),
-                                 ("run_code", {"code": "print(2)"}),
+                                 ("bash", {"cmd": "echo 2"}),
                                  RuntimeError("崩")]),
                   Trace(tp6))
     except RuntimeError:

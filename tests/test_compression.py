@@ -5,12 +5,14 @@
 
   A. 对话形态：叶子维护真对话 —— assistant(tool_call) 与 tool(观测) 配对，
      工具调用 id 在一条对话里不重复（重复的 call_0 会被 provider 拒 / 串）。
-  B. 压缩只发生在发送边界：存储（node.observations / trace 的 code 事件）是原文；
+  B. 压缩只发生在发送边界：存储（node.observations / trace 的 tool 事件）是原文；
      第 4 回合起，最早那条大工具输出在线上被压短；user（形式字段）一字未动；
      trace 里有 wire_compressed 统计。
   C. 可逆：日志折叠（LOG）在压缩文本里嵌 `Retrieve more: hash=...`，
      按 hash 调 retrieve_original 取回与原文完全一致的文本；FATAL 行幸存。
   D. TREE_COMPRESS=0（保险阀）：不挂取回工具、不产生 wire_compressed。
+  F. 命名分节：叶子 system 不含 bash/read/write 签名（它们住在各自工具的
+     schema description）、不含 <skill_gate> 节。
 
 headroom 的压缩是确定性的（无损折叠 / 日志折叠），所以这些断言不依赖网络。
 """
@@ -26,7 +28,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tree.llm import Message, ToolCall                                   # noqa: E402
 from tree.protocol.fields import Node                                    # noqa: E402
-from tree.prompts import PROMPT                                          # noqa: E402
+from tree.prompts import render_turn                                     # noqa: E402
+from tree.prompts.messages import base_user                              # noqa: E402
 from tree.runtime import scheduler as R                                  # noqa: E402
 from tree.runtime.trace import Trace                                     # noqa: E402
 from tree.compression import retrieve_original                           # noqa: E402
@@ -39,15 +42,36 @@ def line(tag, cond, detail=""):
     OK.append(bool(cond))
 
 
+# 三条大输出的制造方式：直接给 bash 一条生成大输出的命令（直接工具模型，
+# 不再有"一段代码"这个中间载体）。引号小心：外层是 Python 字符串，
+# shell 双引号里再包 python -c 的单引号 dict 键。
+def big_json_cmd():
+    return ('python3 -c "import json; print(json.dumps('
+            "[{'date': '2026-12-31', 'close': i, 'vol': i * 2} "
+            "for i in range(300)], ensure_ascii=False))\"")
+
+
+def big_log_cmd():
+    return ('python3 -c "print(\'\\n\'.join('
+            "\'[INFO] worker %d polling...\' % (i % 4) for i in range(200)) "
+            '+ \'\\n[FATAL] out of memory\')"')
+
+
+def big_unique_cmd():
+    return ('python3 -c "print(\'\\n\'.join('
+            "'第 %d 行：这条是唯一的正文，不重复，压不动 %s' % (i, 'x' * 40) "
+            "for i in range(2000)))\"")
+
+
 class ScriptLeaf:
-    """按脚本回话的叶子：依次跑代码（每段都真跑），跑完出结论。
+    """按脚本回话的叶子：依次调工具（每个都真跑），跑完出结论。
 
     把每次收到的 messages 原样记下来 —— 测试断言的是**线上形态**
     （压缩发生在发送边界，这里看到的就是模型真收到的）。
     """
 
-    def __init__(self, codes):
-        self.codes = list(codes)
+    def __init__(self, calls):
+        self.calls = list(calls)
         self.seen = []
         self.last_usage = {}
 
@@ -55,21 +79,20 @@ class ScriptLeaf:
                    on_reasoning=None, tools=None):
         self.last_usage = {"total_tokens": 0}
         self.seen.append([dict(m) for m in messages])
-        if self.codes:
-            code = self.codes.pop(0)
-            return Message(tool_calls=[ToolCall(name="run_code",
-                                                arguments={"code": code})])
+        if self.calls:
+            name, args = self.calls.pop(0)
+            return Message(tool_calls=[ToolCall(name=name, arguments=args)])
         return Message(tool_calls=[ToolCall(
             name="conclude", arguments={"verdict": "满足", "text": "脚本收尾",
                                         "evidence": ["第1次观测"]})])
 
 
-def go(codes):
+def go(calls):
     """跑一棵只有叶子的树。返回 (节点, 记录的线上消息, trace 记录)。"""
     d = tempfile.mkdtemp()
     trace = Trace(os.path.join(d, "t.jsonl"))
     node = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
-    llm = ScriptLeaf(codes)
+    llm = ScriptLeaf(calls)
     cwd = os.getcwd()
     os.chdir(d)
     try:
@@ -81,16 +104,13 @@ def go(codes):
 
 
 def main():
-    big_json = ("import json; print(json.dumps("
-                "[{'date': '2026-12-31', 'close': i, 'vol': i * 2} "
-                "for i in range(300)], ensure_ascii=False))")
-    big_log = ("print('\\n'.join('[INFO] worker %d polling...' % (i % 4) "
-               "for i in range(200)) + '\\n[FATAL] out of memory')")
+    small2 = ("bash", {"cmd": "echo 小输出2"})
+    small3 = ("bash", {"cmd": "echo 小输出3"})
 
     print("=" * 80)
     print("A. 对话形态：assistant 与 tool 配对，id 不重复")
-    node, llm, recs = go([big_json, "print('小输出2')", "print('小输出3')"])
-    wire3 = llm.seen[2]                       # 第三回合：3 段代码已跑
+    node, llm, recs = go([("bash", {"cmd": big_json_cmd()}), small2, small3])
+    wire3 = llm.seen[2]                       # 第三回合：3 个工具已跑
     roles = [m["role"] for m in wire3]
     asst = [m for m in wire3 if m["role"] == "assistant" and m.get("tool_calls")]
     tools = [m for m in wire3 if m["role"] == "tool"]
@@ -109,11 +129,11 @@ def main():
     print("=" * 80)
     print("B. 压缩只发生在发送边界：存储原文、线上压短、user 一字未动")
     raw = next(r["payload"]["obs"] for r in recs
-               if r["kind"] == "code" and "close" in str(r["payload"]["obs"]))
+               if r["kind"] == "tool" and "close" in str(r["payload"]["obs"]))
     line("存储（observations）是原文", node.observations[0]["obs"] == raw,
          "%d 字" % len(raw))
-    line("trace 的 code 事件是原文",
-         any(r["kind"] == "code" and r["payload"]["obs"] == raw for r in recs))
+    line("trace 的 tool 事件是原文",
+         any(r["kind"] == "tool" and r["payload"]["obs"] == raw for r in recs))
     wire4 = llm.seen[3]                       # 第四回合：最早那条大输出可压了
     tool0 = next(m for m in wire4
                  if m.get("role") == "tool" and m.get("tool_call_id") == "call_0")
@@ -121,9 +141,10 @@ def main():
          len(tool0["content"]) < len(raw),
          "%d -> %d 字" % (len(raw), len(tool0["content"])))
     line("user（形式字段）一字未动",
-         wire4[1]["content"] == node.render_wire())
+         wire4[1]["content"] == base_user(node))
+    leaf_sys = render_turn("leaf", node)[0]["content"]
     line("system（协议）一字未动",
-         wire4[0]["content"] == PROMPT["leaf"])
+         wire4[0]["content"] == leaf_sys)
     wc = [r for r in recs if r["kind"] == "wire_compressed"]
     line("trace 留下 wire_compressed 统计", bool(wc) and wc[0]["payload"]["saved"] > 0,
          wc[0]["payload"] if wc else "")
@@ -133,9 +154,9 @@ def main():
 
     print("=" * 80)
     print("C. 可逆：日志折叠嵌取回标记，按 hash 取回原文，FATAL 幸存")
-    node2, llm2, recs2 = go([big_log, "print('小输出2')", "print('小输出3')"])
+    node2, llm2, recs2 = go([("bash", {"cmd": big_log_cmd()}), small2, small3])
     raw2 = next(r["payload"]["obs"] for r in recs2
-                if r["kind"] == "code" and "FATAL" in str(r["payload"]["obs"]))
+                if r["kind"] == "tool" and "FATAL" in str(r["payload"]["obs"]))
     wire4b = llm2.seen[3]
     tool0b = next(m for m in wire4b
                   if m.get("role") == "tool" and m.get("tool_call_id") == "call_0")
@@ -172,18 +193,28 @@ def main():
 
     print("=" * 80)
     print("E. 不截断：压不动的大内容也完整到达模型（不丢数据）")
-    big_unique = ("\n".join("第 %d 行：这条是唯一的正文，不重复，压不动 %s"
-                              % (i, "x" * 40) for i in range(2000)))
-    node3, llm3, recs3 = go(["print('''%s''')" % big_unique,
-                             "print('小输出2')", "print('小输出3')"])
+    node3, llm3, recs3 = go([("bash", {"cmd": big_unique_cmd()}),
+                             small2, small3])
     raw3 = next(r["payload"]["obs"] for r in recs3
-                if r["kind"] == "code" and "压不动" in str(r["payload"]["obs"]))
+                if r["kind"] == "tool" and "压不动" in str(r["payload"]["obs"]))
     wire3b = llm3.seen[1]                        # 第二回合：这条刚进对话
     t = next(m for m in wire3b if m.get("role") == "tool"
              and m.get("tool_call_id") == "call_0")
     line("压不动的大输出完整到达（无截断标记）",
          len(t["content"]) == len(raw3) and "截断" not in t["content"],
          "%d 字全量" % len(t["content"]))
+
+    print("=" * 80)
+    print("F. 命名分节：system 不含三只手的签名、不含 <skill_gate> 节")
+    node4 = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
+    sys4 = render_turn("leaf", node4)[0]["content"]
+    line("叶子 system 不含 bash/read/write 签名（它们住在各自的 schema）",
+         "bash(cmd=" not in sys4 and "read(path=" not in sys4
+         and "write(path=" not in sys4 and "timeout=" not in sys4)
+    line("叶子 system 不含 <skill_gate> 节（gate=False）",
+         "<skill_gate>" not in sys4)
+    line("叶子 system 有 <skill_compression> 节（COMPRESS 开）",
+         "<skill_compression>" in sys4)
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

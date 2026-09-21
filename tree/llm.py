@@ -97,7 +97,7 @@ class LLM:
         （入口那一路：话要流式吐字、形式要结构化收）。
 
         重试（litellm 的 num_retries）：**没吐字之前的网络错误可以重来**；
-        已经开始吐字就不重试 —— 重试会把同一段话说两遍（§2.5 实测教训）。
+        已经开始吐字就不重试 —— 重试会把同一段话说两遍（实测教训）。
         """
         streaming = on_delta is not None or on_reasoning is not None
         resp = await litellm.acompletion(

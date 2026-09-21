@@ -39,10 +39,6 @@ def _required(name):
 
 # 工作区：持久工作目录。同一个任务族共用它，上次写的代码和数据就还在。
 WORKSPACE = _abs(_required("TREE_WORKSPACE"))
-# 代码沙箱落临时脚本和观测日志的地方：工作区里的隐藏目录，
-# 不往模型的 cwd 里扔垃圾，也不会被工作区 diff 记成它的产出。
-SNIPPET_DIR = _abs(os.environ.get("TREE_SNIPPET_DIR")
-                   or os.path.join(WORKSPACE, ".tree"))
 # 历史会话的堆放地：`-r` 从这里列老会话。执行树就是成果树。
 INDEX_GLOB = os.environ.get("TREE_INDEX") or os.path.join(
     WORKSPACE, "runs", "*", "trace.jsonl")

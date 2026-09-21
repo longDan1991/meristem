@@ -1,19 +1,21 @@
 """协议的工具定义：节点与模型之间唯一的通道。
 
-三个工具，两种角色（本地/远端同构：都定义在同一个 FastMCP 实例上，
+工具按节点类型分（本地/远端同构：都定义在同一个 FastMCP 实例上，
 将来要连外部 MCP server，client 拿到的工具进同一个注册表）：
 
-  · create_children —— 分配节点再拆一层（它唯一的动作）
-  · run_code        —— 叶子写一段代码（它唯一的动作）
-  · conclude        —— 出结论（两个节点共用）
+  · alloc    create_children（再拆一层）/ conclude（出结论）
+  · leaf     bash / read / write（三只手，叶子的直接工具）/ conclude
+  · intake   submit_root（入口交形式）
 
+`NODE_TOOLS` 是**每个节点类型的工具清单，单一事实**：prompts 的 tools/rules
+节从它推导（docs/PROMPTS.md §4.2）、turn 的回合校验和 openai_tools 也拿它。
 模型每次回复必须调用且只能调用其中一个；没调用 = 协议违规（balk）。
 参数形状由 pydantic schema 强制；**语义校验仍走 gate**（clean_spec /
 clean_conclusion）—— schema 只保证形状，拒绝信息保持 gate 的中文原文。
 
-字段的"本质"说明（≤20 字是归属…）从 `prompts/alloc.md` 迁到了这里每个
-property 的 description：provider 会把它们原样喂给模型，所以它们就是
-提示词的一部分，只是按字段挂载。改字段含义要看 gate.py（同源）。
+字段/工具的"本质"说明住各自的 schema description：provider 会把它们原样
+喂给模型，所以它们就是提示词的一部分，只是按工具/字段挂载（W2 去重：
+提示词节文件不再重复工具描述）。改字段含义要看 gate.py（同源）。
 
 实现（工具函数体）在 `runtime/turn.py` —— 那里才是"回合怎么走"的逻辑；
 本文件只管格子形状与 schema。`openai_tools()` 把 FastMCP 工具转成
@@ -30,6 +32,15 @@ from ..compression import RETRIEVE_TOOL
 # 工具都在同一个实例上注册。它只在进程内当"工具定义表"用，
 # 不跑 server、不建 client —— 传输层等 MCP 需求来了再激活。
 mcp = FastMCP("tree")
+
+# 每个节点类型的工具清单 —— 单一事实（docs/PROMPTS.md §4.2）：
+# prompts 的 tools/rules 节、turn 的回合校验、openai_tools 都从这里拿。
+# headroom_retrieve 不在表里：它只在 COMPRESS 开时由 openai_tools 追加。
+NODE_TOOLS = {
+    "alloc": ("create_children", "conclude"),
+    "leaf": ("bash", "read", "write", "conclude"),
+    "intake": ("submit_root",),
+}
 
 
 class ChildSpec(BaseModel):
@@ -133,13 +144,11 @@ async def openai_tools():
     """
     global _openai_cache
     if _openai_cache is None:
-        leaf_tools = [await _openai_spec("run_code"),
-                      await _openai_spec("conclude")]
+        leaf_tools = [await _openai_spec(n) for n in NODE_TOOLS["leaf"]]
         if cfg.COMPRESS:
             leaf_tools.append(RETRIEVE_TOOL)
         _openai_cache = {
-            "alloc": [await _openai_spec("create_children"),
-                      await _openai_spec("conclude")],
+            "alloc": [await _openai_spec(n) for n in NODE_TOOLS["alloc"]],
             "leaf": leaf_tools,
         }
     return _openai_cache

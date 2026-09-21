@@ -3,7 +3,7 @@
 写于 2026-09-17。交接对象：接着做这个项目的人（或下一个会话的我）。
 
 **这份只讲进度与交接**：怎么跑、东西在哪、做到哪一步、还剩什么、踩过哪些坑。
-**设计上的本质与不变量在 `DESIGN.md`** —— 这里不重复它们。
+**设计上的本质与不变量在 `docs/PROMPTS.md`**（原 `docs/DESIGN.md` 已删，内容并入其中）—— 这里不重复它们。
 
 > **2026-09 删除：keywords 检索层整体移除。** 老树索引（先例）、能力库/盒子
 > （现成做法、`search_tools`、出生即注入）全部删掉，`keywords` 字段不再存在；
@@ -11,6 +11,23 @@
 > 检索相关段落）。对应模块 `tree/memory/`、`tree/runtime/box.py` 与测试
 > `test_caps.py` / `test_index.py` / `test_box.py` 已删除；`session_label`
 > 迁到 `tree/runtime/session.py`，`iter_trace_lines` 迁到 `tree/runtime/trace.py`。
+
+> **后续：`docs/PROMPTS.md` 已实现（系统提示词 = 命名分节结构，pi 范式）。**
+> 三套整块散文（`alloc.md` / `leaf.md` / `intake.md`）连同所有 .md 提示词文件全部删掉，
+> 节内容**直接写在代码里**（`tree/prompts/` 包：`prose.py` 散文节 / `skills.py` 条件节 /
+> `tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导，每节一个函数，`lines` + append +
+> join，对齐 pi 的 `system-prompt.ts`）。
+> **system 不走 @mcp.prompt**：`tree/prompts/__init__.py` 的 `render_turn` 直接返回
+> `[system, 基础 user]` 分开两条；**class Node 不碰字符串**，消息拼接全部在
+> `tree/prompts/messages.py`（header / lineage / attempts / observations /
+> base_user / full_view / child_result）。
+> **每个节点（分配节点和叶子一样）都是完整 Loop**：统一维护 st["msgs"] 平铺对话
+> （基础 user 字节稳定 + 累积的 assistant/tool/user），分配节点的每次分配（create_children
+> 的 tool 回话）和下层结论（调度器注入）都在对话里，不再单发 render 整个历史。
+> 叶子从 `run_code`（一段代码）改成**直接工具**（`bash` / `read` / `write` / `conclude`），
+> 工具语义唯一来源 = schema description；`tree/runtime/sandbox.py`、
+> `effects.snapshot_workspace/classify_paths`、`config.SNIPPET_DIR` 随之删除。
+> 工具清单的单一事实是 `tool_specs.NODE_TOOLS`。
 
 ---
 
@@ -43,7 +60,7 @@
 一次性迁移成新格式** —— 运行时只认一种格式，没有任何兼容层；旧格式只在这个
 迁移脚本里出现一次，没跑完的节点迁移后带着字段重新跑。
 
-测试：**265 个断言，全离线，不调模型**（见 §6）。
+测试：**7 个测试文件、200+ 断言，全离线，不调模型**（见 §6）。
 
 ---
 
@@ -79,7 +96,6 @@ export TREE_BASE_URL='...'                     # 模型
 export TREE_API_KEY='...'
 export TREE_MODEL='deepseek-v4-flash'
 export TREE_WORKSPACE='/Users/wxlong/output/humanoid'   # ← 工作区
-export TREE_CAPS='/Users/wxlong/output/humanoid/caps.jsonl'
 export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 ```
 
@@ -100,34 +116,34 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 161 | 入口/CLI。默认就是 intake；`-r` 恢复老会话。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
+| `main.py` | 152 | 入口/CLI。默认就是 intake；`-r` 恢复老会话。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
 | `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
-| `prompts/` | | **三套提示词**（`alloc.md` / `leaf.md` / `intake.md`）。流程与长规则；字段"本质"在 `tool_specs.py` |
-| `tree/prompts.py` | 37 | 把 `prompts/*.md` 读进来 |
-| `tree/intake.py` | 150 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈 |
-| `tree/config.py` | 65 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
-| `tree/llm.py` | 200 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
-| `tree/tools.py` | 148 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
-| `tree/effects.py` | 309 | effects 抽取 + 契约核对 / `.meta.json` 落盘 + **工作区快照与 diff**（产出认定） |
-| `tree/protocol/fields.py` | 256 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
-| `tree/protocol/gate.py` | 231 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
-| `tree/protocol/tool_specs.py` | 130 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）。三个工具：`create_children` / `run_code` / `conclude` |
-| `tree/runtime/trace.py` | 61 | trace 落盘（写线程 + 队列，无锁） |
+| `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
+| `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
+| `tree/prompts/messages.py` | 150 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `attempts` / `observations` / `base_user`（线上字节稳定基础消息）/ `full_view`（trace 快照）/ `child_result`（下层结论注入） |
+| `tree/intake.py` | 256 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈 |
+| `tree/config.py` | 53 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
+| `tree/compression.py` | 81 | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |
+| `tree/llm.py` | 172 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
+| `tree/tools.py` | 132 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
+| `tree/effects.py` | 318 | effects 抽取 + 契约核对 / `.meta.json` 落盘 + **工作区快照与 diff**（产出认定） |
+| `tree/protocol/fields.py` | 324 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
+| `tree/protocol/gate.py` | 213 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
+| `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
+| `tree/runtime/trace.py` | 78 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
-| `tree/runtime/turn.py` | 369 | 一个节点的一回合：问模型（带工具）→ 工具函数做动作 / 出结论。三个工具的实现在这里（ContextVar 注入每节点 ctx） |
-| `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调、**节点开/关事件回调（`on_event`）与节点级吐字回调（`on_delta/on_reasoning`，给终端实时画树）** |
-| `tree/runtime/sandbox.py` | 367 | **executor**：一段代码在 CPython 子进程里跑，工具走 JSON 行协议回调宿主（真异步） |
-| `docs/DESIGN.md` | | **设计文档：本质与不变量**（改代码前先看） |
+| `tree/runtime/turn.py` | 480 | 一个节点的一回合：问模型（带工具）→ 工具函数做动作 / 出结论。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点 ctx）；产出的记账由工具自己报（write 写谁 / bash 命令里声明会写的目标） |
+| `tree/runtime/scheduler.py` | 237 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调、**节点开/关事件回调（`on_event`）与节点级吐字回调（`on_delta/on_reasoning`，给终端实时画树）** |
+| `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
 **并发模型（P4 后）**：整个运行时是 asyncio —— 一个节点的一回合 = 一个
 `asyncio.Task`（`scheduler` 用 `wait(FIRST_COMPLETED)` 回收，`workers` 是同时在飞的任务数）；
-LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都不占线程。
+LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程。
 `hands` 用**单消费者队列**串行 bash/write（AGENTS §9，无锁）。
 **仅有的两个线程是 `trace` 和 `budget`**：它们是单一 I/O 记账者（写 jsonl / 计数），
-不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着，
-写的是 `docs/DESIGN.md` §4.0 和本行。
+不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着。
 
 ### 2.2 真实数据资产（在工作区里）
 
@@ -147,111 +163,21 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 ---
 
-## 3. 已经做完的（留档，别重复做）
+## 3. 已实现的功能点（不再留详细历史）
 
-- **✅ 节点与模型的通道 = 工具调用**（`tree/protocol/tool_specs.py` +
-  `tree/runtime/turn.py`）：分配节点唯一动作 `create_children`、叶子唯一动作
-  `run_code`、两节点共用 `conclude`（出结论）。每次回复必须且只能调一个；
-  没调 / 调多个 / 调不在本层列表里的 → `balk`。
-  **schema 由 pydantic 生成、经 FastMCP 注册**（`@mcp.tool`，本地/远端同构：
-  将来连外部 MCP server 的 client，工具进同一个注册表）；参数形状由 schema 强制，
-  **语义校验仍走 gate**（`clean_spec` / `clean_conclusion`），拒绝信息保持中文原文。
-  字段的"本质"说明从 `prompts/*.md` 迁到了 schema 的 description（provider 原样
-  喂给模型）；md 只剩流程与长规则。
-  **并发接线**：每节点 ctx 通过 ContextVar 注入（`Depends(get_step_binding)`，
-  step 开头 `set`）—— 每个 asyncio task 的 context 独立，并发节点互不串。
-  `LLM.chat` 返回 `Message`（文本 + tool_calls），`tools=` 给 litellm、
-  `tool_choice="auto"`；**流式 + tools 也支持**（入口：话流式吐字、形式结构化收）。
-  MockLLM / 测试脚本全改成发工具调用；trace 的 `*_out` 现在记录 text + tool_calls。
-- **✅ 入口也走同一个通道**（`tree/intake.py` 的 `submit_root`）：模型要么说话
-  （content，流式），要么调 `submit_root(root=ChildSpec)` 交形式 —— 和节点层
-  “调工具 = 动作、回文本 = 说话”同构，root 的格子就是 `ChildSpec`（和分配节点
-  写回孩子的是同一套）。旧 `_Spoken`/`root_in`（从文本里猜 JSON 是话还是形式）
-  整个删除 —— 通道由工具 API 原生给出。交形式的打回/结论都作为**工具结果**回填。
-- **✅ 入口**（`prompts/intake.md` + `tree/intake.py`）：**这个程序唯一的顶层**，
-  不退场。谈成一个能过闸门的 `root`，就**当场 `run()` 它**（`tree/intake.py`
-  直接 import `tree.run`），把结论作为一条外部观测回填给对话，再接着调模型 ——
-  **谈和跑交替，直到人在终端上中止**。所以没有"最终根 / 附加任务"之分：
-  **每个 `root` 都是任务**（用户定的，提示词里叫“附加任务”的也是这个）。
-  **手在树上，不在入口**：入口自己没有 `bash`/`read`/`write`；要动手就必须
-  先交出一个能过校验的形式。
-  **代码只认识出口**：产物过 `validate_root`（= `_clean_spec` +
-  "accept 必须有可测物理量"），缺字段、没有可测物理量都当场打回**并把原因说给它**，
-  让它自己改。**对话的形式不归代码管**：一次问几件事、带不带建议、问几轮，
-  都是模型的事 —— 代码不认识"回合数"，也不数"同一个问题问了几次"。
-  **模型要么说话（纯文本），要么调 `submit_root` 交形式** —— 和节点层同一个分流
-  （调工具 = 动作，回文本 = 说话），root 的格子就是 `ChildSpec`。所以没有
-  “从文本里猜 JSON 是话还是形式”的识别规则（旧 `_Spoken`/`root_in` 删了）；
-  交形式不过 `norm()`，说话也不改它的分行。
-  **用户不会给你验收标准**：那是入口的使命，不是用户的任务。
-- **✅ 终端会话**（`terminal/`）：`python3 main.py` 默认就是和入口在 tty 上聊。问题与建议显示在提示符前，打回理由 / “接到任务 /
-  跑完了”走旁白，**任务跑的时候终端把当前整棵树实时画出来**（每开/关一个
-  节点重画一次：真终端用 rich Live 原地重画，非终端逐帧追加；跑完那帧就是
-  完整结果，树的视图在 `tree/protocol/fields.py`）。**实时视图每节点一行铺开**
-  （`render_tree(compact=True)`）：`· [叶子] 子任务B  ▸ 思考: …`，整棵树按结构
-  铺开，所有节点正在吐的字都占一行看得见，谁也不被折掉（屏幕放不下只折没在
-  跑的段落）；根出结论那帧切回详细视图。**每个节点问模型时的吐字（思考 / 话）
-  也画进树**：按 node_id 送进 Live 帧，画在它自己的节点行上
-  （`run` 的 `on_delta / on_reasoning` → `turn.ask` 按节点包一层），最底一行
-  永远是输入行。**跑任务时输入不冻结**：
-  树的 Live 接管屏幕的同时，终端开一条不渲染的 prompt_toolkit 会话读键盘
-  （DummyOutput：一个屏幕只有一个画家，rich 和 prompt_toolkit 各画一遍会把
-  光标位置搞乱，实测），敲下的行进队列、入口下次提问按顺序交给它，运行中
-  Ctrl-D / Ctrl-C 就是中止整个会话。**读交给 `prompt_toolkit`**
-  （`terminal/chat.py` 的 `PromptSession` + `prompt_async`）：回车发送、方向键改已经
-  敲的字、上下键翻历史、粘贴多行当一条、要分几行写按 Alt-Enter；
-  Ctrl-D / Ctrl-C 中止时返回 `None`，不抛 traceback。这一段不再自己拿 `input()` 拼
-  —— 那是把成本转给用户：敲完的行改不了、没历史、粘多行被拆成好几次读。
-  **没在命令行交底（裸 `main.py`）→ 先在终端上让你把开场白说完，再让入口开口**：
-  否则种子是空的，那一次模型调用只够换来一句"你要做什么？"（实测）——
-  看起来就像程序没等你说话就自作主张。
-  **模型的吐字是真流式**（`LLM.chat(on_delta=…)` 读 SSE，一个字一个字写屏），
-  但只吐「话」那一路：交形式是工具调用（`submit_root`），走另一条通道，
-  不往用户眼前甩 JSON；`ask` 因此只负责读，不再重复显示（话已经在吐字时上屏了）。
-  **思考（`reasoning_content`）整段按流式画成灰的**（`on_reasoning` 通道）：
-  推理模型先想后说，不想的话屏幕会十几秒一个字没有，看着像卡死（实测）。
-  边界：`main.py` 不再自己 `input()`，`tree/intake.py` 不知道自己是 tty 还是脚本 ——
-  由 `tests/test_tty.py` F 段守门。
-- **✅ bash 永远带超时且可见**（`tree/tools.py`）：默认 120 秒 / 上限 3600 秒，
-  可写 `args.timeout`；超时明说"这是超时不是出错"、把**已产生的输出**交回去、
-  告诉它怎么跑更久，并且 `killpg` 连子进程一起杀（不留孤儿）。
-  顺手修了一个真 bug：`read` 的返回里写着"`read(offset=2000)` 取下一段"，
-  但 `offset`/`limit` 从来没传下去 —— 模型照做了也拿不到下一段。
-  现在 `offset`/`limit`/`timeout` 都透传。
-- **✅ 形式化协议换成英文键**（`node.py` / `run.py` / `prompts/`）。
-  老 trace 的中文键照样能读（`index.py` 做了兼容），
-  否则 `night_quant` 那棵树就变成死数据了。
-- **✅ `keywords` 出生即检索 —— 已于 2026-09 整个删除**：老树索引 + 能力库
-  （`先例` / `need` / `search_tools` / 现成做法注入）全部移除，`keywords`
-  字段不再存在。分配节点 / 叶子节点的分工保留。
-- **✅ `conc_range` + 必填项**：缺一项当场拒（含 `kind`：写错不再默默当 dispatch）；
-  区间是建议不是配额，但上层给的具体区间会真渲染进下层的提示词（`Node.header`）。
-- **✅ 收到的键 == 要写的键**（同构，`Node.header`）：user 消息的行首就是
-  `name/detail/notes/accept/kind/gate/keywords/conc_range` 这 8 个键，值也是
-  JSON 形状（数组就是数组）；本层历史里的子任务同样按这套键列。
-  中文只留给**给人看**的那一层（树状图、判定/结论、段落标题）。
-  `gate: true` 现在会送到节点面前：它知道自己不成立则整个分支作废。
-- **✅ 上层意图链**：每个节点出生时物化 [[name, detail], …]（根→上层），
-  两种节点都渲染 —— 拆到第三层也还知道"这件事为什么值得做"（`render_lineage`）。
-- **✅ 阻塞枝带回可复核的东西**：`TreeIndex.render` 给阻塞枝补
-  `外部需求` + `证据` + `卡在哪（最近 3 次动作 → 当时观测）` + `卡住时间`；
-  老格式的 `leaf_tool` 也算观测。索引 `night_quant`（2443 节点）0.25s，检索 0.15s。
-- **✅ 自动选工作目录**（见 §1 最后一条）。
-- **✅ 重试路径全部计数**：修了两次死循环，动作重数收口在 `_step`、
-  "用不了的东西"收口在 `_balk`（细节见 §5 第 16 条）。
-- **✅ 删掉了长度检查**：`LIMITS` 里那些字段上限没了，代码既不校也不切也不记账；
-  只留下 `VIEW`（一次给模型看多少历史）—— 那是必须截断的地方。
-- **✅ 文档拆分**：`docs/DESIGN.md` 只讲设计，`docs/HANDOVER.md`（本文）只讲进度。
+**全部已实现**，实现见 §2.1 代码地图，设计与不变量见 `docs/PROMPTS.md`，
+行为由 §6 测试守住：通道=工具调用、入口同构、终端会话、bash 超时、
+7 键同构、意图链、阻塞枝、无长度检查等。详细历史记录已清理 ——
+需要细节看代码与测试，不在此留档。
 
 ---
 
 ## 4. 明确不做的（别再讨论）
 
-- **negative caps / deadend 层** —— 已随检索层整体删除（`DESIGN.md` §2.7 的
-  理由仍有效，但落点 `TreeIndex` / `caps.py` 已不存在）。
-- **引导 LLM（常驻的第二个 agent）** —— 理由见 `DESIGN.md` §2.8。
-  入口是唯一的顶层循环，但它不是第二个 agent：手在树上（`run`），
-  它自己只会谈和交形式。
+- **negative caps / deadend 层** —— 已随检索层整体删除（删它的理由仍有效，
+  但落点 `TreeIndex` / `caps.py` 已不存在）。
+- **引导 LLM（常驻的第二个 agent）** —— 入口是唯一的顶层循环，它不是
+  第二个 agent：手在树上（`run`），它自己只会谈和交形式。
 
 ---
 
@@ -259,7 +185,7 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 ### ① 控制面（人的接口）—— 设计已定，代码一行没有
 
-设计在 `DESIGN.md` §2.8。要做的是：**人直接指着某一层说话**，
+要做的是：**人直接指着某一层说话**，
 五个动作全部翻译成既有形式字段，全部带 `来源: 人工`：
 
 | 人的动作 | 落到哪 |
@@ -285,13 +211,13 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 ### ② 分配节点的无进展检测
 
-叶子有了（`_step` 里的 `_bump`）。分配节点"**重复同一套拆法**"还没人抓：
-`_balk` 只抓"同一份**被拒**的理由"，而一套被接受、但毫无进展的重复拆法它抓不到。
+叶子有了（`turn.py` 里的 `bump`）。分配节点"**重复同一套拆法**"还没人抓：
+`balk` 只抓"同一份**被拒**的理由"，而一套被接受、但毫无进展的重复拆法它抓不到。
 
-- **落点**：`run.py` `_step` 的子任务分支，对整组 `children` 算一个指纹，走同一个 `_bump`。
+- **落点**：`turn.py` `step` 的子任务分支，对整组 `children` 算一个指纹，走同一个 `bump`。
 - **先做粗的**：完全相同的 `name` 集合才算重复。想去抓"换了措辞的同一套拆法"，
   就得引入词法相似度 —— 那是新的噪音源，不急。
-- 注意：停下时必须把原因写清楚（`DESIGN.md` §2.4 的纪律适用于这里）。
+- 注意：停下时必须把原因写清楚（和叶子的无进展停下同一个纪律）。
 
 ### ③ `prompt/次 恒定` 的长跑验证（欠着的）
 
@@ -299,8 +225,8 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
   树形按设计应该恒定，但**没有长样本证明**。
 - **怎么测**：真跑一个 30 分钟以上的任务，从 trace 的 `alloc_in` / `leaf_in`
   payload 里量每次 prompt 的长度，看它随深度/节点数怎么变。
-- ⚠️ **唯一可能让它涨的地方**：先例/能力注入现在随命中数增长
-  （实测一次检索命中 7–23 条、1.4K–4.4K 字）。这个必须实测。
+- ⚠️ **唯一可能让它涨的地方**：若将来重新引入按命中注入需重测
+  （2026-09 检索层已删，当前没有按命中增长的东西）。
 
 ### ④ 入口在真模型上跑一次
 
@@ -322,11 +248,13 @@ LLM 走 `litellm.acompletion`、bash/代码沙箱走 `asyncio` 子进程，都�
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
-| `tests/test_protocol.py` | 54 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、**老树只给分配节点查**、无进展停下、分配节点没有 execute、**收到的行首 == 要写的 8 个键**、**文档点名的段落 == 真渲染的段落**、**意图链两种节点都有** |
-| `tests/test_tools.py` | 19 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
-| `tests/test_intake.py` | 28 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
-| `tests/test_cli.py` | 11 | `main.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
-| `tests/test_tty.py` | 52 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
+| `tests/test_protocol.py` | 60 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、无进展停下、分配节点没有 execute、**收到的行首 == 要写的 7 个键**、**文档点名的节 == 真渲染的节（节名集合双向核对）**、**意图链两种节点都有**、**命名分节：节在场性（gate/COMPRESS 条件节）/ 字节稳定 / 节名校验**、**提示词注册成 FastMCP prompt：可枚举 / 缺必填被校验挡住 / wire=[system,user]** |
+| `tests/test_tools.py` | 20 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
+| `tests/test_intake.py` | 24 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
+| `tests/test_cli.py` | 12 | `main.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
+| `tests/test_tty.py` | 53 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
+| `tests/test_compression.py` | 19 | 平铺对话（分配节点和叶子同构）：asst/tool 配对、压缩只发生在发送边界（存储原文、线上压短、user 一字未动）、LOG 折叠嵌取回标记且按 hash 可逆、`TREE_COMPRESS=0` 保险阀、压不动的大输出完整到达 |
+| `tests/test_resume.py` | 44 | 会话续跑：trace 恢复重建、in_flight 树接着跑、结论回填、迁移的旧会话（老格式无 state 检查点） |
 
 ```bash
 for t in protocol tools intake compression resume cli tty; do python3 tests/test_$t.py; done
@@ -352,13 +280,13 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
 3. **"取回的路"必须真的通。** `read` 返回里写了"`read(offset=2000)` 取下一段"，
    但 `offset` 从来没传下去 —— 模型照做了也拿不到下一段，只能反复重读。
    当时靠白名单透传来修（`path/content/cmd/timeout/offset/limit`）；
-   现在工具是子进程里的函数、参数按名字发给宿主（`sandbox._dispatch`），
+   现在工具按名字接到宿主（`hands.run` + 工具 schema），
    少一个参数就是子进程里当场一个 `TypeError` —— 这一类漏传在结构上不可能再发生。
 
 4. **任何"退回去重来"的路径都必须计数，否则就是死循环。** 实测撞了两次：
    看不懂的输出（同一回合不停）、总缺 `accept` 的子任务（一直分配 → 一直被拒）。
    这两种情况都**没有动作**，所以"重复动作"那个信号永远不触发。
-   现在收口在两处（`_step` / `_balk`），各只有一条出路。
+   现在收口在两处（`step` / `balk`），各只有一条出路。
    同类坑：**工具报错曾经是提前 `return`**，于是同一个报错无限重试 ——
    现在工具报错也当成一条普通观测继续走到底。
 
@@ -396,11 +324,12 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
 17. **别用"复活"这个词。** 树没有挂起状态；"接着跑"实际只能是"新建一个节点，
     把老节点的观测历史搬过来当起点"。老树能复用的是**证据**，不是进度。
 
-18. **提示词和代码检查是一对，改一边就要看另一边。** 提示词在 `prompts/*.md`，
-    硬性要求在 `tree/protocol/gate.py`（必填项 / 锚点 / 门槛 / 证据降级）和 `tree/protocol/fields.py`
-    （`VIEW` / `EXTERNAL_CLASSES`）。`tree/prompts.py` 的文件头列了对照表。
+18. **提示词和代码检查是一对，改一边就要看另一边。** 提示词在 `tree/prompts/`（节内容
+    直接写在代码里，改提示词要碰 `prose.py` / `rules.py`），硬性要求在 `tree/protocol/gate.py`
+    （必填项 / 锚点 / 门槛 / 证据降级）和 `tree/protocol/fields.py`
+    （`EXTERNAL_CLASSES`）。`tree/prompts/__init__.py` 的文件头列了对照表。
 
-19. **文档要分离。** `docs/DESIGN.md` 只写设计与不变量（不讲进度），
+19. **文档要分离。** 设计文档（`docs/PROMPTS.md`）只写设计与不变量（不讲进度），
     `docs/HANDOVER.md`（本文）只写进度与交接（不讲设计）。混在一起两边都读不下去。
 
 20. **先例的"工作目录"是个陷阱（实测，一次真实跑）。** 渲染里写
@@ -420,7 +349,7 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
     `cd` 之后按 `cd` 到的目录解析；`cd` 目录不存在要单独报出来。
 
 22. **证据复核不能只看最后一轮。** `_evidence_ok` 只取 `attempts[-1].results`，
-    而最后一轮常常是**被拒的一次分配**（`_balk` 写的 attempt 里根本没有 `results` 键），
+    而最后一轮常常是**被拒的一次分配**（`balk` 写的 attempt 里根本没有 `results` 键），
     于是上面一轮真跑过的子任务名被判成"编出来的"，一次本该满足的结论被降级成未满足。
     → 规矩：证据引自**任何一轮**分配出来的子节点都算数。
 

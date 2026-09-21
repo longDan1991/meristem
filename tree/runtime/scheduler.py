@@ -1,7 +1,8 @@
 """调度器：广度优先、并行扇出、门槛 —— 次数不限。
 
-    分配节点：读自己的形式字段 + 本层已有尝试 → 「再做一次分配」或「出结论」
-    叶子：  读自己的形式字段 + 观测历史   → 「写一段代码」或「出结论」
+    每个节点（分配节点和叶子一样）都是**完整的 Loop**：读自己的形式字段 +
+    平铺对话（累积的 assistant/tool/user 消息）→ 做一个动作或出结论。
+    分配节点没有 execute 分支，叶子的动作是 bash / read / write。
 
 原则：
   · 形式化的是字段，次数不限，判断只看已经发生的事实
@@ -19,6 +20,7 @@ from collections import deque
 
 from ..protocol.fields import Node
 from ..protocol.gate import anchors
+from ..prompts.messages import child_result
 from .budget import Budget
 from .hands import Hands
 from .trace import Trace
@@ -71,26 +73,36 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
     hands = Hands()
 
     def rebuild_msgs(node):
-        """旧 trace（没有 msgs 检查点）恢复的叶子：把观测历史重建成对话。
+        """旧 trace（没有 msgs 检查点）恢复的节点：把历史重建成平铺对话。
 
         只写 user 消息（不带悬空 tool_call_id —— provider 会拒）。压缩只在
         发送边界做，存储（observations）永远是原文，所以重建不丢信息。
+        叶子：观测历史；分配节点：每次分配 + 下层结论。
         """
         out = []
-        for i, o in enumerate(node.observations, 1):
-            out.append({"role": "user",
-                        "content": "（你第 %d 次做了：%s）" % (i, o.get("action", ""))})
-            out.append({"role": "user", "content": o.get("obs", "")})
+        if node.kind == "leaf":
+            for i, o in enumerate(node.observations, 1):
+                out.append({"role": "user",
+                            "content": "（你第 %d 次做了：%s）"
+                            % (i, o.get("action", ""))})
+                out.append({"role": "user", "content": o.get("obs", "")})
+        else:
+            for a in node.attempts:
+                out.append({"role": "user", "content": "本层已有尝试: %s"
+                            % (a.get("rejected")
+                               or " ".join(c.get("name", "") for c in a.get("children", [])))})
+                for r in a.get("results", []):
+                    out.append({"role": "user", "content": child_result(r)})
         return out
 
     if resume is not None:
         state, pending, root = resume["state"], resume["pending"], resume["root"]
-        # 旧 trace 没有 msgs 检查点：把观测历史重建成对话，别让恢复的叶子失忆
+        # 旧 trace 没有 msgs 检查点：把历史重建成对话，别让恢复的节点失忆
         for nid, st in state.items():
             if st["finished"]:
                 continue
             node = st["node"]
-            if node.kind == "leaf" and not st.get("msgs") and node.observations:
+            if not st.get("msgs") and (node.observations or node.attempts):
                 st["msgs"] = rebuild_msgs(node)
     else:
         state, pending = {}, deque()
@@ -113,6 +125,20 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
         if on_event:
             on_event(node)
 
+    def _inject_world(pst, text):
+        """把一条世界回话（下层结论 / 门槛作废）写进父节点的平铺对话。
+
+        尽量并到上一条 user 消息里 —— 并行孩子同时完工时会连续注入多条，
+        连着的 user 消息有的 provider 不接受。
+        """
+        msgs = pst.get("msgs")
+        if msgs is None:
+            return
+        if msgs and msgs[-1].get("role") == "user":
+            msgs[-1]["content"] = str(msgs[-1]["content"]) + "\n" + text
+        else:
+            msgs.append({"role": "user", "content": text})
+
     def settle(nid, res):
         st = state[nid]
         if res["kind"] == "finished":
@@ -125,8 +151,10 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
             if parent and parent in state:
                 pst = state[parent]
                 pn = pst["node"]
+                rec = node.record()
                 if pn.attempts:
-                    pn.attempts[-1].setdefault("results", []).append(node.record())
+                    pn.attempts[-1].setdefault("results", []).append(rec)
+                _inject_world(pst, child_result(rec))
                 # 门槛不成立 → 整个分支作废，其余子任务永不启动
                 if pst.get("gate_id") == nid and node.verdict != "满足":
                     skipped = [s["name"] for s in pst.get("rest") or []]
@@ -138,6 +166,9 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
                             pn.attempts[-1]["results"].append(
                                 {"name": "（以下子任务被跳过）", "outcome": "未启动",
                                  "text": ", ".join(skipped), "evidence": []})
+                    _inject_world(pst, "门槛「%s」不成立：%s。暂缓分支作废（不启动）：%s"
+                                  % (node.name, node.conclusion,
+                                     "、".join(skipped) or "(无)"))
                     trace.add(parent, "gate_failed",
                               {"gate": node.name, "reason": node.conclusion,
                                "skipped": skipped})

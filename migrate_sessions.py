@@ -45,7 +45,7 @@ def _node_from_open(p, nid):
 
 
 def _action_label(p):
-    """一次动作的一行标题：命令的第一行（和 code_label 同一思路），没有命令用工具名。"""
+    """一次动作的一行标题：命令的第一行，没有命令用工具名。"""
     args = p.get("args") or p.get("参数") or {}
     cmd = str(args.get("cmd", "")) if isinstance(args, dict) else ""
     for ln in cmd.splitlines():

@@ -51,7 +51,8 @@ class Hands:
 
     async def run(self, tool, args):
         if tool not in SERIAL:
-            return await TOOLS[tool](**args)
+            out = TOOLS[tool](**args)
+            return await out if inspect.isawaitable(out) else out
         fut = asyncio.get_running_loop().create_future()
         await self._q.put((tool, args, fut))
         return await fut

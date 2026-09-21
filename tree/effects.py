@@ -219,60 +219,15 @@ def contract_problems(path, contract, base=None):
     return problems
 
 
-# 产出记账：**只认这个节点自己报过的路径**，不去 diff 整个工作区。
+# 产出记账：**只认这个节点自己动过的路径**，不去 diff 整个工作区。
 #
 # 为什么不用全局 diff：工作区是共享的、节点是并发的 —— 全局 diff 会把别的
 # 节点此刻写的文件算到它头上，于是 gate 反过来逼它交代一个不是它做的文件
 # （假阳性比漏报坏得多：漏报就是现状，假阳性会让它卡在这里或者编个契约）。
-# 候选只有两个来源，都是**这个节点自己做过的事**：
-#   · 它的代码里 open()/os.open() 写过的（子进程自己报上来，见 sandbox.BOOTSTRAP）
-#   · 它真跑过的命令（走协议回调宿主的那几次）里解析出来的目标
-# 然后逐个 stat，和“跑之前的快照”对比，分 create / modify。
-SKIP_DIRS = ("__pycache__", ".git", ".venv", ".tree")
-SKIP_SUFFIX = (".meta.json",)
-
-
-def snapshot_workspace(root, skip=()):
-    """{绝对路径: (mtime_ns, 大小)}。只走一遍，不读文件内容。
-
-    它在一次动作**之前**跑，用来回答两个问题：这个路径原来存不存在（create vs
-    modify）、它变没变。skip：程序自己的账本（trace），它每回合都在改。
-    """
-    skip = {os.path.realpath(p) for p in skip if p}
-    snap = {}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for name in filenames:
-            if name.endswith(SKIP_SUFFIX):
-                continue
-            p = os.path.join(dirpath, name)
-            if os.path.realpath(p) in skip:
-                continue
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue          # 跑的过程中被删掉的临时文件
-            snap[p] = (st.st_mtime_ns, st.st_size)
-    return snap
-
-
-def classify_paths(candidates, before, cwd):
-    """候选产出 → (created, modified)。相对路径按 cwd 算，已写盘的才算。"""
-    created, modified = [], []
-    for raw in candidates:
-        p = str(raw)
-        ap = os.path.normpath(p if p.startswith("/") else os.path.join(cwd, p))
-        try:
-            st = os.stat(ap)
-        except OSError:
-            continue              # 说写了但真没写（被删了、被放弃了）
-        if ap in before:
-            if before[ap] != (st.st_mtime_ns, st.st_size):
-                modified.append(ap)
-        else:
-            created.append(ap)
-    return sorted(set(created)), sorted(set(modified))
-
+# 候选只有两个来源，都是**这个节点自己做过的事**（见 runtime/turn.py 的工具）：
+#   · write 工具写谁就是谁
+#   · bash 命令里声明会写的目标（effects_of 解析）
+# 然后逐个 stat（跑前 vs 跑后），分 create / modify。
 
 def write_sidecar(path, contract, eff=None, pre=None):
     """把契约写在工件旁边。这样即使没有检索，谁看到这个文件都知道怎么用它。"""
