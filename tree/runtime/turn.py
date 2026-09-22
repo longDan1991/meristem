@@ -110,16 +110,16 @@ def _root_anchors(node, state):
 def _current(binding):
     rctx, nid = binding
     st = rctx["state"][nid]
-    return st, st["node"], rctx["trace"], rctx
+    return st, st["node"], rctx["store"], rctx
 
 
 # ---------------------------------------------------------------- 问模型
-def _log_usage(llm, trace, node_id, phase):
+def _log_usage(llm, store, node_id, phase):
     u = getattr(llm, "last_usage", None)
     if not u:
         return
     total = u.get("total_tokens", 0)
-    trace.add(node_id, "usage", {
+    store.record(node_id, "usage", {
         "phase": phase, "prompt": u.get("prompt_tokens", 0),
         "completion": u.get("completion_tokens", 0),
         "reasoning": (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
@@ -147,17 +147,17 @@ def node_hooks(nid, runtime):
     if node.kind == "intake":
         return intake_hooks(nid, runtime)
     which = which_of(node)
-    llm, trace = runtime["llm"], runtime["trace"]
+    llm, store = runtime["llm"], runtime["store"]
 
     async def before_chat(transcript):
-        trace.add(node.id, "%s_in" % which, base_user(node))
+        store.record(node.id, "%s_in" % which, base_user(node))
         wire = transcript.wire()
         if which == "leaf" and cfg.COMPRESS and any(
                 m.get("role") == "tool" for m in wire):
             result = await compress_messages(wire, getattr(llm, "model", ""))
             wire = result.messages
             if result.tokens_saved > 0:
-                trace.add(node.id, "wire_compressed", {
+                store.record(node.id, "wire_compressed", {
                     "before": result.tokens_before, "after": result.tokens_after,
                     "saved": result.tokens_saved,
                     "ratio": (round(result.tokens_saved / result.tokens_before, 3)
@@ -166,8 +166,8 @@ def node_hooks(nid, runtime):
         return wire
 
     async def after_chat(transcript, assistant):
-        _log_usage(llm, trace, node.id, which)
-        trace.add(node.id, "%s_out" % which,
+        _log_usage(llm, store, node.id, which)
+        store.record(node.id, "%s_out" % which,
                   {"text": assistant.text,
                    "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
                                   for tc in assistant.tool_calls]})
@@ -177,23 +177,23 @@ def node_hooks(nid, runtime):
             why = ("这次回复没有调用任何工具%s。你必须调用一个：%s。"
                    % (hint, " / ".join(_TOOL_NAMES[which])))
             transcript.add_feedback(why)
-            return Outcome(balk(node, why, trace, st)["effect"])
+            return Outcome(balk(node, why, store, st)["effect"])
         if len(assistant.tool_calls) > 1:
             why = "一次只能调用一个工具（你调了 %d 个）" % len(assistant.tool_calls)
             transcript.add_feedback(why)
-            return Outcome(balk(node, why, trace, st)["effect"])
+            return Outcome(balk(node, why, store, st)["effect"])
         tc = assistant.tool_calls[0]
         if tc.name not in _TOOL_NAMES[which]:
             why = ("你调用的 %s 不在这一层的工具里（你能用：%s）"
                    % (tc.name, " / ".join(_TOOL_NAMES[which])))
             transcript.add_feedback(why)
-            return Outcome(balk(node, why, trace, st)["effect"])
+            return Outcome(balk(node, why, store, st)["effect"])
         return None
 
     async def after_tool(transcript, assistant, results):
         rej = next((r.reject for r in results if r.reject), "")
         if rej:
-            return Outcome(balk(node, rej, trace, st)["effect"])
+            return Outcome(balk(node, rej, store, st)["effect"])
         return outcome_after_tools(results)
 
     return Hooks(before_chat=before_chat, after_chat=after_chat,
@@ -253,7 +253,7 @@ def sig(what, obs=""):
     return hashlib.sha1((str(what) + "\x00" + str(obs)).encode()).hexdigest()
 
 
-def bump(seen, fingerprint, trace, node, what):
+def bump(seen, fingerprint, store, node, what):
     """同一份东西重复出现 ≥3 次就显式告警，≥5 次就自己停下。
 
     不是轮次上限：换一个动作、或者世界回话变了，指纹就不同。
@@ -265,12 +265,12 @@ def bump(seen, fingerprint, trace, node, what):
     n = seen[fingerprint]
     if n < 3:
         return n, ""
-    trace.add(node.id, "no_progress", {"times": n, "action": what})
+    store.record(node.id, "no_progress", {"times": n, "action": what})
     return n, ("\n[停止] 已经有 %d 次是同样的东西了：%s —— 再重复不会带来新信息。\n"
                "换一个动作，或者出结论（阻塞就写清为什么）。" % (n, what))
 
 
-def balk(node, why, trace, st):
+def balk(node, why, store, st):
     """把"这次给的东西用不了"变成一条可见的事实，并且**按重复次数处理**。
 
     四个地方都要走它：没调工具 / 参数不合形状 / 被代码拒的分配 / 不合规的结论。
@@ -281,7 +281,7 @@ def balk(node, why, trace, st):
     这不是轮次上限：换一种拆法、换一个错，指纹就不同。
     """
     n, note = bump(st.setdefault("seen_actions", {}),
-                   sig("(balk)", why), trace, node, "(用不了的输出)")
+                   sig("(balk)", why), store, node, "(用不了的输出)")
     if n >= 5:
         node.close("未满足", "同一份用不了的东西连续 %d 次，没有新信息：%s"
                    % (n, why), [])
@@ -303,19 +303,19 @@ def _obs_label(tool, args):
     return "%s(%s)" % (tool, str(args.get("path") or "?"))
 
 
-def _record_effects(trace, node_id, tool, args, eff, pre, created, modified):
-    """把一次工具动作的产出落成 trace 的 effects 事件（给人看的过程记录）。
+def _record_effects(store, node_id, tool, args, eff, pre, created, modified):
+    """把一次工具动作的产出落成 store 的 effects 事件（给人看的过程记录）。
 
     created / modified 是这次动作之后确实存在、属于它的产物路径。
     历史只活在一处（节点对话）；这里只发事件，不存任何节点状态。
     """
-    trace.add(node_id, "effects", {"tool": tool, "args": args,
+    store.record(node_id, "effects", {"tool": tool, "args": args,
                                    "wrote": created + modified,
                                    "effects": eff, "前置条件": pre})
 
 
-def _action_result(st, trace, node, tool, args, obs):
-    """一次工具动作的收尾：trace + 无进展检测。返回 step 的下一拍。
+def _action_result(st, store, node, tool, args, obs):
+    """一次工具动作的收尾：store + 无进展检测。返回 step 的下一拍。
 
     同一件事重复 ≥3 次显式告警、≥5 次自己停下（指纹 = 动作 + 观测，
     换动作或世界回话变了指纹就不同）。历史进对话（工具结果消息），
@@ -323,13 +323,13 @@ def _action_result(st, trace, node, tool, args, obs):
     """
     what = _obs_label(tool, args)
     n, note = bump(st.setdefault("seen_actions", {}),
-                   sig(what, obs), trace, node, what)
+                   sig(what, obs), store, node, what)
     if note:
         obs = str(obs) + note
-    trace.add(node.id, "tool", {"tool": tool, "args": args, "obs": str(obs)})
+    store.record(node.id, "tool", {"tool": tool, "args": args, "obs": str(obs)})
     if n >= 5:
         msg = "同一件事重复 %d 次、输出完全一样，没有新信息：%s" % (n, what)
-        trace.add(node.id, "stalled", msg)
+        store.record(node.id, "stalled", msg)
         node.close("未满足", msg, [])
         return {"effect": "stop"}
     return {"effect": "continue", "text": obs}
@@ -344,7 +344,7 @@ async def create_children(children: list[ChildSpec],
     除 notes / gate 外全部必填：缺了或形状不对，这次分配会被代码当场退回，
     原因写回本层对话。一次最多一个 gate。
     """
-    st, node, trace, rctx = _current(_b)
+    st, node, store, rctx = _current(_b)
     kids_spec, reject = [], None
     for raw in (c.model_dump() for c in children):
         s, why = clean_spec(raw)
@@ -358,7 +358,7 @@ async def create_children(children: list[ChildSpec],
         if not (ok_parent and ok_root):
             reject = ("子任务的 accept 丢了可测物理量（缺 %s）—— 这是把任务换成了别的东西"
                       % ", ".join(sorted(ra or anchors(node.accept))))
-            trace.add(node.id, "criterion_drift",
+            store.record(node.id, "criterion_drift",
                       {"child": s["name"], "accept": s["accept"],
                        "parent_anchors": sorted(anchors(node.accept)),
                        "root_anchors": sorted(ra)})
@@ -367,18 +367,18 @@ async def create_children(children: list[ChildSpec],
 
     if reject:
         # 把被拒这件事变成一条可见的事实（而不是丢弃或加计数器）
-        return balk(node, reject, trace, st)
+        return balk(node, reject, store, st)
 
     gates = [s for s in kids_spec if s["gate"]]
     if len(gates) > 1:
-        return balk(node, "一次分配最多一个门槛", trace, st)
+        return balk(node, "一次分配最多一个门槛", store, st)
     gate = gates[0] if gates else None
     if gate:
         first = [gate]
         rest = [s for s in kids_spec if s is not gate]
     else:
         first, rest = kids_spec, []          # 没有门槛就没有"暂缓"，不能把全部当成暂缓
-    trace.add(node.id, "allocated",
+    store.record(node.id, "allocated",
               {"gate": gate["name"] if gate else None,
                "deferred": [s["name"] for s in rest] if gate else []})
     # text = 这次分配的平铺记录，会写回本节点的对话（分配节点的历史也走对话
@@ -410,11 +410,11 @@ async def bash(cmd: Annotated[str,
     出错是常事，也是信息：异常原样给你。别重复跑同一段命令 ——
     换个做法，或者把出错当成事实，用结论「未满足/阻塞」说清楚。
     """
-    st, node, trace, rctx = _current(_b)
+    st, node, store, rctx = _current(_b)
     cmd = str(cmd or "")
     if not cmd.strip():
         return balk(node, "cmd 是空的：要么写一条命令，要么用 conclude 出结论",
-                    trace, st)
+                    store, st)
     cwd = os.getcwd()
     # 产出记账：命令里声明会碰的目标，跑前后各 stat 一次分 create / modify /
     # delete（rm 的目标也在这里验，不静默丢掉）。工作区是共享的、节点是并发的
@@ -430,9 +430,9 @@ async def bash(cmd: Annotated[str,
     modified = [p for p in declared if existed[p] and os.path.exists(p)]
     deleted = [p for p in doomed if doomed_existed[p] and not os.path.exists(p)]
     eff["fs"] = {"create": created, "modify": modified, "delete": deleted}
-    _record_effects(trace, node.id, "bash", {"cmd": cmd}, eff, pre,
+    _record_effects(store, node.id, "bash", {"cmd": cmd}, eff, pre,
                     created, modified)
-    return _action_result(st, trace, node, "bash", {"cmd": cmd, "timeout": timeout}, obs)
+    return _action_result(st, store, node, "bash", {"cmd": cmd, "timeout": timeout}, obs)
 
 
 @mcp.tool
@@ -442,13 +442,13 @@ async def read(path: Annotated[str, "要读的文件路径（相对工作区）�
                limit: Annotated[int, "最多读多少字。"] = 2000,
                _b=Depends(get_step_binding)) -> dict:
     """读文件的一段，并明说这段在哪、还有多少。"""
-    st, node, trace, rctx = _current(_b)
+    st, node, store, rctx = _current(_b)
     obs = str(await rctx["hands"].run("read", {"path": path, "offset": offset,
                                                "limit": limit}))
     eff, pre = effects_of("read", {"path": path}, cwd=os.getcwd())
-    trace.add(node.id, "effects", {"tool": "read", "args": {"path": path},
+    store.record(node.id, "effects", {"tool": "read", "args": {"path": path},
                                    "effects": eff, "前置条件": pre})
-    return _action_result(st, trace, node, "read", {"path": path, "offset": offset,
+    return _action_result(st, store, node, "read", {"path": path, "offset": offset,
                                                     "limit": limit}, obs)
 
 
@@ -458,7 +458,7 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
                 content: Annotated[str, "文件内容。"] = "",
                 _b=Depends(get_step_binding)) -> dict:
     """写一个文件。产出会记进你的账本，conclude 时必须逐个交代。"""
-    st, node, trace, rctx = _current(_b)
+    st, node, store, rctx = _current(_b)
     cwd = os.getcwd()
     ap = path if path.startswith("/") else os.path.normpath(os.path.join(cwd, path))
     existed = os.path.exists(ap)
@@ -466,9 +466,9 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
     eff, pre = effects_of("write", {"path": path}, cwd=cwd, existed_before=existed)
     created = [ap] if (not existed and os.path.exists(ap)) else []
     modified = [ap] if (existed and os.path.exists(ap)) else []
-    _record_effects(trace, node.id, "write", {"path": path}, eff, pre,
+    _record_effects(store, node.id, "write", {"path": path}, eff, pre,
                     created, modified)
-    return _action_result(st, trace, node, "write", {"path": path, "content": content},
+    return _action_result(st, store, node, "write", {"path": path, "content": content},
                           obs)
 
 
@@ -482,15 +482,15 @@ async def conclude(verdict: str, text: str,
     判定「满足」必须指得出真证据（叶子：第几次观测 / 产物路径；分配节点：
     子任务 name / 产物路径），指不出来会被降级为未满足。
     """
-    st, node, trace, rctx = _current(_b)
+    st, node, store, rctx = _current(_b)
     concl = {"verdict": verdict, "text": text, "evidence": evidence or [],
              "external": external}
-    got, err = clean_conclusion(concl, trace, node, msgs=st["transcript"].to_list())
+    got, err = clean_conclusion(concl, store, node, msgs=st["transcript"].to_list())
     if err:
-        trace.add(node.id, "bad_conclusion", err)
-        return balk(node, err, trace, st)
+        store.record(node.id, "bad_conclusion", err)
+        return balk(node, err, store, st)
     node.close(got["verdict"], got["content"], got["evidence"], got["external"])
-    trace.add(node.id, "concluded",
+    store.record(node.id, "concluded",
               {"verdict": got["verdict"], "text": got["content"],
                "evidence": got["evidence"], "external": got["external"]})
     return {"effect": "stop"}

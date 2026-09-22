@@ -131,7 +131,7 @@ def evidence_ok(ev, msgs):
     return valid, bad
 
 
-def clean_conclusion(concl, trace, node, msgs=None):
+def clean_conclusion(concl, store, node, msgs=None):
     """代码检查，都是形式字段上的，不是计数器：
       · 判定必须是 满足|未满足|阻塞
       · 判定"满足"得指得出真证据（观测 / 子任务 / 磁盘上真有的产物）
@@ -155,14 +155,14 @@ def clean_conclusion(concl, trace, node, msgs=None):
     if verdict == "满足":
         valid, bad = evidence_ok(ev, msgs or [])
         if not valid:
-            trace.add(node.id, "verdict_downgraded",
+            store.record(node.id, "verdict_downgraded",
                       {"was": "满足", "reason": "证据指不到任何真实存在的东西",
                        "evidence": bad})
             return {"verdict": "未满足", "content": content +
                     "（原判「满足」但证据指不到真实的东西，已降级）",
                     "evidence": [], "external": []}, None
         if bad:
-            trace.add(node.id, "evidence_trimmed", {"dropped": bad, "kept": valid})
+            store.record(node.id, "evidence_trimmed", {"dropped": bad, "kept": valid})
         ev = valid
     return {"verdict": verdict, "content": content, "evidence": ev,
             "external": ext}, None
