@@ -4,8 +4,8 @@
 核心不变量：**一场会话 = 一棵树**，入口节点（kind="intake"）是根，谈成的任务
 都是它的孩子。`trace.jsonl` 的记录里，`state` 检查点只有两样：Node 全字段 +
 平铺对话（msgs）—— 没有编排字段。退出（哪怕崩溃）后，`session.load` 读回这
-**一棵树**（root / registry / state），直接丢给 `scheduler.run(..., resume=tree)`
-接着跑：resume 时用 `reconcile` 补投递（崩溃窗口）、按共享谓词重排队列。
+**一棵树**（root / registry / state），直接丢给 `scheduler.run(tree)`
+接着跑：run 恢复时用 `reconcile` 补投递（崩溃窗口）、按共享谓词重排队列。
 
   A. Node 序列化往返：to_dict → from_dict 不丢任何字段（含 deferred）
   B. load 返回一棵树；没根 / 多根当场报错
@@ -34,7 +34,7 @@ from tree.protocol.fields import Node                              # noqa: E402
 from tree.prompts.messages import result_ids                       # noqa: E402
 from tree.runtime import reconcile                                 # noqa: E402
 from tree.runtime.scheduler import run                             # noqa: E402
-from tree.runtime.session import load, session_label               # noqa: E402
+from tree.runtime.session import load, new_session, session_label  # noqa: E402
 from tree.runtime.trace import Trace, iter_trace_lines                  # noqa: E402
 
 OK = []
@@ -87,7 +87,7 @@ async def _run_tree(script, path):
     root = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     llm = ScriptLLM(script)
     try:
-        await run(root, llm, Trace(path))
+        await run(new_session(root, trace=path), llm)
     except RuntimeError:
         pass
     return root
@@ -175,8 +175,7 @@ async def main():
     line("B2: 投递丢失 → 加载时入口不排队（孩子未结算）",
          not queueable(t_b2, it2.id) and not queueable(t_b2, a.id))
     try:
-        await run(t_b2["root"], ScriptLLM(["甲回来了，全部完成。"]),
-                  Trace(tp_b2), registry=t_b2["registry"], resume=t_b2,
+        await run(t_b2, ScriptLLM(["甲回来了，全部完成。"]),
                   ask=lambda tx: (_ for _ in ()).throw(EOFError()))
     except EOFError:
         pass
@@ -199,10 +198,9 @@ async def main():
     tr_b3.add(gate.id, "state", state_rec(gate, []))
     tr_b3.drain()
     t_b3 = load(tp_b3)
-    await run(t_b3["root"], ScriptLLM([
+    await run(t_b3, ScriptLLM([
         ("conclude", {"verdict": "满足", "text": "门槛不成立，做不了",
-                      "evidence": ["门槛"]})]),
-              Trace(tp_b3), registry=t_b3["registry"], resume=t_b3)
+                      "evidence": ["门槛"]})]))
     line("B3: 门槛未满足 → 暂缓的乙从未出生",
          all(n.name != "乙" for n in t_b3["registry"].values()))
     line("B3: 作废旁白写进父节点对话",
@@ -224,7 +222,7 @@ async def main():
                                     "evidence": ["第1次观测"]}),
                       ("conclude", {"verdict": "满足", "text": "全部完成",
                                     "evidence": ["子A 结论"]})])
-    await run(t["root"], llm2, Trace(tp2), registry=t["registry"], resume=t)
+    await run(t, llm2)
     line("没跑完的节点接着跑完了",
          t["root"].verdict == "满足" and t["root"].conclusion == "全部完成")
     line("孩子没被重跑（bash 工具调用只有一次）",
@@ -247,7 +245,8 @@ async def main():
             raise a
         return a
     try:
-        await run(intake3, llm3, Trace(tp3), seed="用户的任务: 帮我做X", ask=ask3)
+        await run(new_session(intake3, seed="用户的任务: 帮我做X", trace=tp3),
+                  llm3, ask=ask3)
     except EOFError:
         pass
     t3 = load(tp3)
@@ -271,7 +270,7 @@ async def main():
                                   "conc_range": [1, 10]}}),
         RuntimeError("模拟崩溃")])            # 任务还没出生就崩（submit 之后）
     try:
-        await run(intake4, llm4, Trace(tp4), seed="用户的任务: X",
+        await run(new_session(intake4, seed="用户的任务: X", trace=tp4), llm4,
                   ask=lambda t: (_ for _ in ()).throw(EOFError()))
     except (RuntimeError, EOFError):
         pass
@@ -284,7 +283,7 @@ async def main():
         ("conclude", {"verdict": "满足", "text": "任务X做完了", "evidence": ["第1次观测"]}),
         "跑完了。"])
     try:
-        await run(t["root"], llm5, Trace(tp4), registry=t["registry"], resume=t,
+        await run(t, llm5,
                   ask=lambda tx: (_ for _ in ()).throw(EOFError()))
     except EOFError:
         pass
@@ -325,7 +324,8 @@ async def main():
                                   "conc_range": [1, 10]}}),
         RuntimeError("崩")])
     try:
-        await run(intake6, llm6, Trace(tp6), seed="用户的任务: 两个",
+        await run(new_session(intake6, seed="用户的任务: 两个", trace=tp6),
+                  llm6,
                   ask=lambda t: (_ for _ in ()).throw(EOFError()))
     except (RuntimeError, EOFError):
         pass
@@ -344,7 +344,7 @@ async def main():
         ("conclude", {"verdict": "满足", "text": "任务二完成", "evidence": ["第1次观测"]}),
         "都跑完了。"])
     try:
-        await run(t["root"], llm7, Trace(tp6), registry=t["registry"], resume=t,
+        await run(t, llm7,
                   ask=lambda tx: (_ for _ in ()).throw(EOFError()))
     except EOFError:
         pass
@@ -364,7 +364,7 @@ async def main():
         ("bash", {"cmd": "echo hi"}),
         ("conclude", {"verdict": "满足", "text": "子A做完了", "evidence": ["第1次观测"]}),
         ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["子A 结论"]})])
-    await run(root_h, llm_h, Trace(tp_h))
+    await run(new_session(root_h, trace=tp_h), llm_h)
     events = {}                          # nid -> [state payload，按文件顺序]
     for r in iter_trace_lines(tp_h):
         if r.get("kind") == "state":

@@ -57,8 +57,8 @@ from tree import config as cfg
 from tree.llm import LLM
 from tree.protocol.fields import Node
 from tree.runtime.scheduler import run
-from tree.runtime.session import load, session_label
-from tree.runtime.trace import get_trace, get_traces
+from tree.runtime.session import load, new_session, session_label
+from tree.runtime.trace import get_traces
 
 PROMPT = "› "
 
@@ -207,34 +207,28 @@ async def run_session(a, session=None):
             # 读不了（数据损坏 / 不是当前格式）：带着是哪个会话的上下文炸出来，不静默跳过
             print("读不了这个会话（数据损坏，或不是当前格式）：%s" % picked, flush=True)
             raise
-        # 会话 = 一棵树（入口节点为根）；直接交给 converse 丢进 run()。
-        # registry 是运行态：run() 往里登记每个节点，终端靠它画任务树。
-        env = {"trace": get_trace(picked), "tree": tree,
-               "registry": tree["registry"]}
+        # 会话 = 一棵树（入口为根），树自己带着记录路径；交给 converse 丢进 run()。
+        env = {"tree": tree}
         _show_resumed(tree, picked)
-        seed = None
     else:
-        env = {"trace": get_trace(), "registry": {}}
         task = await opening(session)
-        seed = _seed(task)
-    print("[trace] %s\n" % os.path.abspath(env["trace"].path), flush=True)
+        env = {"tree": new_session(Node(name="会话", kind="intake"),
+                                   seed=_seed(task))}
+    print("[trace] %s\n" % os.path.abspath(env["tree"]["trace"]), flush=True)
 
-    try:
-        return await converse(seed, env, session=session)
-    finally:
-        env["trace"].drain()      # 对话最后几笔必须落盘，进程才退出
+    # 落盘由 run 兜底（任何退出路都 drain）—— 这里不再单独碰记录句柄。
+    return await converse(env, session=session)
 
 
-async def converse(seed, env, session=None):
+async def converse(env, session=None):
     """和入口一直谈下去，直到用户在终端上中止（返回 `None`）。
 
     入口**不退场**：谈成一个任务就挂到树上跑掉、把结论带回对话，再接着谈。
     **整场会话是一棵树**（入口为根）—— `run` 把它整棵跑起来，直到用户中止。
 
-    env 是运行现场（trace / registry，并发走环境变量 TREE_WORKERS），
-    终端不解释它，只把入口的根节点丢给 run；session 是读的那条通道（测试把
-    管道驱动的会话塞进来）。
-    恢复（`-r`）的会话由 `run_session` 选完就放在 `env["tree"]`，这里原样续跑。
+    env 是运行现场（一棵树 env["tree"]，新会话 / 恢复都由 run_session 建好），
+    终端不解释它，只把树丢给 run；session 是读的那条通道（测试把管道驱动的
+    会话塞进来）。
     """
     session = session or _session()
     # 上不上色交给 rich 判断：isatty / NO_COLOR / 颜色系统它都处理。
@@ -312,17 +306,22 @@ async def converse(seed, env, session=None):
     session_root = [None]              # 入口节点（会话根）
     streams = {}                       # node_id -> {"thinking","speaking"} 尾巴
 
+    # 会话 = 一棵树（入口为根），run_session 建好放进 env["tree"]；
+    # registry 是运行态：run() 往里登记每个节点，终端靠它画任务树。
+    tree = env["tree"]
+    registry = tree["registry"]
+    session_root[0] = tree["root"]
+
     def current_frame():
         # 跑的时候用**每节点一行**的实时视图（compact：整棵树铺开，每个节点
         # 正在吐的字都占一行看得见）；任务根出结论那帧切回详细视图 —— 判定/
         # 验收/结论都在，那才是跑完的完整结果（Live 收摊时整幅渲染，能滚动）。
         compact = root_ref[0] is not None and not root_ref[0].verdict
-        tree = render_tree(root_ref[0], env.get("registry") or {},
-                           streams=streams, compact=compact)
+        lines = render_tree(root_ref[0], registry, streams=streams, compact=compact)
         if live_ref[0] is not None and compact:
-            rows = _fit(tree, max(1, console.height - 1)) + [PROMPT + input_line[0]]
+            rows = _fit(lines, max(1, console.height - 1)) + [PROMPT + input_line[0]]
         else:
-            rows = tree
+            rows = lines
         # no_wrap + crop：每一行都在终端宽度处裁掉，不换行 ——
         # Live 的区域高度按行数算，一换行高度就对不上，输入行会被挤掉。
         return Text("\n".join(rows), overflow="crop", no_wrap=True)
@@ -438,7 +437,7 @@ async def converse(seed, env, session=None):
             _push_stream(scope, "thinking" if payload.get("kind") == "reasoning"
                          else "speaking", payload.get("delta") or "")
             return
-        node = payload.get("node") or (env.get("registry") or {}).get(scope)
+        node = payload.get("node") or registry.get(scope)
         if node is None:
             return
 
@@ -467,14 +466,9 @@ async def converse(seed, env, session=None):
                     live_ref[0].stop()
                     live_ref[0] = None
 
-    tree = env.get("tree")
-    root = tree["root"] if tree else Node(name="会话", kind="intake")
-    session_root[0] = root
     llm = LLM()
     intake_task[0] = asyncio.ensure_future(
-        run(root, llm, env["trace"], registry=env.get("registry"),
-            workers=cfg.WORKERS,
-            subscribe=on_sink, resume=tree, seed=seed, ask=ask, say=narrate))
+        run(tree, llm, subscribe=on_sink, ask=ask, say=narrate))
     try:
         await intake_task[0]
     except _Quit:

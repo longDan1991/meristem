@@ -4,9 +4,8 @@ version = "0.1.0"
 description = "一棵递归工作的 LLM 树"
 requires-python = ">=3.11"
 dependencies = [
-    "litellm",    # 模型输出里抽/修 JSON
+    "litellm",       # LLM 客户端（OpenAI 兼容端点；流式 / 重试 / usage）
     "python-dotenv",  # .env 解析
-    "jieba",          # 中文分词（检索词法）
     "rich",           # 终端渲染 / 颜色 / TTY 检测
     "fastmcp>=4.0.5",
     "prompt-toolkit>=3.0.53",

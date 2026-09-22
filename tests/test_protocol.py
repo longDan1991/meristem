@@ -24,12 +24,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tree.llm import Message, ToolCall                      # noqa: E402
 from tree.protocol.fields import Node                # noqa: E402
 from tree.protocol.tool_specs import mcp             # noqa: E402
-from tree.runtime.trace import Trace                 # noqa: E402
 from tree.prompts import (build_system_sections, render_system,  # noqa: E402
                           render_turn)
 from tree.prompts.messages import (base_user, header, lineage,  # noqa: E402
                                    spec_line)
 from tree.runtime import scheduler as R              # noqa: E402
+from tree.runtime.session import new_session         # noqa: E402
 from tree import config as cfg                       # noqa: E402
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
@@ -181,17 +181,17 @@ class Scripted:
 
 def go(mode, accept=C_ANCHORED, kind="dispatch"):
     d = tempfile.mkdtemp()
-    trace = Trace(os.path.join(d, "t.jsonl"))
     root = Node(name="ROOT", accept=accept, kind=kind)
-    reg, llm = {}, Scripted(mode)
+    llm = Scripted(mode)
     cwd = os.getcwd()          # 叶子会跑真的 bash：别污染项目目录
     os.chdir(d)
     try:
-        asyncio.run(R.run(root, llm, trace, registry=reg, workers=2))
+        tree = asyncio.run(R.run(new_session(root, trace=os.path.join(d, "t.jsonl")),
+                                 llm, workers=2))
     finally:
         os.chdir(cwd)
     recs = [json.loads(x) for x in open(os.path.join(d, "t.jsonl"))]
-    return root, reg, recs, d
+    return root, tree["registry"], recs, d
 
 
 def kinds(recs):

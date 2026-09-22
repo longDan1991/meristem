@@ -27,7 +27,7 @@ from tree.llm import Message, ToolCall                                # noqa: E4
 from tree.protocol.fields import Node                                 # noqa: E402
 from tree.protocol.gate import anchors, validate_root                 # noqa: E402
 from tree.runtime.scheduler import run                                # noqa: E402
-from tree.runtime.trace import Trace                                  # noqa: E402
+from tree.runtime.session import new_session                          # noqa: E402
 
 OK = []
 
@@ -101,8 +101,9 @@ def run_intake(llm, seed, answers):
     d = tempfile.mkdtemp()
     root = Node(name="会话", kind="intake")
     try:
-        asyncio.run(run(root, llm, Trace(os.path.join(d, "t.jsonl")),
-                        subscribe=collect, seed=seed, ask=ask, say=said.append))
+        asyncio.run(run(new_session(root, seed=seed,
+                                   trace=os.path.join(d, "t.jsonl")),
+                        llm, subscribe=collect, ask=ask, say=said.append))
     except Stop:
         pass
     return asked, said, events
@@ -206,8 +207,9 @@ def main():
         d = tempfile.mkdtemp()
         root = Node(name="会话", kind="intake")
         try:
-            asyncio.run(run(root, FakeLLM([reply]), Trace(os.path.join(d, "t.jsonl")),
-                            subscribe=collect, seed="帮我赚大钱", ask=stop_ask))
+            asyncio.run(run(new_session(root, seed="帮我赚大钱",
+                                       trace=os.path.join(d, "t.jsonl")),
+                            FakeLLM([reply]), subscribe=collect, ask=stop_ask))
         except Stop:
             pass
         return "".join(got)

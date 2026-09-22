@@ -39,16 +39,6 @@ EventType = Literal[
 ]
 
 
-def emit_for(sink, scope):
-    """把出口包成某个 scope 的 emit —— 事件形状只在这一处定。
-
-    现在只有调度器用它（loop_start / loop_end 是编排时点的事实，发生在任何
-    Loop 之前/之后，scope 由调度器直接打）；Loop 自己的事件不走这里 ——
-    它的身份由订阅关系决定（scheduler 订阅时打 scope，见 run_node）。
-    """
-    return lambda type, payload: sink.emit(type, {"scope": scope, **payload})
-
-
 @dataclass
 class Outcome:
     """一轮的产物。循环只认 kind，不解释 payload / reason：

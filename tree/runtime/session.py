@@ -1,4 +1,4 @@
-"""会话的恢复：把 trace（统一会话记录）读回**一棵树**接着跑。
+"""会话的载体：一棵树 + 它自己的记录（`new_session` 建新的 / `load` 读回一棵）。
 
 `trace.jsonl` 是一场会话的**完整记录**，几类事件按时间顺序混排在同一份
 append-only 文件里：
@@ -10,21 +10,22 @@ append-only 文件里：
     编排由 `runtime/reconcile.py` 从这两样推导。
 
 **一场会话 = 一棵树**：入口节点（kind="intake"）是根，谈成的任务都是它的
-孩子。`load` 读回来的就是这棵树（root / registry / state），
-直接丢给 `scheduler.run(..., resume=tree)` 就能接着跑。
+孩子。树 {"root", "state", "registry", "trace", "seed"} 自己知道记录落在哪
+（trace = 路径）—— `new_session(root)` 生成一棵只含入口根的新树，`load` 读回
+一棵，都直接丢给 `scheduler.run(tree)` 跑。
 
 恢复只认 `state`：节点生命周期那些事件是给别的消费者看的，重建运行状态不靠
 它们（靠展示物猜事实会猜错）。
 
 `load` 只做反序列化 + 树分组；补投递（崩溃窗口）与重排队列（该不该调 LLM）
-由调度器 resume 时用 `reconcile` 做 —— 不在这里重写一遍编排。
+由调度器 run 恢复时用 `reconcile` 做 —— 不在这里重写一遍编排。
 """
 
 import os
 import time
 
 from ..protocol.fields import Node
-from .trace import iter_trace_lines
+from .trace import iter_trace_lines, trace_path
 
 
 def session_label(path):
@@ -66,10 +67,21 @@ def session_label(path):
     return "%s %s [%s]%s" % (stamp, name, verdict, extra)
 
 
+def new_session(root, seed=None, trace=None):
+    """建一棵只含入口根的新树 —— `scheduler.run` 的新会话输入。
+
+    与 `load` 同一个形状 {"root", "state", "registry", "trace", "seed"}：
+    树自己知道记录落在哪（trace = 路径），新会话不传 trace 就从工作区生成；
+    seed 是新会话入口的第一句话（恢复的树没有）。
+    """
+    return {"root": root, "state": {}, "registry": {},
+            "trace": trace_path(trace), "seed": seed}
+
+
 def load(path):
     """读一场会话的记录，返回**一棵树**：{"root", "registry", "state"}。
 
-    拿它直接进 `scheduler.run(tree["root"], ..., resume=tree)` 就能接着跑。
+    拿它直接进 `scheduler.run(tree)` 就能接着跑。
 
     state[nid] = {"node": Node, "msgs": [...]} —— 检查点原样，无编排字段；
     该不该调 LLM 由调度器 resume 时按共享谓词 `reconcile.actionable` 重排。
@@ -103,4 +115,5 @@ def load(path):
     root = roots[0]
     state = {nid: {"node": registry[nid], "msgs": st["msgs"]}
              for nid, st in states.items()}
-    return {"root": root, "registry": registry, "state": state}
+    return {"root": root, "registry": registry, "state": state,
+            "trace": path, "seed": None}

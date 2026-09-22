@@ -303,7 +303,7 @@ def _obs_label(tool, args):
     return "%s(%s)" % (tool, str(args.get("path") or "?"))
 
 
-def _record_effects(st, trace, node_id, tool, args, eff, pre, created, modified):
+def _record_effects(trace, node_id, tool, args, eff, pre, created, modified):
     """把一次工具动作的产出落成 trace 的 effects 事件（给人看的过程记录）。
 
     created / modified 是这次动作之后确实存在、属于它的产物路径。
@@ -430,7 +430,7 @@ async def bash(cmd: Annotated[str,
     modified = [p for p in declared if existed[p] and os.path.exists(p)]
     deleted = [p for p in doomed if doomed_existed[p] and not os.path.exists(p)]
     eff["fs"] = {"create": created, "modify": modified, "delete": deleted}
-    _record_effects(st, trace, node.id, "bash", {"cmd": cmd}, eff, pre,
+    _record_effects(trace, node.id, "bash", {"cmd": cmd}, eff, pre,
                     created, modified)
     return _action_result(st, trace, node, "bash", {"cmd": cmd, "timeout": timeout}, obs)
 
@@ -466,7 +466,7 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
     eff, pre = effects_of("write", {"path": path}, cwd=cwd, existed_before=existed)
     created = [ap] if (not existed and os.path.exists(ap)) else []
     modified = [ap] if (existed and os.path.exists(ap)) else []
-    _record_effects(st, trace, node.id, "write", {"path": path}, eff, pre,
+    _record_effects(trace, node.id, "write", {"path": path}, eff, pre,
                     created, modified)
     return _action_result(st, trace, node, "write", {"path": path, "content": content},
                           obs)

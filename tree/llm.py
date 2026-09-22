@@ -93,63 +93,56 @@ class LLM:
             tool_choice="auto" if tools else None,
             parallel_tool_calls=(False if tools else None),  # 一次只能调一个（balk 兜底）
             stream=True,
+            stream_options={"include_usage": True},  # 真实 usage 在收尾块里，不必攒 chunks 重拼
             num_retries=_RETRIES,
         )
-        return await self._stream(resp, messages, on_delta, on_reasoning)
+        return await self._stream(resp, on_delta, on_reasoning)
 
-    async def _stream(self, resp, messages, on_delta, on_reasoning):
+    async def _stream(self, resp, on_delta, on_reasoning):
         """流式：话（content）一个字一个字回调；思考走 on_reasoning；
         工具调用的增量按 index 拼起来，返回时组装成 Message。"""
-        parts, chunks = [], []
+        parts, calls = [], []
         tool_deltas = {}                     # index -> {"id", "name", "arguments": [片段]}
         async for chunk in resp:
-            chunks.append(chunk)
-            try:
-                delta = chunk.choices[0].delta
-            except (IndexError, TypeError):
-                continue                # usage-only 收尾块，没有 choices
+            if not chunk.choices:            # 收尾块：没内容，只有 usage（stream_options）
+                u = getattr(chunk, "usage", None)
+                if u:
+                    # litellm 的 usage 是 pydantic 对象，._log_usage 要的是 dict
+                    self._tls.usage = (u.model_dump() if hasattr(u, "model_dump")
+                                       else dict(u))
+                continue
+            delta = chunk.choices[0].delta
+            # 无思考时 litellm 会删掉 reasoning_content 字段（OpenAI 规范），
+            # 所以只能 getattr，不能直接 . 访问
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning and on_reasoning is not None:
                 on_reasoning(reasoning)
-            piece = getattr(delta, "content", None)
+            piece = delta.content
             if piece:
                 parts.append(piece)
                 if on_delta is not None:
                     on_delta(piece)
-            for tcd in (getattr(delta, "tool_calls", None) or []):
-                idx = getattr(tcd, "index", 0)
-                slot = tool_deltas.setdefault(idx, {"id": "", "name": "", "args": []})
-                if getattr(tcd, "id", None):
-                    slot["id"] = tcd.id
-                fn = getattr(tcd, "function", None)
+            for tcd in (delta.tool_calls or ()):
+                fn = getattr(tcd, "function", None)  # 自定义型（Anthropic 风格）没有 function，整条跳过
                 if fn is None:
                     continue
-                if getattr(fn, "name", None):
+                slot = tool_deltas.setdefault(tcd.index, {"id": "", "name": "", "args": []})
+                if tcd.id:
+                    slot["id"] = tcd.id
+                if fn.name:
                     slot["name"] = fn.name
-                if getattr(fn, "arguments", None):
+                if fn.arguments:
                     slot["args"].append(fn.arguments)
-        full = litellm.stream_chunk_builder(chunks, messages=messages)
-        self._tls.usage = _usage_dict(full)
-        calls = []
         for i in sorted(tool_deltas):
             slot = tool_deltas[i]
             raw = "".join(slot["args"])
             try:
                 args = json.loads(raw)
-            except ValueError:
-                args = {"_unparsed_json": raw}
+            except ValueError as e:
+                raise ValueError("工具「%s」的参数不是合法 JSON：%r（%s）"
+                                 % (slot["name"], raw, e))
             calls.append(ToolCall(id=slot["id"], name=slot["name"], arguments=args))
         return Message(text="".join(parts), tool_calls=calls)
-
-
-def _usage_dict(resp):
-    """litellm 的 usage 是 pydantic 对象，._log_usage 要的是 dict。"""
-    u = getattr(resp, "usage", None) or {}
-    if hasattr(u, "model_dump"):
-        return u.model_dump()
-    if hasattr(u, "dict"):
-        return u.dict()
-    return dict(u)
 
 
 class ChatPool:

@@ -102,12 +102,17 @@ class Trace:
 _INTAKE_SLUG = hashlib.sha1(b"intake").hexdigest()[:6]
 
 
-def get_trace(path=None):
-    """新会话的 trace 路径：<工作区>/runs/<时间>-<任务哈希>/trace.jsonl。"""
+def trace_path(path=None):
+    """一场会话的记录路径：给了就是它（恢复 / 测试钉住），不给自己生成（新会话）。
+
+    路径是"这棵树（会话）的记录在哪"——树带着它（session 的 {"trace"} 字段），
+    run 只 import 机制（Trace）按路径物化句柄，路径本身不是 run 的入参。
+    新会话路径：<工作区>/runs/<时间>-<任务哈希>/trace.jsonl。
+    """
     if not path:
         slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"), _INTAKE_SLUG)
         path = os.path.join(cfg.WORKSPACE, "runs", slug, "trace.jsonl")
-    return Trace(path)
+    return path
 
 
 def get_traces():

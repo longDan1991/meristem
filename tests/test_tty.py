@@ -45,7 +45,8 @@ sys.path.insert(0, ROOT)
 import terminal.chat as chat                               # noqa: E402
 from prompt_toolkit.input import create_pipe_input         # noqa: E402
 from tree.llm import Message, ToolCall                     # noqa: E402
-from tree.runtime.trace import Trace                       # noqa: E402
+from tree.protocol.fields import Node                      # noqa: E402
+from tree.runtime.session import new_session               # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TIMEOUT = 30
@@ -82,10 +83,11 @@ class Screen(io.StringIO):
         return ANSI.sub("", self.getvalue())
 
 
-def _env():
-    """一次会话一条 trace（跑整棵树的会话记录）+ 共享 registry。"""
+def _env(seed=None):
+    """一次会话一棵树：新会话（入口为根）+ 它自己的记录路径。"""
     d = tempfile.mkdtemp()
-    return {"trace": Trace(os.path.join(d, "t.jsonl")), "registry": {}}
+    return {"tree": new_session(Node(name="会话", kind="intake"), seed=seed,
+                                trace=os.path.join(d, "t.jsonl"))}
 
 
 class FakeLLM:
@@ -206,11 +208,11 @@ def run_session(keys, replies, reasoning="", tty=False, seed="帮我赚大钱",
         llm = FakeLLM(replies, reasoning=reasoning, screen=screen, slow=slow, kids=kids)
         old_llm, chat.LLM = chat.LLM, (lambda: llm)
         old, sys.stdout = sys.stdout, screen
-        env = _env()
+        env = _env(seed)
         try:
             async def go():
                 r, _ = await asyncio.gather(
-                    chat.converse(seed, env, session=session),
+                    chat.converse(env, session=session),
                     _typed(inp, keys, pause))
                 return r
 
@@ -229,11 +231,11 @@ def slow_session(replies, schedule, kids=1):
         llm = FakeLLM(replies, screen=screen, slow=True, kids=kids)
         old_llm, chat.LLM = chat.LLM, (lambda: llm)
         old, sys.stdout = sys.stdout, screen
-        env = _env()
+        env = _env("帮我赚大钱")
         try:
             async def go():
                 r, _ = await asyncio.gather(
-                    chat.converse("帮我赚大钱", env, session=session),
+                    chat.converse(env, session=session),
                     _typed_sched(inp, schedule))
                 return r
 
