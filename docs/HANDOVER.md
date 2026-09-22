@@ -127,7 +127,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
 | `tree/prompts/messages.py` | 126 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `base_user`（线上字节稳定基础消息）/ `spec_line` / `child_result`（下层结论注入，带 id 标记）/ `result_ids`（从对话推导已投递的孩子） |
-| `tree/runtime/intake.py` | 112 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走 session 的 sink |
+| `tree/runtime/intake.py` | 112 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走它自己的 Loop sink（`subscribe` 暴露） |
 | `tree/config.py` | 53 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
 | `tree/compression.py` | 81 | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |
 | `tree/llm.py` | 172 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
@@ -138,7 +138,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
 | `tree/runtime/trace.py` | 78 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
-| `tree/runtime/loop.py` | | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` 持**共享的** `EventSink`（调度器从终端拿的同一个），拼好带 scope 的 emit，自己不发不建；消费方在同一个 sink 上订阅 |
+| `tree/runtime/loop.py` | | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` **内建**自己的 `EventSink` 并拼好带 scope 的 emit，消费方经 `Loop.subscribe` 订阅（调度器把外界的 consumer 逐个订阅到每个 Loop） |
 | `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
 | `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
 | `tree/runtime/scheduler.py` | | **调度器**（**真异步**）：广度优先、并行扇出、门槛。每个节点 = 一个完整的 `run_node` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |

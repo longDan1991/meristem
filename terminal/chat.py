@@ -54,7 +54,6 @@ from rich.text import Text
 from .picker import pick_session
 from .view import render_tree
 from tree import config as cfg
-from tree.events import EventSink
 from tree.llm import LLM
 from tree.protocol.fields import Node
 from tree.runtime.scheduler import run
@@ -232,7 +231,7 @@ async def converse(seed, env, session=None):
     入口**不退场**：谈成一个任务就挂到树上跑掉、把结论带回对话，再接着谈。
     **整场会话是一棵树**（入口为根）—— `run` 把它整棵跑起来，直到用户中止。
 
-    env 是运行现场（trace / registry / sink，并发走环境变量 TREE_WORKERS），
+    env 是运行现场（trace / registry，并发走环境变量 TREE_WORKERS），
     终端不解释它，只把入口的根节点丢给 run；session 是读的那条通道（测试把
     管道驱动的会话塞进来）。
     恢复（`-r`）的会话由 `run_session` 选完就放在 `env["tree"]`，这里原样续跑。
@@ -416,10 +415,8 @@ async def converse(seed, env, session=None):
     # ── 事件路由：一个函数收全部事实，按 scope 分路去画 ──
     # scope=入口节点 id 是入口会话（模型说的 / 想的，画在终端上）；其余 scope
     # 是节点 id（出生 / 完工重画树、流式吐字进 streams）。事件只报事实，怎么画
-    # 是终端的事 —— 终端是 sink 的消费者，不是生产者的参数。
-    sink = EventSink()
-    sink.streaming = sys.stdout.isatty()   # 节点级吐字只对真终端开，不白开 SSE
-
+    # 是终端的事 —— 终端是 sink 的订阅者，不是生产者的参数（EventSink 由
+    # Loop / 调度器内建，这里只把 on_sink 作为 subscribe 回调交出去）。
     def on_sink(type, payload):
         scope = payload.get("scope")
         sroot = session_root[0]
@@ -470,8 +467,6 @@ async def converse(seed, env, session=None):
                     live_ref[0].stop()
                     live_ref[0] = None
 
-    sink.subscribe(on_sink)
-
     tree = env.get("tree")
     root = tree["root"] if tree else Node(name="会话", kind="intake")
     session_root[0] = root
@@ -479,7 +474,7 @@ async def converse(seed, env, session=None):
     intake_task[0] = asyncio.ensure_future(
         run(root, llm, env["trace"], registry=env.get("registry"),
             workers=cfg.WORKERS,
-            sink=sink, resume=tree, seed=seed, ask=ask, say=narrate))
+            subscribe=on_sink, resume=tree, seed=seed, ask=ask, say=narrate))
     try:
         await intake_task[0]
     except _Quit:

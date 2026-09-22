@@ -39,6 +39,7 @@ from ..prompts import render_turn
 from ..prompts.messages import result_ids
 from .hands import Hands
 from .loop import Loop, Transcript, emit_for
+from ..events import EventSink
 from . import reconcile
 from .trace import Trace
 from .turn import node_hooks, node_spec, node_tools, which_of
@@ -64,7 +65,7 @@ def _checkpoint(nid, st, trace, ckpt_base):
 
 
 async def run(root, llm, trace, registry=None, workers=6,
-              sink=None, resume=None, seed=None, ask=None, say=None):
+              subscribe=None, resume=None, seed=None, ask=None, say=None):
     """跑一整棵树（新会话跑入口根，恢复跑读回来的树）。次数不限。
 
     真异步（P4）：一个节点的一整个 Loop = 一个 asyncio task。**workers 限的是
@@ -73,8 +74,10 @@ async def run(root, llm, trace, registry=None, workers=6,
     节点挂起（等孩子）时它的 task 就结束了，等孩子全 settle 再起一个新 task
     续跑 —— 挂起/恢复是调度器的事，循环本身不知道"等孩子"。
 
-    sink 是事件出口（`tree/events.py`）：节点出生/完工发 loop_start/loop_end，
-    更细的事件由 loop/turn 的钩子发。没给 sink 就静默（测试直连调度器时如此）。
+    subscribe 是事件消费者（consumer(type, payload) -> None）：调度器**内建**一个
+    EventSink 发节点出生/完工的 loop_start/loop_end，并把同一个 consumer 订阅到
+    每个 Loop 内建的 sink（更细的事件由 loop/turn 的钩子发）。没给就静默
+    （测试直连调度器时如此）—— EventSink 零消费者时 emit 是 no-op。
 
     ask / say 是入口节点的外部接线：`ask(text)` 拿用户的话（终端那次读，
     测试里换成脚本），`say(text)` 是旁白出口。只有入口节点用它们。
@@ -92,6 +95,12 @@ async def run(root, llm, trace, registry=None, workers=6,
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
     pool = ChatPool(llm, workers)      # workers = 在飞的 llm.chat 数
+    # 调度器自己的事件出口：loop_start / loop_end 是编排时点的事实，发生在
+    # 任何 Loop 之前/之后，只能由这里发。每个 Loop 的事件经 loop.subscribe
+    # 把同一个 consumer 订阅过去（见 run_node）。
+    sink = EventSink()
+    if subscribe is not None:
+        sink.subscribe(subscribe)
     session_root = root                # 入口节点（新会话）/ 树根（恢复）
     state = {}                 # nid -> {"node", "transcript", "seen_actions"}
     delivered = {}             # nid -> 已投递结果的孩子 id 集合（运行时账本）
@@ -200,8 +209,7 @@ async def run(root, llm, trace, registry=None, workers=6,
 
     # 工具与钩子共用的运行时现场（入口节点从 ask/say/spawn_task 拿外部接线）。
     runtime = {"state": state, "llm": llm, "trace": trace,
-               "hands": hands, "ask": ask, "say": say, "spawn_task": spawn_task,
-               "stream": bool(sink is not None and sink.streaming)}
+               "hands": hands, "ask": ask, "say": say, "spawn_task": spawn_task}
 
     def dispatch(nid, out):
         """把 Loop 的产物翻译成编排动作。
@@ -229,13 +237,11 @@ async def run(root, llm, trace, registry=None, workers=6,
 
     async def run_node(nid):
         st = state[nid]
-        node = st["node"]
-        # 入口节点的话有 sink 就流式（终端一直要）；节点级吐字只在真终端上流式
-        stream = sink is not None if node.kind == "intake" else runtime["stream"]
         loop = Loop(pool, st["transcript"], await node_spec(nid, runtime),
                     await node_tools(nid, runtime), node_hooks(nid, runtime),
-                    scope=nid, sink=sink, stream=stream,
-                    temperature=0.3 if node.kind == "intake" else 0.2)
+                    scope=nid)
+        if subscribe is not None:
+            loop.subscribe(subscribe)
         return await loop.run(on_turn=lambda out: on_turn(nid, out))
 
     inflight = {}

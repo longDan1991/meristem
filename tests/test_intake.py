@@ -26,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tree.llm import Message, ToolCall                                # noqa: E402
 from tree.protocol.fields import Node                                 # noqa: E402
 from tree.protocol.gate import anchors, validate_root                 # noqa: E402
-from tree.events import EventSink                                     # noqa: E402
 from tree.runtime.scheduler import run                                # noqa: E402
 from tree.runtime.trace import Trace                                  # noqa: E402
 
@@ -85,14 +84,12 @@ class FakeLLM:
 def run_intake(llm, seed, answers):
     """跑入口根；脚本化的用户答完就中止。返回 (问过的话, 旁白, 节点事件)。"""
     asked, said, events = [], [], []
-    sink = EventSink()
 
     def collect(t, p):
         if t in ("loop_start", "loop_end") and p.get("node") is not None \
                 and p["node"].kind != "intake":
             events.append(p["node"])
 
-    sink.subscribe(collect)
     answers = list(answers)
 
     async def ask(t):
@@ -105,7 +102,7 @@ def run_intake(llm, seed, answers):
     root = Node(name="会话", kind="intake")
     try:
         asyncio.run(run(root, llm, Trace(os.path.join(d, "t.jsonl")),
-                        sink=sink, seed=seed, ask=ask, say=said.append))
+                        subscribe=collect, seed=seed, ask=ask, say=said.append))
     except Stop:
         pass
     return asked, said, events
@@ -200,19 +197,17 @@ def main():
         async def stop_ask(t):
             raise Stop()
         got = []
-        sink = EventSink()
 
         def collect(t, p):
             if t == "message_update" and p.get("scope") == root.id \
                     and p.get("kind") == "content":
                 got.append(p["delta"])
 
-        sink.subscribe(collect)
         d = tempfile.mkdtemp()
         root = Node(name="会话", kind="intake")
         try:
             asyncio.run(run(root, FakeLLM([reply]), Trace(os.path.join(d, "t.jsonl")),
-                            sink=sink, seed="帮我赚大钱", ask=stop_ask))
+                            subscribe=collect, seed="帮我赚大钱", ask=stop_ask))
         except Stop:
             pass
         return "".join(got)

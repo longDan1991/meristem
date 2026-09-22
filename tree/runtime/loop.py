@@ -17,9 +17,8 @@
   · after_chat  —— 模型回来之后、跑工具之前：看回复决定要不要跑工具（给 Outcome 就跳过工具）；
   · after_tool  —— 工具跑完之后：看结果给下一拍（Outcome）。
 
-**事件出口归自己管**（第 4 点）：`Loop` 持有**共享的** `EventSink`（调度器从终端
-那里拿的同一个）并拼好带 scope 的 `emit`；消费方在同一个 sink 上 subscribe 循环
-定义的那几个 `EventType`，不自己拼闭包。
+**事件出口归自己管**（第 4 点）：`Loop` **内建**自己的 `EventSink` 并拼好带 scope
+的 `emit`，消费方经 `Loop.subscribe` 订阅循环定义的那几个 `EventType`，不自己拼闭包。
 `EventSink`（分发机制）在 `events.py`；词汇（`EventType`）在这里，分家不变。
 
 一轮是**原子**的：本轮消息先进 staging，三个钩子都成功后并入真账本 ——
@@ -30,6 +29,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
+from ..events import EventSink
+
 EventType = Literal[
     "loop_start", "loop_end",
     "turn_start", "turn_end",
@@ -39,9 +40,10 @@ EventType = Literal[
 
 
 def emit_for(sink, scope):
-    """把共享出口包成某个 scope 的 emit —— 事件形状只在这一处定。"""
-    if sink is None:
-        return lambda type, payload: None
+    """把出口包成某个 scope 的 emit —— 事件形状只在这一处定。
+
+    sink 恒非 None（Loop 内建 / 调度器内建），所以没有 None 分支。
+    """
     return lambda type, payload: sink.emit(type, {"scope": scope, **payload})
 
 
@@ -187,24 +189,26 @@ class Transcript:
 
 
 class Loop:
-    """一条消息循环。自己管事件出口（持共享 sink，拼好带 scope 的 emit），自己走一轮骨架。
+    """一条消息循环。自己管事件出口（内建 EventSink，subscribe 暴露），自己走一轮骨架。
 
     参数只给需要的那几个：llm、账本、喂给模型的工具声明（tools_spec）、
     模型回来要调用的函数（tools：名字 → async 函数 → ToolResult）、三处语义（hooks）。
+    流式是常开的：`_chat` 总是带 on_delta / on_reasoning（不白开 SSE 的开关已删）。
     """
 
-    def __init__(self, llm, transcript, tools_spec, tools, hooks, *,
-                 scope, sink=None, stream=False, temperature=0.2):
+    def __init__(self, llm, transcript, tools_spec, tools, hooks, *, scope):
         self.llm = llm
         self.transcript = transcript
         self.tools_spec = tools_spec
         self.tools = tools
         self.hooks = hooks
         self.scope = scope
-        self.stream = stream
-        self.temperature = temperature
-        self._sink = sink          # 可能为 None（测试直连调度器）：emit_for 对 None 直接 no-op
+        self._sink = EventSink()          # 机制内建：每个 Loop 自持一个出口
         self._emit = emit_for(self._sink, scope)
+
+    def subscribe(self, consumer):
+        """外界订阅循环发的事实。consumer(type, payload) -> None。"""
+        self._sink.subscribe(consumer)
 
     async def run(self, on_turn=None):
         """跑到 suspend 或 stop。on_turn(outcome) 每轮结束调一次（同步，给落检查点）。"""
@@ -242,16 +246,14 @@ class Loop:
         return out
 
     async def _chat(self, messages):
-        """问模型：按需开流式、发 message_* 事件、返回助手消息。"""
+        """问模型：总是流式（on_delta / on_reasoning 各一条），发 message_* 事件。"""
         self._emit("message_start", {})
-        stream_kw = {}
-        if self.stream:
-            stream_kw["on_delta"] = lambda t: self._emit(
-                "message_update", {"kind": "content", "delta": t})
-            stream_kw["on_reasoning"] = lambda t: self._emit(
-                "message_update", {"kind": "reasoning", "delta": t})
-        msg = await self.llm.chat(messages, tools=self.tools_spec,
-                                  temperature=self.temperature, **stream_kw)
+        msg = await self.llm.chat(
+            messages, tools=self.tools_spec,
+            on_delta=lambda t: self._emit(
+                "message_update", {"kind": "content", "delta": t}),
+            on_reasoning=lambda t: self._emit(
+                "message_update", {"kind": "reasoning", "delta": t}))
         self._emit("message_end", {
             "text": msg.text,
             "tool_calls": [{"name": tc.name, "arguments": tc.arguments}

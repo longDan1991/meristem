@@ -20,16 +20,10 @@ Consumer = Callable[[str, dict], None]
 
 
 class EventSink:
-    """会话级事件出口。零消费者时 emit 是 no-op；按注册顺序逐个分发。
-
-    `streaming`：消费者声明要不要流式增量（`message_update`）。生产者据此
-    决定开不开 LLM 流式 —— 没人看的时候不白开 SSE（AGENTS §11）。
-    终端按 `sys.stdout.isatty()` 设它。
-    """
+    """会话级事件出口。零消费者时 emit 是 no-op；按注册顺序逐个分发。"""
 
     def __init__(self):
         self._consumers: list[Consumer] = []
-        self.streaming = False
 
     def subscribe(self, consumer: Consumer) -> None:
         """consumer(type, payload) -> None。抛错不吞，就地炸（§2）。"""
