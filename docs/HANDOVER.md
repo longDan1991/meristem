@@ -120,22 +120,21 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | 文件 | 行数 | 干什么 |
 |---|---|---|
 | `main.py` | 55 | 薄分派：只解析参数、按参数调 `terminal.chat.run_session`，没有任何装配逻辑 |
-| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（trace/budget/env）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["session"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/trace.py` 的 `get_trace`/`get_traces` |
-| `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
+| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（trace/env）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["session"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/trace.py` 的 `get_trace`/`get_traces` |
+| `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`，树的视图 `render_tree` 在 `view.py`（展示变因，不碰协议）。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
 | `tree/prompts/messages.py` | 126 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `base_user`（线上字节稳定基础消息）/ `spec_line` / `child_result`（下层结论注入，带 id 标记）/ `result_ids`（从对话推导已投递的孩子） |
-| `tree/intake.py` | 256 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走 session 的 sink |
+| `tree/runtime/intake.py` | 112 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走 session 的 sink |
 | `tree/config.py` | 53 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
 | `tree/compression.py` | 81 | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |
 | `tree/llm.py` | 172 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
 | `tree/tools.py` | 132 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
 | `tree/effects.py` | 86 | effects 抽取（bash/write 同一套壳；只进 trace 事件，不落节点状态） |
-| `tree/protocol/fields.py` | 188 | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `deferred`（门槛暂缓计划）+ 渲染（含意图链）+ `EXTERNAL_CLASSES` |
+| `tree/protocol/fields.py` | 123 | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `deferred`（门槛暂缓计划）+ `EXTERNAL_CLASSES`。渲染不在协议层 —— 树的视图在 `terminal/view.py` |
 | `tree/protocol/gate.py` | 180 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
 | `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
 | `tree/runtime/trace.py` | 78 | trace 落盘（写线程 + 队列，无锁） |
-| `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
 | `tree/runtime/loop.py` | 150 | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` 自己持事件出口，外界只 `subscribe` |
 | `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
@@ -150,7 +149,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 `asyncio.Task`（`scheduler` 用 `wait(FIRST_COMPLETED)` 回收，`workers` 是同时在飞的任务数）；
 LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程。
 `hands` 用**单消费者队列**串行 bash/write（AGENTS §9，无锁）。
-**仅有的两个线程是 `trace` 和 `budget`**：它们是单一 I/O 记账者（写 jsonl / 计数），
+**仅有的线程是 `trace`**：它是单一 I/O 记账者（写 jsonl），
 不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着。
 
 ### 2.2 真实数据资产（在工作区里）
@@ -361,7 +360,7 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
 23. **终端交互不能塞进 `main.py` 或 `tree/`。** 一个是装配层（参数/`.env`/cwd），
     一个是树的规矩 —— 它们的变因都不是"人怎么在 tty 上说话"。
     塞进去的后果：改一句提示语要动 `main.py`，`tree/` 里多出一堆 `input()/print()`
-    （`tree/intake.py` 因此变得只能跑在真终端上，测试不了）。
+    （`tree/runtime/intake.py` 因此变得只能跑在真终端上，测试不了）。
     → 落点 `terminal/`，变因清单见 `terminal/__init__.py`；
     依赖方向单向（`main.py` → `terminal` → `tree.intake`），由 `tests/test_tty.py` G 段守门。
 

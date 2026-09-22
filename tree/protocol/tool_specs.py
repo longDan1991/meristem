@@ -86,7 +86,12 @@ def _plain(o):
     return o
 
 
-async def _openai_spec(name):
+async def openai_spec(name):
+    """单个工具 → OpenAI 格式（litellm 的 tools= 列表里的一项）。
+
+    入口（submit_root）和节点工具共用同一个适配器 —— 本地/远端、
+    入口/节点，工具的 schema 生成是同一条路。
+    """
     t = await mcp.get_tool(name)
     if t is None:
         raise RuntimeError(
@@ -101,15 +106,6 @@ async def _openai_spec(name):
 _openai_cache = None
 
 
-async def openai_spec(name):
-    """单个工具 → OpenAI 格式（litellm 的 tools= 列表里的一项）。
-
-    入口（submit_root）和节点工具共用同一个适配器 —— 本地/远端、
-    入口/节点，工具的 schema 生成是同一条路。
-    """
-    return await _openai_spec(name)
-
-
 async def openai_tools():
     """每个节点类型的工具清单（OpenAI 格式，给 litellm）。只建一次。
 
@@ -119,11 +115,11 @@ async def openai_tools():
     """
     global _openai_cache
     if _openai_cache is None:
-        leaf_tools = [await _openai_spec(n) for n in NODE_TOOLS["leaf"]]
+        leaf_tools = [await openai_spec(n) for n in NODE_TOOLS["leaf"]]
         if cfg.COMPRESS:
             leaf_tools.append(RETRIEVE_TOOL)
         _openai_cache = {
-            "alloc": [await _openai_spec(n) for n in NODE_TOOLS["alloc"]],
+            "alloc": [await openai_spec(n) for n in NODE_TOOLS["alloc"]],
             "leaf": leaf_tools,
         }
     return _openai_cache

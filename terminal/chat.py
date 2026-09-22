@@ -30,8 +30,8 @@ prompt_toolkit 各画一遍会把光标位置搞乱（实测）。敲下的行�
 切回详细视图（判定/验收/结论都在，Live 收摊时整幅渲染、能滚动）。
 
 **显示**交给 rich（灰、Live 原地重画）。终端只负责**什么时候画、怎么显示**，
-不自己重写画法：树的视图 `render_tree` 在 `tree/protocol/fields.py` ——
-树长什么样是树的变因。
+不自己重写画法：树的视图 `render_tree` 在 `terminal/view.py` ——
+树长什么样是展示的变因。
 
 入口的吐字是**真流式**：不是等整段回来再一个字一个字放，而是每到一个字
 就立刻写到屏幕上。交形式是**工具调用**（`submit_root`），走的是另一条通道，
@@ -52,10 +52,11 @@ from rich.live import Live
 from rich.text import Text
 
 from .picker import pick_session
+from .view import render_tree
 from tree import config as cfg
 from tree.events import EventSink
 from tree.llm import LLM
-from tree.protocol.fields import Node, render_tree
+from tree.protocol.fields import Node
 from tree.runtime.scheduler import run
 from tree.runtime.session import load, session_label
 from tree.runtime.trace import get_trace, get_traces

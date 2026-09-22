@@ -140,7 +140,7 @@ information already in tool descriptions"（`mcp_types/_types.py:601`）。
 ### Step 0 · 现状基线（已完成，作为本设计的地基）
 
 - `tree/prompts.py`：3 个 FastMCP prompt（`alloc`/`leaf`/`intake`）+ `render_turn`。
-- 消费方：`turn.py ask()`、`intake.py` 走 `render_turn`。
+- 消费方：`turn.py ask()`、`runtime/intake.py` 走 `render_turn`。
 
 ### Step 1 · 把 `.md` 拆成"节"文件
 

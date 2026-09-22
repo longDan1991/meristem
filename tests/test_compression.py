@@ -13,6 +13,7 @@
   D. TREE_COMPRESS=0（保险阀）：不挂取回工具、不产生 wire_compressed。
   F. 命名分节：叶子 system 不含 bash/read/write 签名（它们住在各自工具的
      schema description）、不含 <skill_gate> 节。
+  G. 产出记账：bash 的 rm 在 effects 里记为 delete（修：turn.py 曾把 delete 覆盖成空）。
 
 headroom 的压缩是确定性的（无损折叠 / 日志折叠），所以这些断言不依赖网络。
 """
@@ -212,6 +213,29 @@ def main():
     line("压不动的大输出完整到达（无截断标记）",
          len(t["content"]) == len(raw3) and "截断" not in t["content"],
          "%d 字全量" % len(t["content"]))
+
+    print("=" * 80)
+    print("G. 产出记账：bash 的 rm 在 effects 里记为 delete（不丢）")
+    d = tempfile.mkdtemp()
+    victim = os.path.join(d, "victim.txt")
+    with open(victim, "w") as f:
+        f.write("要被删掉的东西")
+    trace5 = Trace(os.path.join(d, "t5.jsonl"))
+    node5 = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
+    llm5 = ScriptLeaf([("bash", {"cmd": "rm victim.txt"})])
+    cwd = os.getcwd()
+    os.chdir(d)
+    try:
+        asyncio.run(R.run(node5, llm5, trace5, registry={}))
+    finally:
+        os.chdir(cwd)
+    recs5 = [json.loads(x) for x in open(os.path.join(d, "t5.jsonl"))]
+    eff5 = next(r["payload"] for r in recs5
+                if r["kind"] == "effects" and "rm" in str(r["payload"]["args"]))
+    line("rm 的目标在 effects 里记为 delete（不是被覆盖成空）",
+         eff5["effects"]["fs"]["delete"] == [os.path.realpath(victim)],
+         str(eff5["effects"]["fs"]))
+    line("文件确实被删了", not os.path.exists(victim))
 
     print("=" * 80)
     print("F. 命名分节：system 不含三只手的签名、不含 <skill_gate> 节")

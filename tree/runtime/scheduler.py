@@ -37,7 +37,6 @@ from collections import deque
 from ..llm import ChatPool
 from ..prompts import render_turn
 from ..prompts.messages import result_ids
-from .budget import Budget
 from .hands import Hands
 from .loop import Loop, Transcript, emit_for
 from . import reconcile
@@ -61,7 +60,7 @@ def _which(node):
     return node.kind if node.kind in ("leaf", "intake") else "alloc"
 
 
-async def run(root, llm, trace, registry=None, budget=None, workers=6,
+async def run(root, llm, trace, registry=None, workers=6,
               sink=None, resume=None, seed=None, ask=None, say=None):
     """跑一整棵树（新会话跑入口根，恢复跑读回来的树）。次数不限。
 
@@ -86,7 +85,6 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
     中断那一刻在飞的那一步作废，节点带着完整的对话重新问模型 ——
     恢复的语义就是"接着上次停下来的那一步重来"，不是把整棵树重跑一遍。
     """
-    budget = Budget() if budget is None else budget
     registry = {} if registry is None else registry
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
@@ -133,7 +131,8 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
         return task
 
     if resume is not None:
-        raw, root = resume["state"], resume["root"]
+        # registry 只有一个来源：恢复就取 resume 里那份（与终端展示、新节点登记同一份）
+        raw, root, registry = resume["state"], resume["root"], resume["registry"]
         for nid, p in raw.items():
             node = p["node"]
             state[nid] = {"node": node,
@@ -196,7 +195,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
             pending.append(pid)
 
     # 工具与钩子共用的运行时现场（入口节点从 ask/say/spawn_task 拿外部接线）。
-    runtime = {"state": state, "llm": llm, "trace": trace, "budget": budget,
+    runtime = {"state": state, "llm": llm, "trace": trace,
                "hands": hands, "ask": ask, "say": say, "spawn_task": spawn_task,
                "stream": bool(sink is not None and sink.streaming)}
 

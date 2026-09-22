@@ -94,7 +94,7 @@ def _obs_rounds(msgs):
     return n
 
 
-def evidence_ok(node, ev, msgs):
+def evidence_ok(ev, msgs):
     """证据必须指得到真实存在的东西：某次观测、某个子节点、或磁盘上真有的产物。
 
     这是代码替上层做的**第一道**复核。不加它，`判定:满足` 配一句编出来的
@@ -153,7 +153,7 @@ def clean_conclusion(concl, trace, node, msgs=None):
         return None, "判定必须是 满足|未满足|阻塞"
 
     if verdict == "满足":
-        valid, bad = evidence_ok(node, ev, msgs or [])
+        valid, bad = evidence_ok(ev, msgs or [])
         if not valid:
             trace.add(node.id, "verdict_downgraded",
                       {"was": "满足", "reason": "证据指不到任何真实存在的东西",

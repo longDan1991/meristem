@@ -41,7 +41,7 @@ from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ValidationError as ToolValidationError
 
 from ..effects import effects_of
-from ..intake import intake_hooks, intake_spec, intake_tools
+from .intake import intake_hooks, intake_spec, intake_tools
 from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits
 from ..protocol.tool_specs import ChildSpec, NODE_TOOLS, mcp, openai_tools
 from ..prompts.messages import base_user, spec_line
@@ -86,11 +86,11 @@ def _root_anchors(node, state):
 def _current(binding):
     rctx, nid = binding
     st = rctx["state"][nid]
-    return st, st["node"], rctx["trace"], rctx["budget"], rctx
+    return st, st["node"], rctx["trace"], rctx
 
 
 # ---------------------------------------------------------------- 问模型
-def _log_usage(llm, trace, node_id, phase, budget):
+def _log_usage(llm, trace, node_id, phase):
     u = getattr(llm, "last_usage", None)
     if not u:
         return
@@ -101,7 +101,6 @@ def _log_usage(llm, trace, node_id, phase, budget):
         "reasoning": (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
         "cached": (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
         "total": total})
-    budget.add_tokens(total)
 
 
 # ---------------------------------------------------------------- 节点的语义
@@ -119,13 +118,9 @@ def node_hooks(nid, runtime):
     if node.kind == "intake":
         return intake_hooks(nid, runtime)
     which = "leaf" if node.kind == "leaf" else "alloc"
-    llm, trace, budget = runtime["llm"], runtime["trace"], runtime["budget"]
+    llm, trace = runtime["llm"], runtime["trace"]
 
     async def before_chat(transcript):
-        if budget.exhausted():
-            node.close("阻塞", "预算耗尽: " + budget.why(), [])
-            trace.add(node.id, "budget_exhausted", node.conclusion)
-            return Outcome("stop", reason="budget")
         trace.add(node.id, "%s_in" % which, base_user(node))
         wire = transcript.wire()
         if which == "leaf" and cfg.COMPRESS and any(
@@ -142,7 +137,7 @@ def node_hooks(nid, runtime):
         return wire
 
     async def after_chat(transcript, assistant):
-        _log_usage(llm, trace, node.id, which, budget)
+        _log_usage(llm, trace, node.id, which)
         trace.add(node.id, "%s_out" % which,
                   {"text": assistant.text,
                    "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
@@ -323,7 +318,7 @@ async def create_children(children: list[ChildSpec],
     除 notes / gate 外全部必填：缺了或形状不对，这次分配会被代码当场退回，
     原因写回本层对话。一次最多一个 gate。
     """
-    st, node, trace, budget, rctx = _current(_b)
+    st, node, trace, rctx = _current(_b)
     kids_spec, reject = [], None
     for raw in (c.model_dump() for c in children):
         s, why = clean_spec(raw)
@@ -351,15 +346,6 @@ async def create_children(children: list[ChildSpec],
     gates = [s for s in kids_spec if s["gate"]]
     if len(gates) > 1:
         return balk(node, "一次分配最多一个门槛", trace, st)
-    gate = gates[0] if gates else None
-    if gate:
-        first = [gate]
-        rest = [s for s in kids_spec if s is not gate]
-    else:
-        first, rest = kids_spec, []          # 没有门槛就没有"暂缓"，不能把全部当成暂缓
-
-    if not budget.take_nodes(len(kids_spec)):
-        return balk(node, "节点预算不足", trace, st)
     gate = gates[0] if gates else None
     if gate:
         first = [gate]
@@ -399,22 +385,26 @@ async def bash(cmd: Annotated[str,
     出错是常事，也是信息：异常原样给你。别重复跑同一段命令 ——
     换个做法，或者把出错当成事实，用结论「未满足/阻塞」说清楚。
     """
-    st, node, trace, budget, rctx = _current(_b)
+    st, node, trace, rctx = _current(_b)
     cmd = str(cmd or "")
     if not cmd.strip():
         return balk(node, "cmd 是空的：要么写一条命令，要么用 conclude 出结论",
                     trace, st)
     cwd = os.getcwd()
-    # 产出记账：命令里声明会写的目标，跑前后各 stat 一次分 create / modify。
-    # 工作区是共享的、节点是并发的 —— 只认它自己声明过的路径，不去 diff
-    # 整个工作区（全局 diff 会把别的节点此刻写的文件算到它头上）。
+    # 产出记账：命令里声明会碰的目标，跑前后各 stat 一次分 create / modify /
+    # delete（rm 的目标也在这里验，不静默丢掉）。工作区是共享的、节点是并发的
+    # —— 只认它自己声明过的路径，不去 diff 整个工作区（全局 diff 会把别的
+    # 节点此刻写的文件算到它头上）。
     eff, pre = effects_of("bash", {"cmd": cmd}, cwd=cwd)
     declared = eff["fs"]["create"] + eff["fs"]["modify"]
     existed = {p: os.path.exists(p) for p in declared}
+    doomed = eff["fs"]["delete"]
+    doomed_existed = {p: os.path.exists(p) for p in doomed}
     obs = str(await rctx["hands"].run("bash", {"cmd": cmd, "timeout": timeout}))
     created = [p for p in declared if not existed[p] and os.path.exists(p)]
     modified = [p for p in declared if existed[p] and os.path.exists(p)]
-    eff["fs"] = {"create": created, "modify": modified, "delete": []}
+    deleted = [p for p in doomed if doomed_existed[p] and not os.path.exists(p)]
+    eff["fs"] = {"create": created, "modify": modified, "delete": deleted}
     _record_effects(st, trace, node.id, "bash", {"cmd": cmd}, eff, pre,
                     created, modified)
     return _action_result(st, trace, node, "bash", {"cmd": cmd, "timeout": timeout}, obs)
@@ -427,7 +417,7 @@ async def read(path: Annotated[str, "要读的文件路径（相对工作区）�
                limit: Annotated[int, "最多读多少字。"] = 2000,
                _b=Depends(get_step_binding)) -> dict:
     """读文件的一段，并明说这段在哪、还有多少。"""
-    st, node, trace, budget, rctx = _current(_b)
+    st, node, trace, rctx = _current(_b)
     obs = str(await rctx["hands"].run("read", {"path": path, "offset": offset,
                                                "limit": limit}))
     eff, pre = effects_of("read", {"path": path}, cwd=os.getcwd())
@@ -443,7 +433,7 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
                 content: Annotated[str, "文件内容。"] = "",
                 _b=Depends(get_step_binding)) -> dict:
     """写一个文件。产出会记进你的账本，conclude 时必须逐个交代。"""
-    st, node, trace, budget, rctx = _current(_b)
+    st, node, trace, rctx = _current(_b)
     cwd = os.getcwd()
     ap = path if path.startswith("/") else os.path.normpath(os.path.join(cwd, path))
     existed = os.path.exists(ap)
@@ -467,11 +457,10 @@ async def conclude(verdict: str, text: str,
     判定「满足」必须指得出真证据（叶子：第几次观测 / 产物路径；分配节点：
     子任务 name / 产物路径），指不出来会被降级为未满足。
     """
-    st, node, trace, budget, rctx = _current(_b)
+    st, node, trace, rctx = _current(_b)
     concl = {"verdict": verdict, "text": text, "evidence": evidence or [],
              "external": external}
-    got, err = clean_conclusion(concl, trace, node,
-                                msgs=st["transcript"].to_list())
+    got, err = clean_conclusion(concl, trace, node, msgs=st["transcript"].to_list())
     if err:
         trace.add(node.id, "bad_conclusion", err)
         return balk(node, err, trace, st)

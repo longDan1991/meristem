@@ -23,9 +23,9 @@ import contextvars
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ValidationError as ToolValidationError
 
-from .protocol.gate import validate_root
-from .protocol.tool_specs import ChildSpec, mcp, openai_spec
-from .runtime.loop import Hooks, Outcome, ToolResult
+from ..protocol.gate import validate_root
+from ..protocol.tool_specs import ChildSpec, mcp, openai_spec
+from .loop import Hooks, Outcome, ToolResult
 
 # submit_root 的运行时接线：intake_tools 调用前写入 {"spawn_task", "say"}，
 # 工具函数用 Depends 注入 —— 和 turn.py 的 _step_binding 同一个模式。
