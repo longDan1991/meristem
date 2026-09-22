@@ -17,8 +17,9 @@
   · after_chat  —— 模型回来之后、跑工具之前：看回复决定要不要跑工具（给 Outcome 就跳过工具）；
   · after_tool  —— 工具跑完之后：看结果给下一拍（Outcome）。
 
-**事件出口归自己管**（第 4 点）：`Loop` 持有一个 `EventSink` 并拼好带 scope 的
-`emit`；外界只 `subscribe` 循环定义的那几个 `EventType`，不自己拼闭包。
+**事件出口归自己管**（第 4 点）：`Loop` 持有**共享的** `EventSink`（调度器从终端
+那里拿的同一个）并拼好带 scope 的 `emit`；消费方在同一个 sink 上 subscribe 循环
+定义的那几个 `EventType`，不自己拼闭包。
 `EventSink`（分发机制）在 `events.py`；词汇（`EventType`）在这里，分家不变。
 
 一轮是**原子**的：本轮消息先进 staging，三个钩子都成功后并入真账本 ——
@@ -29,16 +30,12 @@ import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
-from ..events import EventSink
-
 EventType = Literal[
     "loop_start", "loop_end",
     "turn_start", "turn_end",
     "message_start", "message_update", "message_end",
     "tool_start", "tool_update", "tool_end",
 ]
-
-Emit = Callable[[str, dict], None]
 
 
 def emit_for(sink, scope):
@@ -118,15 +115,6 @@ class Transcript:
         # 决定增量不可用（增量会丢/错已写过的消息，见 checkpoint）
         self._last_mutated = False
 
-    @classmethod
-    def from_state(cls, st, system):
-        """节点状态里的账本：没有就按 st["msgs"] 建一个（出生 / 恢复同一套）。"""
-        tr = st.get("transcript")
-        if tr is None:
-            tr = cls(system=system, msgs=st.get("msgs", []))
-            st["transcript"] = tr
-        return tr
-
     def _append(self, msg):
         self.msgs.append(msg)
         if self._on_append is not None:
@@ -150,10 +138,6 @@ class Transcript:
             msg["tool_calls"] = wire
         self._append(msg)
         return ids, (wire or None)
-
-    def add_assistant_wire(self, content, wire):
-        """恢复专用：一条已成形的 assistant 消息（带 tool_calls 线格式）原样入账。"""
-        self._append({"role": "assistant", "content": content, "tool_calls": wire})
 
     def add_tool_result(self, tool_call_id, content):
         self._append({"role": "tool", "tool_call_id": tool_call_id,
@@ -186,9 +170,6 @@ class Transcript:
         for m in other.msgs:
             self._append(m)
 
-    def last(self):
-        return self.msgs[-1] if self.msgs else None
-
     def to_list(self):
         return self.msgs
 
@@ -206,7 +187,7 @@ class Transcript:
 
 
 class Loop:
-    """一条消息循环。自己管事件出口（subscribe 给外界），自己走一轮骨架。
+    """一条消息循环。自己管事件出口（持共享 sink，拼好带 scope 的 emit），自己走一轮骨架。
 
     参数只给需要的那几个：llm、账本、喂给模型的工具声明（tools_spec）、
     模型回来要调用的函数（tools：名字 → async 函数 → ToolResult）、三处语义（hooks）。
@@ -222,12 +203,8 @@ class Loop:
         self.scope = scope
         self.stream = stream
         self.temperature = temperature
-        self._sink = sink if sink is not None else EventSink()
+        self._sink = sink          # 可能为 None（测试直连调度器）：emit_for 对 None 直接 no-op
         self._emit = emit_for(self._sink, scope)
-
-    def subscribe(self, consumer):
-        """外界订阅循环发的事实。consumer(type, payload) -> None。"""
-        self._sink.subscribe(consumer)
 
     async def run(self, on_turn=None):
         """跑到 suspend 或 stop。on_turn(outcome) 每轮结束调一次（同步，给落检查点）。"""

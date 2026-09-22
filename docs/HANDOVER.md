@@ -122,7 +122,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | 文件 | 行数 | 干什么 |
 |---|---|---|
 | `main.py` | 55 | 薄分派：只解析参数、按参数调 `terminal.chat.run_session`，没有任何装配逻辑 |
-| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（trace/env）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["session"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/trace.py` 的 `get_trace`/`get_traces` |
+| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（trace/env）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["tree"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/trace.py` 的 `get_trace`/`get_traces` |
 | `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`，树的视图 `render_tree` 在 `view.py`（展示变因，不碰协议）。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
@@ -138,18 +138,18 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
 | `tree/runtime/trace.py` | 78 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
-| `tree/runtime/loop.py` | 150 | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` 自己持事件出口，外界只 `subscribe` |
+| `tree/runtime/loop.py` | | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` 持**共享的** `EventSink`（调度器从终端拿的同一个），拼好带 scope 的 emit，自己不发不建；消费方在同一个 sink 上订阅 |
 | `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
 | `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
-| `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调。每个节点 = 一个完整的 `run_loop` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
+| `tree/runtime/scheduler.py` | | **调度器**（**真异步**）：广度优先、并行扇出、门槛。每个节点 = 一个完整的 `run_node` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
 | `tree/runtime/reconcile.py` | 93 | **编排纯逻辑（调度与恢复共用一份）**：`actionable`（该不该调 LLM：没出结论 + 孩子全回话 + 最后一条不是模型说的）/ `settle`（孩子结论结算：投递 + 门槛续跑/作废）/ `gate_child` / `make_child` |
 | `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点，**增量按序拼回全量**）+ 树分组；`session_label`（检查点推导的摘要，只扫 node 字段，档案认根本身） |
 | `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
 **并发模型（P4 后）**：整个运行时是 asyncio —— 一个节点的一回合 = 一个
-`asyncio.Task`（`scheduler` 用 `wait(FIRST_COMPLETED)` 回收，`workers` 是同时在飞的任务数）；
-LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程。
+`asyncio.Task`（`scheduler` 用 `wait(FIRST_COMPLETED)` 回收，`workers` 是**同时在飞的
+`llm.chat` 数**，`ChatPool` 限的是最贵的那个资源）；LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程。
 `hands` 用**单消费者队列**串行 bash/write（AGENTS §9，无锁）。
 **仅有的线程是 `trace`**：它是单一 I/O 记账者（写 jsonl），
 不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着。

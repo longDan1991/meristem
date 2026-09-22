@@ -472,7 +472,6 @@ async def converse(seed, env, session=None):
 
     sink.subscribe(on_sink)
 
-    env = dict(env, sink=sink)
     tree = env.get("tree")
     root = tree["root"] if tree else Node(name="会话", kind="intake")
     session_root[0] = root

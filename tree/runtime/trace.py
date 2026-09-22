@@ -98,12 +98,14 @@ class Trace:
             raise self._error
 
 
-def get_trace(path=None, task=None):
+# 新会话目录的任务名恒为 intake（入口会话），哈希是常量 —— 没有 task 参数。
+_INTAKE_SLUG = hashlib.sha1(b"intake").hexdigest()[:6]
+
+
+def get_trace(path=None):
     """新会话的 trace 路径：<工作区>/runs/<时间>-<任务哈希>/trace.jsonl。"""
     if not path:
-        slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"),
-                          hashlib.sha1((task or "intake").encode("utf-8"))
-                          .hexdigest()[:6])
+        slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"), _INTAKE_SLUG)
         path = os.path.join(cfg.WORKSPACE, "runs", slug, "trace.jsonl")
     return Trace(path)
 
