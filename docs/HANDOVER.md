@@ -99,6 +99,7 @@ export TREE_BASE_URL='...'                     # 模型
 export TREE_API_KEY='...'
 export TREE_MODEL='deepseek-v4-flash'
 export TREE_WORKSPACE='/Users/wxlong/output/humanoid'   # ← 工作区
+export TREE_WORKERS='6'                                # 同时在飞的模型调用数（并发开关，默认 6）
 export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 ```
 

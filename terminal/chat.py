@@ -42,7 +42,6 @@ prompt_toolkit 各画一遍会把光标位置搞乱（实测）。敲下的行�
 import asyncio
 import os
 import sys
-import time
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -57,7 +56,6 @@ from tree import config as cfg
 from tree.events import EventSink
 from tree.llm import LLM
 from tree.protocol.fields import Node, render_tree
-from tree.runtime.budget import Budget
 from tree.runtime.scheduler import run
 from tree.runtime.session import load, session_label
 from tree.runtime.trace import get_trace, get_traces
@@ -167,27 +165,6 @@ def _seed(task):
             "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。" % task)
 
 
-def _env(trace):
-    """运行现场：trace / budget / registry（并发与进度走固定默认，CLI 不暴露这些参数）。"""
-    registry = {}
-    budget = Budget()
-
-    def beat():
-        # 只在调度线程里被调 —— 它就是唯一改 budget / registry 的线程，
-        # 所以读它们不需要锁（AGENTS §9）。
-        s = budget.stats()
-        st = {}
-        for n in registry.values():
-            st["已出结论" if n.verdict else "运行中"] = \
-                st.get("已出结论" if n.verdict else "运行中", 0) + 1
-        print("[%s] 节点 %d (%.2f 分钟, %d tokens) 状态 %s"
-              % (time.strftime("%H:%M:%S"), s["nodes"], s["minutes"],
-                 s["tokens"], st), flush=True)
-
-    return {"trace": trace, "budget": budget, "registry": registry,
-            "on_beat": beat, "beat": 60}
-
-
 def _show_resumed(tree, path):
     """把重建出来的老会话画给人看 —— 恢复 = 接着谈，先让他看见接的是什么。"""
     print("\n[会话] 已加载：%s" % path)
@@ -212,7 +189,7 @@ async def run_session(a, session=None):
     os.makedirs(ws, exist_ok=True)
     os.chdir(ws)
     print("[工作目录] %s" % ws, flush=True)
-    print("[并发] 6", flush=True)
+    print("[并发] %d" % cfg.WORKERS, flush=True)
     print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
 
     if a.resume:
@@ -230,14 +207,14 @@ async def run_session(a, session=None):
             # 读不了（还没迁移 / 记录损坏）：带着是哪个会话的上下文炸出来，不静默跳过
             print("读不了这个会话（还没迁移，或记录损坏）：%s" % picked, flush=True)
             raise
-        # 会话 = 一棵树（入口节点为根）；直接交给 converse 丢进 run()
-        env = _env(get_trace(picked))
-        env["tree"] = tree
-        env["registry"] = tree["registry"]
+        # 会话 = 一棵树（入口节点为根）；直接交给 converse 丢进 run()。
+        # registry 是运行态：run() 往里登记每个节点，终端靠它画任务树。
+        env = {"trace": get_trace(picked), "tree": tree,
+               "registry": tree["registry"]}
         _show_resumed(tree, picked)
         seed = None
     else:
-        env = _env(get_trace())
+        env = {"trace": get_trace(), "registry": {}}
         task = await opening(session)
         seed = _seed(task)
     print("[trace] %s\n" % os.path.abspath(env["trace"].path), flush=True)
@@ -254,8 +231,9 @@ async def converse(seed, env, session=None):
     入口**不退场**：谈成一个任务就挂到树上跑掉、把结论带回对话，再接着谈。
     **整场会话是一棵树**（入口为根）—— `run` 把它整棵跑起来，直到用户中止。
 
-    env 是运行现场（trace/budget/registry/sink），终端不解释它，只把入口
-    的根节点丢给 run；session 是读的那条通道（测试把管道驱动的会话塞进来）。
+    env 是运行现场（trace / registry / sink，并发走环境变量 TREE_WORKERS），
+    终端不解释它，只把入口的根节点丢给 run；session 是读的那条通道（测试把
+    管道驱动的会话塞进来）。
     恢复（`-r`）的会话由 `run_session` 选完就放在 `env["tree"]`，这里原样续跑。
     """
     session = session or _session()
@@ -500,8 +478,7 @@ async def converse(seed, env, session=None):
     llm = LLM()
     intake_task[0] = asyncio.ensure_future(
         run(root, llm, env["trace"], registry=env.get("registry"),
-            budget=env.get("budget"), workers=env.get("workers", 6),
-            on_beat=env.get("on_beat"), beat=env.get("beat", 60),
+            workers=cfg.WORKERS,
             sink=sink, resume=tree, seed=seed, ask=ask, say=narrate))
     try:
         await intake_task[0]

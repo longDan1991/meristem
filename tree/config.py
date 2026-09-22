@@ -44,3 +44,7 @@ WORKSPACE = _abs(_required("TREE_WORKSPACE"))
 # 这是个保险阀（故障排查 / 复现时关掉，让模型看原文）。关闭后取回工具也不再挂。
 COMPRESS = os.environ.get("TREE_COMPRESS", "1").strip().lower() not in \
     ("0", "false", "no", "off")
+
+# 同时在飞的模型调用数（ChatPool）：终端的唯一并发开关。限的是最贵的那个
+# 资源（llm.chat），不是节点数。CLI 不暴露参数，要改走环境变量。
+WORKERS = int(os.environ.get("TREE_WORKERS", "6"))

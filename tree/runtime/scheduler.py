@@ -62,8 +62,7 @@ def _which(node):
 
 
 async def run(root, llm, trace, registry=None, budget=None, workers=6,
-              on_beat=None, beat=60, sink=None, resume=None, seed=None,
-              ask=None, say=None):
+              sink=None, resume=None, seed=None, ask=None, say=None):
     """跑一整棵树（新会话跑入口根，恢复跑读回来的树）。次数不限。
 
     真异步（P4）：一个节点的一整个 Loop = 一个 asyncio task。**workers 限的是
@@ -252,11 +251,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
             if not inflight:
                 break
             done, _ = await asyncio.wait(list(inflight),
-                                         return_when=asyncio.FIRST_COMPLETED,
-                                         timeout=beat if on_beat else None)
-            if not done:
-                on_beat()
-                continue
+                                         return_when=asyncio.FIRST_COMPLETED)
             for fut in done:
                 nid = inflight.pop(fut)
                 dispatch(nid, fut.result())
