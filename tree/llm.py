@@ -42,29 +42,6 @@ class Message:
     tool_calls: list = field(default_factory=list)
 
 
-def _to_message(msg):
-    """litellm 的 message 对象 → 我们的 Message。参数是 provider 按 schema
-    生成的结构化 JSON，解析失败就把原文原样留着（不悄悄丢掉，§2）。"""
-    calls = []
-    for tc in (getattr(msg, "tool_calls", None) or []):
-        fn = getattr(tc, "function", None)
-        if fn is None:
-            continue
-        raw = getattr(fn, "arguments", None)
-        if isinstance(raw, dict):
-            args = raw
-        elif isinstance(raw, str):
-            try:
-                args = json.loads(raw)
-            except ValueError:
-                args = {"_unparsed_json": raw}
-        else:
-            args = {}
-        calls.append(ToolCall(id=getattr(tc, "id", "") or "",
-                              name=getattr(fn, "name", "") or "",
-                              arguments=args))
-    return Message(text=getattr(msg, "content", None) or "", tool_calls=calls)
-
 # 我们只依赖 OpenAI 兼容协议（Ark / vLLM / Kimi / Qwen / DeepSeek 都是），
 # 所以模型名统一走 openai/ 前缀 + api_base，不交给 litellm 猜 provider。
 # 模型名里已带 provider 前缀（如 "deepseek/deepseek-chat"）就原样用。
@@ -72,6 +49,12 @@ _COMPAT_PREFIX = "openai/"
 
 litellm.suppress_debug_info = True
 litellm.drop_params = True
+
+# 重试次数：**与流式无关**。litellm 的 num_retries 只重试"请求建立阶段"（拿到
+# 首个 chunk / 响应头之前）的错误；已经开始吐字后断流会直接抛给调用方、不重发
+# 整流 —— 所以不会把同一段话说两遍（openai 兼容端点的语义：流式断流是原样炸
+# 不是重来）。之前按"流式就不重试"一刀切，把"没吐字前可重来"也关了。
+_RETRIES = 4
 
 
 class LLM:
@@ -93,16 +76,13 @@ class LLM:
         """给 messages，返回 Message（文本 + 工具调用）。真异步（P4）：走 `litellm.acompletion`。
 
         `tools` 给了就带工具（`tool_choice="auto"`）：模型要么调工具要么回文本。
-        `on_delta` / `on_reasoning` 给了任一个就**流式**：内容每到一个字就调
-        一次 `on_delta(这一小口)`，模型思考每到一个字就调一次
-        `on_reasoning(这一小口)` —— 两条分开，终端才能把思考画成灰的、
-        回答画成亮的。**流式 + tools 也支持**：工具调用的参数在增量里拼起来
-        （入口那一路：话要流式吐字、形式要结构化收）。
+        **总是流式**（`stream=True`）：内容每到一个字调一次 `on_delta`、模型思考
+        每到一个字调一次 `on_reasoning`（None 就不回调）—— 两条分开，终端才能
+        把思考画成灰的、回答画成亮的。流式 + tools 也支持：工具调用的参数在
+        增量里拼起来（入口那一路：话要流式吐字、形式要结构化收）。
 
-        重试（litellm 的 num_retries）：**没吐字之前的网络错误可以重来**；
-        已经开始吐字就不重试 —— 重试会把同一段话说两遍（实测教训）。
+        重试（`_RETRIES`）：只在请求建立阶段生效，与流式无关（见模块注释）。
         """
-        streaming = on_delta is not None or on_reasoning is not None
         resp = await litellm.acompletion(
             model=self._route(self.model),
             messages=messages,
@@ -112,12 +92,9 @@ class LLM:
             tools=tools,
             tool_choice="auto" if tools else None,
             parallel_tool_calls=(False if tools else None),  # 一次只能调一个（balk 兜底）
-            stream=streaming,
-            num_retries=0 if streaming else 4,
+            stream=True,
+            num_retries=_RETRIES,
         )
-        if not streaming:
-            self._tls.usage = _usage_dict(resp)
-            return _to_message(resp.choices[0].message)
         return await self._stream(resp, messages, on_delta, on_reasoning)
 
     async def _stream(self, resp, messages, on_delta, on_reasoning):
@@ -132,12 +109,13 @@ class LLM:
             except (IndexError, TypeError):
                 continue                # usage-only 收尾块，没有 choices
             reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning:
+            if reasoning and on_reasoning is not None:
                 on_reasoning(reasoning)
             piece = getattr(delta, "content", None)
             if piece:
                 parts.append(piece)
-                on_delta(piece)
+                if on_delta is not None:
+                    on_delta(piece)
             for tcd in (getattr(delta, "tool_calls", None) or []):
                 idx = getattr(tcd, "index", 0)
                 slot = tool_deltas.setdefault(idx, {"id": "", "name": "", "args": []})
