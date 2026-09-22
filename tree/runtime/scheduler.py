@@ -238,10 +238,10 @@ async def run(root, llm, trace, registry=None, workers=6,
     async def run_node(nid):
         st = state[nid]
         loop = Loop(pool, st["transcript"], await node_spec(nid, runtime),
-                    await node_tools(nid, runtime), node_hooks(nid, runtime),
-                    scope=nid)
+                    await node_tools(nid, runtime), node_hooks(nid, runtime))
         if subscribe is not None:
-            loop.subscribe(subscribe)
+            # Loop 不认识 scope：订阅的那一刻打上 —— 这是谁的 Loop 由这里定
+            loop.subscribe(lambda t, p: subscribe(t, {"scope": nid, **p}))
         return await loop.run(on_turn=lambda out: on_turn(nid, out))
 
     inflight = {}

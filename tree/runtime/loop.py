@@ -42,7 +42,9 @@ EventType = Literal[
 def emit_for(sink, scope):
     """把出口包成某个 scope 的 emit —— 事件形状只在这一处定。
 
-    sink 恒非 None（Loop 内建 / 调度器内建），所以没有 None 分支。
+    现在只有调度器用它（loop_start / loop_end 是编排时点的事实，发生在任何
+    Loop 之前/之后，scope 由调度器直接打）；Loop 自己的事件不走这里 ——
+    它的身份由订阅关系决定（scheduler 订阅时打 scope，见 run_node）。
     """
     return lambda type, payload: sink.emit(type, {"scope": scope, **payload})
 
@@ -194,17 +196,19 @@ class Loop:
     参数只给需要的那几个：llm、账本、喂给模型的工具声明（tools_spec）、
     模型回来要调用的函数（tools：名字 → async 函数 → ToolResult）、三处语义（hooks）。
     流式是常开的：`_chat` 总是带 on_delta / on_reasoning（不白开 SSE 的开关已删）。
+    **不认识 scope**：每个 Loop 一个独立 sink，它发出的每个事件被谁订阅、
+    代表哪个节点，由订阅那一刻决定（scheduler 订阅时打上 scope）——
+    Loop 自己不需要知道自己的身份。
     """
 
-    def __init__(self, llm, transcript, tools_spec, tools, hooks, *, scope):
+    def __init__(self, llm, transcript, tools_spec, tools, hooks):
         self.llm = llm
         self.transcript = transcript
         self.tools_spec = tools_spec
         self.tools = tools
         self.hooks = hooks
-        self.scope = scope
         self._sink = EventSink()          # 机制内建：每个 Loop 自持一个出口
-        self._emit = emit_for(self._sink, scope)
+        self._emit = self._sink.emit      # 不带 scope：身份由订阅关系决定
 
     def subscribe(self, consumer):
         """外界订阅循环发的事实。consumer(type, payload) -> None。"""
