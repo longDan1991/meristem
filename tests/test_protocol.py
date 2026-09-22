@@ -75,7 +75,8 @@ class Scripted:
             and any(tc.get("function", {}).get("name") == tname
                     for tc in m["tool_calls"]))
 
-    async def chat(self, messages, temperature=0.2, tools=None):
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
+                   tools=None):
         self.calls += 1
         user = next((m["content"] for m in messages
                      if m.get("role") == "user"), "")
@@ -202,6 +203,24 @@ def line(tag, cond, detail=""):
     return bool(cond)
 
 
+# 节点最后落盘的对话（历史只活在这一处 —— 结论审计、"本层历史"都从它推导）。
+def last_msgs(recs, nid):
+    st = [r for r in recs if r["kind"] == "state" and r["node"] == nid][-1]
+    return st["payload"]["msgs"]
+
+
+def msgs_text(recs, nid):
+    return " ".join(str(m.get("content", "")) for m in last_msgs(recs, nid))
+
+
+def n_calls(recs, nid, tool):
+    """对话里调过某个工具几次（平铺记录数）。"""
+    return sum(1 for m in last_msgs(recs, nid)
+               if m.get("role") == "assistant" and m.get("tool_calls")
+               and any(tc.get("function", {}).get("name") == tool
+                       for tc in m["tool_calls"]))
+
+
 def main():
     ok = True
 
@@ -210,10 +229,9 @@ def main():
     root, reg, recs, _ = go("gate_fail")
     print("  启动的节点: %s" % kinds(recs))
     gf = [r for r in recs if r["kind"] == "gate_failed"]
-    print("  根的尝试记录: %s" % json.dumps(root.attempts, ensure_ascii=False))
     ok &= line("SIB 从未启动", not any(k == "SIB" for k in kinds(recs)))
     ok &= line("留下 gate_failed 记录", bool(gf))
-    ok &= line("历史里写明门槛不成立", "门槛不成立" in str(root.attempts))
+    ok &= line("历史里写明门槛不成立", "暂缓分支作废" in msgs_text(recs, root.id))
     ok &= line("根出了结论", bool(root.verdict), root.verdict)
 
     print("=" * 80)
@@ -227,9 +245,8 @@ def main():
     print("C. 子任务验收标准丢了可测物理量 → 这次分配被代码拒")
     root, reg, recs, _ = go("anchor")
     drift = [r for r in recs if r["kind"] == "criterion_drift"]
-    print("  根的尝试记录: %s" % json.dumps(root.attempts, ensure_ascii=False))
     ok &= line("留下 criterion_drift 记录", bool(drift))
-    ok &= line("被拒这件事进了本层历史", "rejected" in str(root.attempts))
+    ok &= line("被拒原因写回对话", "丢了可测物理量" in msgs_text(recs, root.id))
     ok &= line("没有启动任何子节点",
                not any(r["kind"] == "open" and r["payload"].get("parent") for r in recs))
 
@@ -249,33 +266,32 @@ def main():
     print("  EARLY 的判定: %s | 根的判定: %s"
           % (early[0].verdict if early else "?", root.verdict))
     ok &= line("早期子节点真的跑过", bool(early) and early[0].verdict == "满足")
-    ok &= line("末轮是被拒那次（没有 results）",
-               bool(root.attempts) and "results" not in root.attempts[-1])
     ok &= line("证据引更早一轮的孩子 → 不降级", root.verdict == "满足")
 
     print("=" * 80)
     print("E. 次数不限，但每次都看得见")
     root, reg, recs, _ = go("many")
-    n_attempts = len(root.attempts)
+    n_attempts = sum(1 for r in recs if r["kind"] == "allocated")
     print("  根分配了 %d 次，启动的节点: %s" % (n_attempts, kinds(recs)))
     ok &= line("反复分配没有被计数器阻止", n_attempts >= 3, "%d 次" % n_attempts)
-    ok &= line("每次尝试都在历史里", all("children" in a for a in root.attempts))
+    ok &= line("每次尝试都在对话里",
+               n_calls(recs, root.id, "create_children") == n_attempts)
     ok &= line("最终能出结论", bool(root.verdict), "%s / %s" % (root.verdict, root.conclusion))
 
     print("=" * 80)
     print("F. 必填项缺一个 → 当场被拒；长字段原样通过（没有任何长度检查）")
     root2, reg2, recs2, _ = go("missing")
-    print("  被拒原因: %s" % str(root2.attempts)[:120])
-    ok &= line("缺 accept → 被拒并留下原因", "rejected" in str(root2.attempts))
+    ok &= line("缺 accept → 被拒并把原因写回对话",
+               "工具参数不合形状" in msgs_text(recs2, root2.id)
+               and "children.0.accept" in msgs_text(recs2, root2.id))
     ok &= line("没有启动任何子节点",
                not any(r["kind"] == "open" and r["payload"].get("parent") for r in recs2))
     root3, reg3, recs3, _ = go("badrange")
     ok &= line("conc_range 形状不对（[500,100]）→ 被拒",
-               "conc_range" in str(root3.attempts))
+               "conc_range" in msgs_text(recs3, root3.id))
     root5, reg5, recs5, _ = go("badkind")
-    print("  kind 写错的原因: %s" % str(root5.attempts)[:100])
     ok &= line('kind 写成 "dispatch|leaf" → 被拒（不再默默当 dispatch）',
-               "rejected" in str(root5.attempts) and "kind" in str(root5.attempts))
+               "kind 必须是 dispatch 或 leaf" in msgs_text(recs5, root5.id))
     root4, reg4, recs4, _ = go("long")
     longest = max((len(n.detail) for n in reg4.values()), default=0)
     ok &= line("400 字的 detail 原样通过（代码不做长度检查）", longest == 400,

@@ -16,6 +16,7 @@ litellm 把它透传给任何 OpenAI 兼容端点。
 `turn._log_usage` 立刻读走，所以这里不需要共享计数器、也不需要锁（AGENTS §9）。
 """
 
+import asyncio
 import json
 import os
 import threading
@@ -169,4 +170,64 @@ def _usage_dict(resp):
     if hasattr(u, "dict"):
         return u.dict()
     return dict(u)
+
+
+class ChatPool:
+    """把 llm.chat 串成 N 路并发：workers = **同时在飞的 llm.chat 数**。
+
+    请求进队列，N 个消费者各取一个跑，结果经 future 原路送回 —— 消息传递，
+    没有锁（AGENTS §9）。聊天和节点 Loop 解耦：节点卡在慢工具、或入口在等
+    用户时，不占聊天名额；真正被限的是最贵的那个资源（模型请求）。
+
+    异常用 **done-callback** 原样搬到调用方的 future 上（和 hands.py 同一套）：
+    不吞、也不让消费者 task 死掉（死了后面的请求就永远等不到）。`asyncio.wait`
+    只等完成、不取出异常 —— 消费者靠它占住名额，又不被异常炸死。
+
+    用量仍然落在底层 llm 上（`last_usage` 线程本地）：消费者 await 完 chat
+    后**同步**写 usage、同步 resolve future，单线程 asyncio 下调用方 await 一返回
+    就读得到，中间不会插进别的 chat。
+    """
+
+    def __init__(self, llm, workers):
+        self.llm = llm
+        self._q = asyncio.Queue()
+        self._workers = [asyncio.ensure_future(self._serve())
+                         for _ in range(max(1, int(workers)))]
+
+    async def _serve(self):
+        while True:
+            fut, kwargs = await self._q.get()
+            task = asyncio.ensure_future(self._call(kwargs))
+            task.add_done_callback(lambda t, f=fut: _deliver(f, t))
+            await asyncio.wait([task])      # 占住名额，但不取异常（交给回调）
+
+    async def _call(self, kwargs):
+        """把一次聊天调进一个协程：调用本身的同步错误（如签名不匹配）也变成
+        task 异常、经 done-callback 原样交付 —— 否则它会在 `ensure_future` 前
+        同步炸掉，worker 当场死、后面排队的人永远等不到（实测挂死）。"""
+        return await self.llm.chat(**kwargs)
+
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
+                   tools=None):
+        fut = asyncio.get_running_loop().create_future()
+        await self._q.put((fut, {"messages": messages, "temperature": temperature,
+                                 "on_delta": on_delta, "on_reasoning": on_reasoning,
+                                 "tools": tools}))
+        return await fut
+
+    async def close(self):
+        for w in self._workers:
+            w.cancel()
+
+
+def _deliver(fut, task):
+    """把一次聊天的结果 / 异常原样搬到调用方的 future 上（不吞、不炸消费者）。"""
+    if fut.done():
+        return
+    if task.cancelled():
+        fut.cancel()
+    elif task.exception() is not None:
+        fut.set_exception(task.exception())
+    else:
+        fut.set_result(task.result())
 

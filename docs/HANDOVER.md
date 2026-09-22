@@ -19,15 +19,24 @@
 > join，对齐 pi 的 `system-prompt.ts`）。
 > **system 不走 @mcp.prompt**：`tree/prompts/__init__.py` 的 `render_turn` 直接返回
 > `[system, 基础 user]` 分开两条；**class Node 不碰字符串**，消息拼接全部在
-> `tree/prompts/messages.py`（header / lineage / attempts / observations /
-> base_user / full_view / child_result）。
-> **每个节点（分配节点和叶子一样）都是完整 Loop**：统一维护 st["msgs"] 平铺对话
+> `tree/prompts/messages.py`（header / lineage / base_user / spec_line / child_result）。
+> **每个节点（分配节点和叶子一样）都是完整 Loop**：统一维护平铺对话
 > （基础 user 字节稳定 + 累积的 assistant/tool/user），分配节点的每次分配（create_children
 > 的 tool 回话）和下层结论（调度器注入）都在对话里，不再单发 render 整个历史。
 > 叶子从 `run_code`（一段代码）改成**直接工具**（`bash` / `read` / `write` / `conclude`），
 > 工具语义唯一来源 = schema description；`tree/runtime/sandbox.py`、
 > `effects.snapshot_workspace/classify_paths`、`config.SNIPPET_DIR` 随之删除。
 > 工具清单的单一事实是 `tool_specs.NODE_TOOLS`。
+
+> **2026-09 存储重构：检查点 = `{node, msgs}`，编排字段全部删除。** Node 删掉
+> `attempts` / `observations` / `status` —— 历史只活在一处（每个节点的平铺对话 msgs），
+> 状态检查点 = `{"node": Node.to_dict(), "msgs": [...]}`，没有 ready / finished / waiting /
+> rest / gate_id 等编排字段。编排由 `tree/runtime/reconcile.py`（actionable 谓词 + settle 结算，
+> **调度与恢复共用一份**）从节点事实和对话推导：恢复时用同一个 settle 补投递
+> （崩溃窗口：孩子出了结论、没结算进父节点）。`artifacts` / `art_effects` / `contracts`
+> 契约机制整体删除（effects / gate / tool_specs / rules 同步清理）。`deferred`（门槛的
+> 暂缓规格）是节点上唯一计划性质的数据；gate 靠子节点上的 `gate=True` 找，不存 gate_id。
+> intake 仍是独立循环（不是根节点），会话 = 多棵树 + chat_* 对话 —— intake 并入根节点是下一步。
 
 ---
 
@@ -69,18 +78,12 @@
 ```bash
 cd /Users/wxlong/MYCode/humanoid
 
-# 真跑（路径全部来自 .env，入口默认就是 intake）
-python3 main.py "帮我做一个能赚大钱的A股量化系统" \
-    -c "账户权益在2026-12-31收盘 >= 本金 x 2" --workers 3 --progress 0
-
-# 入口：和你谈，谈成一个任务就当场跑掉、把结论带回来接着谈（不退场，Ctrl-D 停）
-# 不给 -c 就是「我还没定验收标准，入口去问」—— 不许拿默认值当用户的话
-python3 main.py "帮我自动做视频赚钱"
-
-# 连任务都没想好：先让你在终端上把开场白说完，再让入口开口
+# 真跑（路径全部来自 .env，入口默认就是 intake；CLI 只剩 -r 一个参数）
+# 任务、验收标准、并发……全在终端里谈定 —— 入口问你要什么、怎么算验收
 python3 main.py
 
 # 接着上次的会话：列表选一个加载成当前会话，对话接着谈、没跑完的树接着跑
+# （选了之后马上重建整棵 Node 树，对话接着谈）
 python3 main.py -r
 
 # 跑完当场就把整棵树打出来。想事后从 trace 重建 —— 现在没有这个脚本了（见 §5①）
@@ -116,25 +119,30 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 152 | 入口/CLI。默认就是 intake；`-r` 恢复老会话。工作目录固定取 `TREE_WORKSPACE`；只管装配，不碰终端 |
+| `main.py` | 55 | 薄分派：只解析参数、按参数调 `terminal.chat.run_session`，没有任何装配逻辑 |
+| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（trace/budget/env）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["session"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/trace.py` 的 `get_trace`/`get_traces` |
 | `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
-| `tree/prompts/messages.py` | 150 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `attempts` / `observations` / `base_user`（线上字节稳定基础消息）/ `full_view`（trace 快照）/ `child_result`（下层结论注入） |
-| `tree/intake.py` | 256 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈 |
+| `tree/prompts/messages.py` | 126 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `base_user`（线上字节稳定基础消息）/ `spec_line` / `child_result`（下层结论注入，带 id 标记）/ `result_ids`（从对话推导已投递的孩子） |
+| `tree/intake.py` | 256 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走 session 的 sink |
 | `tree/config.py` | 53 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
 | `tree/compression.py` | 81 | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |
 | `tree/llm.py` | 172 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
 | `tree/tools.py` | 132 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
-| `tree/effects.py` | 318 | effects 抽取 + 契约核对 / `.meta.json` 落盘 + **工作区快照与 diff**（产出认定） |
-| `tree/protocol/fields.py` | 324 | **协议层**：`Node` 形式字段 + 渲染（含意图链）+ `VIEW` + `EXTERNAL_CLASSES` |
-| `tree/protocol/gate.py` | 213 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 契约核对 / 根校验） |
+| `tree/effects.py` | 86 | effects 抽取（bash/write 同一套壳；只进 trace 事件，不落节点状态） |
+| `tree/protocol/fields.py` | 188 | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `deferred`（门槛暂缓计划）+ 渲染（含意图链）+ `EXTERNAL_CLASSES` |
+| `tree/protocol/gate.py` | 180 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
 | `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
 | `tree/runtime/trace.py` | 78 | trace 落盘（写线程 + 队列，无锁） |
 | `tree/runtime/budget.py` | 67 | 预算计数（账本线程 + 队列，无锁） |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
-| `tree/runtime/turn.py` | 480 | 一个节点的一回合：问模型（带工具）→ 工具函数做动作 / 出结论。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点 ctx）；产出的记账由工具自己报（write 写谁 / bash 命令里声明会写的目标） |
-| `tree/runtime/scheduler.py` | 237 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调、**节点开/关事件回调（`on_event`）与节点级吐字回调（`on_delta/on_reasoning`，给终端实时画树）** |
+| `tree/runtime/loop.py` | 150 | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` 自己持事件出口，外界只 `subscribe` |
+| `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
+| `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
+| `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调。每个节点 = 一个完整的 `run_loop` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
+| `tree/runtime/reconcile.py` | 93 | **编排纯逻辑（调度与恢复共用一份）**：`actionable`（该不该调 LLM：没出结论 + 孩子全回话 + 最后一条不是模型说的）/ `settle`（孩子结论结算：投递 + 门槛续跑/作废）/ `gate_child` / `make_child` |
+| `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点）+ 树分组；`session_label` / `session_context` |
 | `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
@@ -193,7 +201,7 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
 | 跟某层对话 | 追加一条带来源标记的外部观测 |
 | 禁用某分支（模板理由 / 自写理由） | 等价于"门槛不成立"（分支作废、兄弟不启动） |
 | 在某层加一个分支 | 走 `children`，过**同一套校验**（人不是后门） |
-| "你这样分还不如那样分" | 追加一次 `attempts`：`人工否决｜理由`，作废该层子分支重分配 |
+| "你这样分还不如那样分" | 写一条外部观测进该层对话：`人工否决｜理由`，作废该层子分支重分配 |
 | 暂停某分支 | 记 `人工暂停｜理由`（合法，但必须带理由） |
 
 - **落点**：`terminal/control.py`，**不是** `tree/`。控制面换的是"介质与话轮"
@@ -201,7 +209,7 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
   完全相同，所以共享同一个包，不另开模块。装配那天在 `main.py` 加子命令即可。
   动作不要直接改内存里的 `Node` —— 写 trace 事件，再由调度器在下一个决策点读进去。
 - **不要做"有树在跑就拒绝"这类锁**：正在跑的叶子看不见字段变更，
-  正确做法是走 `observations` 通道 —— 人的话变成一条外部观测，下一个决策点就可见。
+  正确做法是走**对话（外部观测消息）**通道 —— 人的话变成一条外部观测，下一个决策点就可见。
 - **不要先做 LLM 视图**：先做一个筛选（阻塞 > 被拒 > 门槛不过 > 其余折叠），
   人会自然告诉你他想看什么。节点寻址用路径或名字前缀。
 - **顺手要补的**：从 trace 重建整棵树的视图（原来在 `report.py` 里，
@@ -230,7 +238,7 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
 
 ### ④ 入口在真模型上跑一次
 
-- `python3 main.py "帮我自动做视频赚钱"`
+- `python3 main.py`（终端里说出任务；CLI 只剩 `-r`）
 - 看三件事：会不会真的问用户（而不是自己编一个目标）；
   谈出来的 `accept` 有没有可测物理量；它会不会自己提一条标准（而不是问用户要）；
   看着做不成的事，它会不会老老实实谈成一件可验收的事。
@@ -238,9 +246,9 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
 ### ⑤ 小项
 
 - 无进展检测的阈值 3 / 5 是**拍的**，没有依据
-- `EXTERNAL_CLASSES` 是硬编码的四类（在 `tree/protocol/fields.py`，和 `VIEW` 放一起）；
+- `EXTERNAL_CLASSES` 是硬编码的四类（在 `tree/protocol/fields.py`）；
   按设计它只应作"提议"，由人确认
-- 观测历史的可见预算（最近 10 次 / 单条 1500 / 总 6000 字）是拍的
+- headroom 压缩的 token 阈值（`min_tokens_to_compress`）和无进展阈值一样是拍的
 
 ---
 
@@ -249,12 +257,12 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
 | 文件 | 断言 | 管什么 |
 |---|---|---|
 | `tests/test_protocol.py` | 60 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、无进展停下、分配节点没有 execute、**收到的行首 == 要写的 7 个键**、**文档点名的节 == 真渲染的节（节名集合双向核对）**、**意图链两种节点都有**、**命名分节：节在场性（gate/COMPRESS 条件节）/ 字节稳定 / 节名校验**、**提示词注册成 FastMCP prompt：可枚举 / 缺必填被校验挡住 / wire=[system,user]** |
-| `tests/test_tools.py` | 20 | 截断/限制必须可见：read 报区间+可翻页、bash 标截断、观测历史新者优先、bash 超时可见/可调/连子进程一起杀 |
+| `tests/test_tools.py` | 20 | 截断/限制必须可见：read 报区间+可翻页、bash 输出不截断、bash 超时可见/可调/连子进程一起杀 |
 | `tests/test_intake.py` | 24 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
 | `tests/test_cli.py` | 12 | `main.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
 | `tests/test_tty.py` | 53 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
 | `tests/test_compression.py` | 19 | 平铺对话（分配节点和叶子同构）：asst/tool 配对、压缩只发生在发送边界（存储原文、线上压短、user 一字未动）、LOG 折叠嵌取回标记且按 hash 可逆、`TREE_COMPRESS=0` 保险阀、压不动的大输出完整到达 |
-| `tests/test_resume.py` | 44 | 会话续跑：trace 恢复重建、in_flight 树接着跑、结论回填、迁移的旧会话（老格式无 state 检查点） |
+| `tests/test_resume.py` | 44 | 会话续跑：从 {node, msgs} 检查点重建、崩溃窗口补投递、门槛续跑/作废、in_flight 树接着跑、结论回填、迁移的旧会话（老格式无 state 检查点） |
 
 ```bash
 for t in protocol tools intake compression resume cli tty; do python3 tests/test_$t.py; done
@@ -322,7 +330,7 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
     而一旦它有了剪枝权，错误就再也不会被推翻（不调用 → 无 counter-evidence → 永不退休）。
 
 17. **别用"复活"这个词。** 树没有挂起状态；"接着跑"实际只能是"新建一个节点，
-    把老节点的观测历史搬过来当起点"。老树能复用的是**证据**，不是进度。
+    把老节点的对话/历史搬过来当起点"。老树能复用的是**证据**，不是进度。
 
 18. **提示词和代码检查是一对，改一边就要看另一边。** 提示词在 `tree/prompts/`（节内容
     直接写在代码里，改提示词要碰 `prose.py` / `rules.py`），硬性要求在 `tree/protocol/gate.py`
@@ -340,33 +348,26 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
     否则只能说"先例的数据在那边（只读）"。工作目录只有 `TREE_WORKSPACE`
     一个来源（`main.py` 里没有任何别的入口），提示词里不需要让模型选。
 
-21. **`contract_problems` 拿 cwd 去核对 `func` 里的文件引用，有两个洞：**
-    ① 正则只从字母数字开头，把绝对路径的前导 `/` 吃掉了，`/a/b/x.py`
-    被当成相对路径去 cwd 里找，**永远找不到**（实测 5 轮 `contract_bad`，白烧 5 万 token）；
-    ② `cd sub && python3 x.py` 被判成"不是一条能直接执行的命令"，
-    虽然它就是一条能直接粘上跑的命令。
-    → 规矩：引用文件的正则要收前导 `/`，相对路径按工作区解析，
-    `cd` 之后按 `cd` 到的目录解析；`cd` 目录不存在要单独报出来。
-
-22. **证据复核不能只看最后一轮。** `_evidence_ok` 只取 `attempts[-1].results`，
-    而最后一轮常常是**被拒的一次分配**（`balk` 写的 attempt 里根本没有 `results` 键），
+21. **证据复核不能只看最后一轮。** 老的 `_evidence_ok` 只取最后一轮分配尝试的
+    `results`，而最后一轮常常是**被拒的一次分配**（那条尝试里根本没有结果），
     于是上面一轮真跑过的子任务名被判成"编出来的"，一次本该满足的结论被降级成未满足。
-    → 规矩：证据引自**任何一轮**分配出来的子节点都算数。
+    → 现在证据从整份对话推导（下层结论消息全量累积在对话里），天然覆盖所有轮次，
+    这类窗口在结构上不存在了。
 
-23. **同一个问题在终端上显示两遍。** `intake` 原来把"问什么 / 建议什么"同时交给
+22. **同一个问题在终端上显示两遍。** `intake` 原来把"问什么 / 建议什么"同时交给
     `on_say`（旁白）和 `ask`（问用户），于是终端里出现"问：X / 我建议：Y / X /
     （我的建议：Y）/ › "。加一句注释提醒"这两条别重复显示"是守不住的 ——
     这是边界错位（两条通道传了同一份东西），不是记性问题。
     正确动作是移边界：**问题与建议只走 `ask`，旁白（打回理由、重复计数）只走 `on_say`**。
 
-24. **终端交互不能塞进 `main.py` 或 `tree/`。** 一个是装配层（参数/`.env`/cwd），
+23. **终端交互不能塞进 `main.py` 或 `tree/`。** 一个是装配层（参数/`.env`/cwd），
     一个是树的规矩 —— 它们的变因都不是"人怎么在 tty 上说话"。
     塞进去的后果：改一句提示语要动 `main.py`，`tree/` 里多出一堆 `input()/print()`
     （`tree/intake.py` 因此变得只能跑在真终端上，测试不了）。
     → 落点 `terminal/`，变因清单见 `terminal/__init__.py`；
     依赖方向单向（`main.py` → `terminal` → `tree.intake`），由 `tests/test_tty.py` G 段守门。
 
-25. **别把"实现省事"包装成纪律。** 终端输入曾经有一条"硬纪律"：**回车只换行、
+24. **别把"实现省事"包装成纪律。** 终端输入曾经有一条"硬纪律"：**回车只换行、
     空行才发送**。当时记下的理由是中文输入法里回车用来确认候选词 —— 但这条规矩
     的真实代价全落在用户身上：**敲完的行改不了、没有历史、粘贴多行会被当成好几句**。
     它看着像纪律，其实是为了省掉"自己写多行输入"这件事。
@@ -378,7 +379,7 @@ for t in protocol tools intake compression resume cli tty; do python3 tests/test
     教训：**凡是把成本转嫁给用户的"规矩"，先问一句"这是不是为了我实现省事"**；
     成熟库已经解决的事，自己写一遍只会更差（AGENTS §13）。
 
-26. **默认值就是伪造用户的话。** `-c` 原来默认为"期末账户权益 >= 本金 x 2"，
+25. **默认值就是伪造用户的话。** `-c` 原来默认为"期末账户权益 >= 本金 x 2"，
     出口和任务默认值不是一对时，就可能把一条用户从没提过的验收标准当成
     "用户给的验收标准"送进入口。实测：一句"帮我自动做视频赚钱"被谈成了
     "历史回测还是模拟盘/实盘？初始资金 100 万..." —— 入口没错，它只是在

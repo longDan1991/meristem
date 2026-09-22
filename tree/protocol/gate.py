@@ -2,11 +2,9 @@
 
 代码只做四件事（都在形式字段上，不是计数器）：
   ① 规范化字段（**不切长度**；`kind` 只能是 dispatch / leaf，不给兜底）
-  ② 子任务的验收标准必须携带父/根的可测物理量，否则这次分配当场被拒并记进尝试
+  ② 子任务的验收标准必须携带父/根的可测物理量，否则这次分配当场被拒并记进历史
   ③ 一次最多一个门槛；门槛不成立，其余子任务不启动
   ④ 判定"满足"却指不出证据 → 降级为"未满足"
-
-再加上结论里的工件契约核对：产出的每个文件都要交代，`func` 必须是能直接执行的命令。
 
 提示词在 `tree/prompts/`（命名分节，见 `docs/PROMPTS.md`）——
 改提示词不用碰闸门代码，但改完要回来对一遍上面这几件事。
@@ -15,7 +13,7 @@
 import os
 import re
 
-from ..effects import contract_of, contract_problems
+from ..prompts.messages import result_names
 from .fields import EXTERNAL_CLASSES, norm
 
 # 判据里的"可测物理量"：日期、≥2 位数字、标识符。单个数字不算。
@@ -78,7 +76,25 @@ def clean_spec(spec):
     return out, ("; ".join(why) or None)
 
 
-def evidence_ok(node, ev):
+# 结论审计里的"观测"只指叶子亲手做的动作（bash/read/write）。分配节点的
+# tool 回话是分配记录，不算观测（rules 里也写了：分配节点只能引子任务名/产物路径）。
+_ACTION_TOOLS = ("bash", "read", "write")
+
+
+def _obs_rounds(msgs):
+    """一份对话里叶子动手过的轮数（观测序号从 1 数）。"""
+    n = 0
+    for m in msgs:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            if (tc.get("function") or {}).get("name") in _ACTION_TOOLS:
+                n += 1
+                break
+    return n
+
+
+def evidence_ok(node, ev, msgs):
     """证据必须指得到真实存在的东西：某次观测、某个子节点、或磁盘上真有的产物。
 
     这是代码替上层做的**第一道**复核。不加它，`判定:满足` 配一句编出来的
@@ -86,15 +102,14 @@ def evidence_ok(node, ev):
 
     证据可能是复合串（模型会写 `第1次观测 / add.py`），所以要拆开逐段看。
     分配节点**自己没有观测**，它的证据只能是子任务名或产物路径。
+
+    观测 / 子任务名都从节点的平铺对话（msgs）里推导 —— 历史只活在一处。
+    观测序号 = 对话里叶子动手过的轮数；子任务名 = 注入过的下层结论（`child_result`）。
+    证据引自**任何一轮**的子节点都算数 —— 对话是全量历史，天然覆盖。
     """
     valid, bad = [], []
-    obs_idx = set(range(1, len(node.observations) + 1))
-    # 证据引自**任何一轮**分配出来的子节点都算数。只看最后一轮会误杀：
-    # 末轮是"不再拆、直接出结论"那次，results 是空的，于是上一轮真跑过的
-    # 子任务名被判成"编出来的"，一次本该满足的结论被降级成未满足。
-    kids = []
-    for a in node.attempts:
-        kids += [c.get("name", "") for c in a.get("results", [])]
+    obs_idx = set(range(1, _obs_rounds(msgs) + 1))
+    kids = result_names(msgs)
     for x in ev:
         s = str(x).strip()
         hit = False
@@ -116,26 +131,13 @@ def evidence_ok(node, ev):
     return valid, bad
 
 
-def unaccounted(st, artifacts):
-    """哪些产出还没被交代。结论里每一个产出的文件都得出现（给契约或标内部）。"""
-    if not st:
-        return []
-    declared = set()
-    for a in artifacts:
-        p = str((a or {}).get("path") or "") if isinstance(a, dict) else ""
-        if p:
-            declared.add(os.path.realpath(p))
-    return [os.path.basename(p) for p in sorted(st.get("artifacts", set()) - declared)
-            if os.path.exists(p)]
-
-
-def clean_conclusion(concl, trace, node, st=None):
+def clean_conclusion(concl, trace, node, msgs=None):
     """代码检查，都是形式字段上的，不是计数器：
-      ① 产出的每一个文件都必须在结论里交代（要么契约，要么声明内部）
-      ② 判定"满足"得指得出真证据
+      · 判定必须是 满足|未满足|阻塞
+      · 判定"满足"得指得出真证据（观测 / 子任务 / 磁盘上真有的产物）
 
-    返回 (结论, None) 或 (None, 打回理由)。工件契约的落盘由调用方做
-    （那要写 trace / sidecar，是运行时的事）。
+    返回 (结论, None) 或 (None, 打回理由)。
+    msgs 是该节点的平铺对话 —— 证据校验（观测轮数 / 子任务名）从这里推导。
     """
     verdict = norm(concl.get("verdict", ""))
     content = norm(concl.get("text", ""))
@@ -147,59 +149,23 @@ def clean_conclusion(concl, trace, node, st=None):
     if isinstance(ext, str):
         ext = [ext]
     ext = [x for x in (str(x).strip() for x in ext) if x in EXTERNAL_CLASSES]
-    artifacts = concl.get("artifacts")
-    if not isinstance(artifacts, list):
-        artifacts = []
     if verdict not in ("满足", "未满足", "阻塞"):
         return None, "判定必须是 满足|未满足|阻塞"
 
-    # ① 强制措施，放在这最后一步 —— 过程中完全不打扰它
-    unacct = unaccounted(st, artifacts)
-    if unacct:
-        trace.add(node.id, "contract_missing", {"missing": unacct})
-        return None, (
-            "你这次工作产出了这些文件：%s\n"
-            "结论里必须逐个交代它们（放在 \"artifacts\" 里）：\n"
-            "  {\"artifacts\":[{\"path\":\"a.sh\",\"type\":\"脚本\","
-            "\"name\":\"干什么用的\",\"func\":\"怎么跑\","
-            "\"args\":\"\",\"return\":\"写什么\"},\n"
-            "                 {\"path\":\"b.py\",\"type\":\"内部\"}]}\n"
-            "能跑起来的那个（入口）要给完整契约；其余只给自己用的写 type=内部 就行。"
-            % ", ".join(unacct))
-
-    # ② 契约本身不合规 → 同样退回去改（func 必须是能直接跑的命令）
-    bad_contracts = []
-    for a in artifacts:
-        if not isinstance(a, dict) or not a.get("path"):
-            continue
-        if (contract_of(a).get("type") or "") == "内部":
-            continue
-        probs = contract_problems(str(a["path"]), contract_of(a))
-        if probs:
-            bad_contracts.append("%s: %s" % (os.path.basename(str(a["path"])),
-                                            "; ".join(probs)))
-    if bad_contracts:
-        trace.add(node.id, "contract_bad", {"problems": bad_contracts})
-        return None, ("这些工件的契约有问题，请修正后重新出结论：\n  - %s\n"
-                      "func 要写成**能直接粘上就执行**的一条命令，比如 "
-                      "`bash sum.sh` 或 `python3 main.py --flag x`，"
-                      "不要写「执行…即可运行」这种句子。"
-                      % "\n  - ".join(bad_contracts))
-
     if verdict == "满足":
-        valid, bad = evidence_ok(node, ev)
+        valid, bad = evidence_ok(node, ev, msgs or [])
         if not valid:
             trace.add(node.id, "verdict_downgraded",
                       {"was": "满足", "reason": "证据指不到任何真实存在的东西",
                        "evidence": bad})
             return {"verdict": "未满足", "content": content +
                     "（原判「满足」但证据指不到真实的东西，已降级）",
-                    "evidence": [], "external": [], "artifacts": artifacts}, None
+                    "evidence": [], "external": []}, None
         if bad:
             trace.add(node.id, "evidence_trimmed", {"dropped": bad, "kept": valid})
         ev = valid
     return {"verdict": verdict, "content": content, "evidence": ev,
-            "external": ext, "artifacts": artifacts}, None
+            "external": ext}, None
 
 
 def validate_root(spec):

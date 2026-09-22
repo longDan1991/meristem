@@ -39,9 +39,6 @@ def _required(name):
 
 # 工作区：持久工作目录。同一个任务族共用它，上次写的代码和数据就还在。
 WORKSPACE = _abs(_required("TREE_WORKSPACE"))
-# 历史会话的堆放地：`-r` 从这里列老会话。执行树就是成果树。
-INDEX_GLOB = os.environ.get("TREE_INDEX") or os.path.join(
-    WORKSPACE, "runs", "*", "trace.jsonl")
 
 # 叶子工具输出的线上压缩（选项 B）。0/false/no/off = 关：压缩是 lossy 功能，
 # 这是个保险阀（故障排查 / 复现时关掉，让模型看原文）。关闭后取回工具也不再挂。

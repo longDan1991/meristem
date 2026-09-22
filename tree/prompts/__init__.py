@@ -17,7 +17,7 @@
 
 **system 不走 @mcp.prompt，也不和 user 消息混装**：`render_turn` 直接把
 [system, 基础 user] 两条分开返回（分配节点和叶子同构）；节点的累积历史
-（观测 / 尝试 / 下层结论）是**平铺对话**，由 `turn.ask` 在基础消息后面拼接
+（观测 / 尝试 / 下层结论）是**平铺对话**，由 `turn.node_hooks` 在基础消息后面拼接
 （每个节点都是完整的 Loop，`turn.py` 里所有节点统一维护 st["msgs"]）。
 
 本文件只做三件事：按在场规则组装节（`build_system_sections`）、把节渲染成
@@ -104,7 +104,7 @@ def render_turn(which, node=None):
 
     **system 与 user 分开**：第一条是 system（分节文本，经 render_system），
     第二条是基础 user 消息（形式字段 + 意图链，字节稳定，见 messages.base_user）。
-    不注册 FastMCP prompt、不混装 —— 节点的累积历史由 `turn.ask` 在基础消息
+    不注册 FastMCP prompt、不混装 —— 节点的累积历史由 `turn.node_hooks` 在基础消息
     后面拼平铺对话（每个节点都是完整的 Loop）。
     intake 没有节点消息（它的 user 是用户说的话，在对话里），只给 system。
     """

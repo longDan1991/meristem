@@ -22,7 +22,7 @@ clean_conclusion）—— schema 只保证形状，拒绝信息保持 gate 的�
 litellm 要的 OpenAI 格式（$ref 展平，只建一次）。
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from fastmcp.utilities.json_schema import replace_refs
 
@@ -47,7 +47,7 @@ class ChildSpec(BaseModel):
     """一个子任务的形式字段（= 分配节点写回的孩子格子）。
 
     必填由 schema 强制；语义（kind 取值、区间顺序、可测物理量继承）由
-    gate.clean_spec 复核 —— 两层都过不了时，gate 的中文原因进本层尝试。
+    gate.clean_spec 复核 —— 两层都过不了时，gate 的中文原因进本层对话。
     """
 
     name: str = Field(
@@ -74,31 +74,6 @@ class ChildSpec(BaseModel):
         description="对孩子结论的字数建议区间，如 [100,500] 或 [1000,2000]。"
                     "本质是判断你想要的成果规模：一句话能说清就给窄区间，"
                     "需要推理、证据、数字就给宽区间。")
-
-
-class Artifact(BaseModel):
-    """结论里交代的一个产物。入口给完整契约；只给自己用的写 type=内部。"""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    path: str = Field(description="文件路径（相对工作区）。")
-    type: str = Field(
-        default="", description="程序|配置|数据|脚本|内部。只给自己用、或只是数据/"
-                                "日志，写「内部」就行。")
-    name: str = Field(default="", description="干什么用的。")
-    func: str = Field(
-        default="",
-        description="**能直接粘上就执行的一条命令**，如 bash sum.sh、"
-                    "python3 main.py --flag x；不要写句子（写错了会被退回来）。")
-    args: str = Field(default="", description="参数。")
-    params: dict = Field(
-        default_factory=dict,
-        description="func 里 __名字__ 占位符的参数声明："
-                    "{\"名字\":{\"type\":\"int|str|float|bool\","
-                    "\"default\":默认值}}。写了它 = 把这条做法变成别人可直接"
-                    "调用的工具。不想被复用的一次性脚本就别写。")
-    ret: str = Field(default="", alias="return", description="返回/写出什么。")
-    external: list[str] = Field(default_factory=list)
 
 
 # ------------------------------------------------------------------ 适配器

@@ -1,14 +1,15 @@
 """和入口在终端上把预期谈定，并把入口跑出来的东西显示给人看。
 
 这里只做两件事：把用户敲的字交回去、把入口说的话显示出来。
-判断、打回、跑任务、收手全在 `tree/intake.py` 里 —— 不在这里再实现一遍，
+判断、打回、跑树、收手全在 `tree/runtime/scheduler.py` 里 —— 终端只把
+**整场会话**（入口为根的树）丢给 `run`，不在这里再实现一遍树的规矩，
 否则"什么算合规"就有了两个事实。
 
 三条通道分开，终端才不会把同一句话显示两遍：
-  - 模型说的话（一段纯文本）走 `ask` 通道；
-  - 模型的思考（`reasoning_content`）走 `on_reasoning` 通道，**画成灰的**；
-  - 旁白（"接到任务 / 跑完了"）走 `on_say` 通道。
-  - 树里每个节点的吐字走节点级的 `on_delta / on_reasoning`（带 node_id），
+  - 入口节点说的话（一段纯文本）走 `ask` 通道；
+  - 入口的思考（`reasoning_content`）走 `on_reasoning` 通道，**画成灰的**；
+  - 旁白（"接到任务 / 用不了"）走 `on_say` 通道。
+  - 树里每个节点的吐字走 `message_update` 事件（scope=node_id），
     画进任务树跟着 Live 原地重画 —— 树在跑，看得见每个节点正在说什么。
 
 **读**交给 prompt_toolkit：回车发送、方向键改已经敲的字、上下键翻历史、粘贴
@@ -25,21 +26,23 @@ prompt_toolkit 各画一遍会把光标位置搞乱（实测）。敲下的行�
 
 **实时视图每节点一行铺开**：跑的时候树用 `render_tree(compact=True)` ——
 `· [叶子] 子任务B  ▸ 思考: …`，整棵树按结构铺开，**所有节点正在吐的字都
-占一行看得见**，谁也不被折掉（屏幕放不下时只折没在跑的段落）；根出结论那帧
+占一行看得见**，谁也不被折掉（屏幕放不下时只折没在跑的段落）；任务出结论那帧
 切回详细视图（判定/验收/结论都在，Live 收摊时整幅渲染、能滚动）。
 
 **显示**交给 rich（灰、Live 原地重画）。终端只负责**什么时候画、怎么显示**，
 不自己重写画法：树的视图 `render_tree` 在 `tree/protocol/fields.py` ——
 树长什么样是树的变因。
 
-模型的吐字是**真流式**：不是等整段回来再一个字一个字放，而是每到一个字
+入口的吐字是**真流式**：不是等整段回来再一个字一个字放，而是每到一个字
 就立刻写到屏幕上。交形式是**工具调用**（`submit_root`），走的是另一条通道，
-上不了屏幕 —— 那是给闸门的，不是给人看的。所以 `ask` 不再负责显示模型的话，
+上不了屏幕 —— 那是给闸门的，不是给人看的。所以 `ask` 不再负责显示入口的话，
 它只负责**读**：话已经在吐字时显示过了。
 """
 
 import asyncio
+import os
 import sys
+import time
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -49,8 +52,15 @@ from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
-from tree.intake import intake
-from tree.protocol.fields import render_tree
+from .picker import pick_session
+from tree import config as cfg
+from tree.events import EventSink
+from tree.llm import LLM
+from tree.protocol.fields import Node, render_tree
+from tree.runtime.budget import Budget
+from tree.runtime.scheduler import run
+from tree.runtime.session import load, session_label
+from tree.runtime.trace import get_trace, get_traces
 
 PROMPT = "› "
 
@@ -107,8 +117,6 @@ async def opening(session=None):
     看上去就像程序没等你说话就自作主张。
     """
     session = session or _session()
-    print("\n[入口] 先说你要做什么？可以粘多行；要换行按 Alt-Enter，回车就是发送。\n",
-          flush=True)
     return await _listen(session)
 
 
@@ -142,18 +150,113 @@ def _fit(lines, max_h):
     return out[:max_h]
 
 
-async def converse(llm, seed, env, session=None, resume=None):
+def _require_api_key():
+    # 入口是一次对话：要真模型。没有 API key 就不开工 —— 拿假模型去聊，
+    # 只会换来一句"你要做什么？"，那一圈是白烧的。
+    if not os.environ.get("TREE_API_KEY"):
+        print("入口是一次对话：要真模型。在 .env / 环境变量里给 TREE_API_KEY",
+              file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _seed(task):
+    # 种子只写用户真的说了什么：没给的就是没给（入口该去问），不许拿默认值充数。
+    # 验收标准永远要入口自己提 —— CLI 已没有 -c，标准只能来自对话。
+    return ("用户的任务: %s\n"
+            "验收标准: 用户没给 —— 正常，真用户都不会给。"
+            "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。" % task)
+
+
+def _env(trace):
+    """运行现场：trace / budget / registry（并发与进度走固定默认，CLI 不暴露这些参数）。"""
+    registry = {}
+    budget = Budget()
+
+    def beat():
+        # 只在调度线程里被调 —— 它就是唯一改 budget / registry 的线程，
+        # 所以读它们不需要锁（AGENTS §9）。
+        s = budget.stats()
+        st = {}
+        for n in registry.values():
+            st["已出结论" if n.verdict else "运行中"] = \
+                st.get("已出结论" if n.verdict else "运行中", 0) + 1
+        print("[%s] 节点 %d (%.2f 分钟, %d tokens) 状态 %s"
+              % (time.strftime("%H:%M:%S"), s["nodes"], s["minutes"],
+                 s["tokens"], st), flush=True)
+
+    return {"trace": trace, "budget": budget, "registry": registry,
+            "on_beat": beat, "beat": 60}
+
+
+def _show_resumed(tree, path):
+    """把重建出来的老会话画给人看 —— 恢复 = 接着谈，先让他看见接的是什么。"""
+    print("\n[会话] 已加载：%s" % path)
+    for ln in render_tree(tree["root"], tree["registry"]):
+        print("  " + ln)
+    print("", flush=True)
+
+
+async def run_session(a, session=None):
+    """把入口跑起来：装配运行现场 →（-r）选老会话并当场读回整棵树 → 终端话轮。
+
+    main.py 只按参数调这里（现在只剩 `-r` 一个参数）。终端话轮在 `converse`；
+    判断 / 打回 / 跑树在 `tree/runtime/scheduler.py` 里（入口是树的根节点）；
+    模型由 converse 自己建（LLM()），装配层不碰 LLM。
+
+    -r：选一个老会话加载成一棵树（root/registry/state/pending），放进
+    `env["tree"]` —— 展示和续跑都吃这一棵树，不重读 trace。
+    """
+    _require_api_key()
+    session = session or _session()
+    ws = cfg.WORKSPACE
+    os.makedirs(ws, exist_ok=True)
+    os.chdir(ws)
+    print("[工作目录] %s" % ws, flush=True)
+    print("[并发] 6", flush=True)
+    print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
+
+    if a.resume:
+        traces = get_traces()
+        if not traces:
+            print("没有可加载的老会话：工作区里还没有跑过任何树。", flush=True)
+            return 1
+        picked = await pick_session([(t, session_label(t)) for t in traces])
+        if picked is None:
+            print("取消。", flush=True)
+            return 0
+        try:
+            tree = load(picked)
+        except ValueError:
+            # 读不了（还没迁移 / 记录损坏）：带着是哪个会话的上下文炸出来，不静默跳过
+            print("读不了这个会话（还没迁移，或记录损坏）：%s" % picked, flush=True)
+            raise
+        # 会话 = 一棵树（入口节点为根）；直接交给 converse 丢进 run()
+        env = _env(get_trace(picked))
+        env["tree"] = tree
+        env["registry"] = tree["registry"]
+        _show_resumed(tree, picked)
+        seed = None
+    else:
+        env = _env(get_trace())
+        task = await opening(session)
+        seed = _seed(task)
+    print("[trace] %s\n" % os.path.abspath(env["trace"].path), flush=True)
+
+    try:
+        return await converse(seed, env, session=session)
+    finally:
+        env["trace"].drain()      # 对话最后几笔必须落盘，进程才退出
+
+
+async def converse(seed, env, session=None):
     """和入口一直谈下去，直到用户在终端上中止（返回 `None`）。
 
-    入口现在**不退场**：每谈成一个任务就跑掉、把结论带回来接着谈。
-    所以这里没有"交棒"这一步 —— 跑树是 `tree/intake.py` 的事，
-    终端只负责介质与话轮。
+    入口**不退场**：谈成一个任务就挂到树上跑掉、把结论带回对话，再接着谈。
+    **整场会话是一棵树**（入口为根）—— `run` 把它整棵跑起来，直到用户中止。
 
-    env 是运行现场（trace/budget/workers/registry），终端不解释它，
-    只转给入口；session 是读的那条通道（测试把管道驱动的会话塞进来）。
-
-    resume：可选的恢复包（`session.load` 出来的）—— 会话重启后接着谈：
-    先把已加载的会话画给人看（"加载并显示"），再让入口从恢复的对话继续。
+    env 是运行现场（trace/budget/registry/sink），终端不解释它，只把入口
+    的根节点丢给 run；session 是读的那条通道（测试把管道驱动的会话塞进来）。
+    恢复（`-r`）的会话由 `run_session` 选完就放在 `env["tree"]`，这里原样续跑。
     """
     session = session or _session()
     # 上不上色交给 rich 判断：isatty / NO_COLOR / 颜色系统它都处理。
@@ -184,25 +287,8 @@ async def converse(llm, seed, env, session=None, resume=None):
     line("       回车发送；想分几行写就按 Alt-Enter；跑任务时底下仍可输入。")
     line("       灰色的字是它在想。不想聊了按 Ctrl-D。\n")
 
-    if resume is not None:
-        line("\n[会话] 已加载：%s" % resume["path"])
-        for t in resume["trees"]:
-            narrate("\n".join(render_tree(t["root"], t["registry"])))
-        line("")
-
     spoke = [False]                # 这一轮模型有没有往屏幕上吐过话
     thinking = [False]             # 这一轮刚吐过的是不是思考
-
-    def on_reasoning(text):
-        thinking[0] = True
-        piece(text, gray=True)
-
-    def on_delta(text):
-        if thinking[0]:        # 想完了，开始说：换行，把回答和思考分开
-            thinking[0] = False
-            piece("\n")
-        spoke[0] = True
-        piece(text)
 
     # ── 输入通道 ──
     # 谈阶段用会话直接读（`_listen`）；跑阶段用另一条**不渲染**的会话读 ——
@@ -235,21 +321,24 @@ async def converse(llm, seed, env, session=None, resume=None):
         return await _listen(session)
 
     # ── 任务树实时视图 ──
-    # 调度器每开/关一个节点就发一个 on_event，每个节点的吐字按 node_id 送来
+    # 调度器每开/关一个节点就发一个 loop_start / loop_end，每个节点的吐字按
     # （见 runtime/turn.py 的接线）；终端收到就把**当前整棵树**重画一次：
     # 真终端用 rich Live 原地重画（跑的时候终端上没有别的东西在写，
     # 这一块只属于树），不是真终端（测试 / 管道）就逐帧追加。
-    # 根的出生（parent 是 None 且 running）= 新任务开始，根出结论 = 这一轮跑完，
+    # 任务根的出生（入口节点的孩子）= 新任务开始，任务根出结论 = 这一轮跑完，
     # 把最后一帧留在屏幕上。树比屏幕高就折叠中间，**最底一行永远是输入行**。
+    # 谈阶段（没有任务在跑）不上屏：屏幕上只有对话。
     live_ref = [None]
     root_ref = [None]
+    running = [False]                  # 有任务在跑才上屏 / 开运行输入
+    session_root = [None]              # 入口节点（会话根）
     streams = {}                       # node_id -> {"thinking","speaking"} 尾巴
 
     def current_frame():
         # 跑的时候用**每节点一行**的实时视图（compact：整棵树铺开，每个节点
-        # 正在吐的字都占一行看得见）；根出结论那帧切回详细视图 —— 判定/验收/
-        # 结论都在，那才是跑完的完整结果（Live 收摊时整幅渲染，能滚动）。
-        compact = root_ref[0] is not None and root_ref[0].status == "running"
+        # 正在吐的字都占一行看得见）；任务根出结论那帧切回详细视图 —— 判定/
+        # 验收/结论都在，那才是跑完的完整结果（Live 收摊时整幅渲染，能滚动）。
+        compact = root_ref[0] is not None and not root_ref[0].verdict
         tree = render_tree(root_ref[0], env.get("registry") or {},
                            streams=streams, compact=compact)
         if live_ref[0] is not None and compact:
@@ -261,6 +350,8 @@ async def converse(llm, seed, env, session=None, resume=None):
         return Text("\n".join(rows), overflow="crop", no_wrap=True)
 
     def redraw():
+        if not running[0]:
+            return                     # 谈阶段不上屏：屏幕上只有对话
         frame = current_frame()
         if live_ref[0] is not None:
             # 只换渲染内容，不强迫立刻重画：快跑完的树（测试 / 短任务）不该
@@ -268,22 +359,16 @@ async def converse(llm, seed, env, session=None, resume=None):
             # 补最后一笔。键盘除外（见 _on_text_changed）。
             live_ref[0].update(frame)
         else:
-            narrate(frame)
+            narrate(frame)             # 非终端：逐帧追加
 
     def _push_stream(node_id, key, text):
-        # 只留尾巴，节点出结论时由 on_event 删掉 —— 有界（§11）
+        # 只留尾巴，节点出结论时由 loop_end 删掉 —— 有界（§11）
         if not text:
             return
         buf = streams.setdefault(node_id, {"thinking": "", "speaking": ""})
         buf[key] = (buf[key] + text)[-_STREAM_SHOW:]
         if live_ref[0] is not None:
             live_ref[0].update(current_frame())
-
-    def node_delta(node_id, text):
-        _push_stream(node_id, "speaking", text)
-
-    def node_reasoning(node_id, text):
-        _push_stream(node_id, "thinking", text)
 
     intake_task = [None]
     kick_pending = [False]             # 一棵树还没跑完又开一棵时，kick 不许并发
@@ -349,42 +434,82 @@ async def converse(llm, seed, env, session=None, resume=None):
             except asyncio.CancelledError:
                 pass
 
-    def on_event(node):
-        if node.parent is None and node.status == "running":
-            root_ref[0] = node
-            if live_ref[0] is None and sys.stdout.isatty():
-                live_ref[0] = Live(console=console, vertical_overflow="crop",
-                                   refresh_per_second=10)
-                live_ref[0].start()
-                _kick()
-        if node.status != "running":
-            streams.pop(node.id, None)      # 出结论就不留它的实时尾巴
-        redraw()
-        if node.parent is None and node.status != "running":
-            _stop_run_input()
-            if live_ref[0] is not None:
-                live_ref[0].stop()
-                live_ref[0] = None
+    # ── 事件路由：一个函数收全部事实，按 scope 分路去画 ──
+    # scope=入口节点 id 是入口会话（模型说的 / 想的，画在终端上）；其余 scope
+    # 是节点 id（出生 / 完工重画树、流式吐字进 streams）。事件只报事实，怎么画
+    # 是终端的事 —— 终端是 sink 的消费者，不是生产者的参数。
+    sink = EventSink()
+    sink.streaming = sys.stdout.isatty()   # 节点级吐字只对真终端开，不白开 SSE
 
-    # 节点级吐字只对真终端开：管道 / 重定向没有 Live，也没有人会看见它，
-    # 不给节点级的 llm.chat 平白开 SSE。
-    env = dict(env, on_event=on_event)
-    if sys.stdout.isatty():
-        env = dict(env, on_delta=node_delta, on_reasoning=node_reasoning)
+    def on_sink(type, payload):
+        scope = payload.get("scope")
+        sroot = session_root[0]
+        if sroot is not None and scope == sroot.id:
+            # 入口节点的话：走对话通道（流式吐字），模型说的话就吐在这里
+            if type == "message_update":
+                delta = payload.get("delta") or ""
+                if payload.get("kind") == "reasoning":
+                    thinking[0] = True
+                    piece(delta, gray=True)
+                else:
+                    if thinking[0]:        # 想完了，开始说：换行，把回答和思考分开
+                        thinking[0] = False
+                        piece("\n")
+                    spoke[0] = True
+                    piece(delta)
+            return
+        if type == "message_update":
+            _push_stream(scope, "thinking" if payload.get("kind") == "reasoning"
+                         else "speaking", payload.get("delta") or "")
+            return
+        node = payload.get("node") or (env.get("registry") or {}).get(scope)
+        if node is None:
+            return
 
-    msgs = (resume["chat_msgs"] or None) if resume is not None else None
-    resume_tree = resume["in_flight"] if resume is not None else None
+        def is_task_root(n):
+            # 任务根 = 入口节点的孩子（不是入口自己）：一个任务开始 / 结束了
+            return (n is not None and n.parent is not None
+                    and sroot is not None and n.parent == sroot.id)
+
+        if type == "loop_start":
+            if is_task_root(node) and not node.verdict:
+                running[0] = True
+                root_ref[0] = node
+                if live_ref[0] is None and sys.stdout.isatty():
+                    live_ref[0] = Live(console=console, vertical_overflow="crop",
+                                       refresh_per_second=10)
+                    live_ref[0].start()
+                    _kick()
+            redraw()
+        elif type == "loop_end":
+            streams.pop(scope, None)      # 出结论就不留它的实时尾巴
+            redraw()
+            if is_task_root(node):
+                running[0] = False
+                _stop_run_input()
+                if live_ref[0] is not None:
+                    live_ref[0].stop()
+                    live_ref[0] = None
+
+    sink.subscribe(on_sink)
+
+    env = dict(env, sink=sink)
+    tree = env.get("tree")
+    root = tree["root"] if tree else Node(name="会话", kind="intake")
+    session_root[0] = root
+    llm = LLM()
     intake_task[0] = asyncio.ensure_future(
-        intake(llm, seed, ask=ask, env=env,
-               on_say=narrate, on_delta=on_delta, on_reasoning=on_reasoning,
-               msgs=msgs, resume_tree=resume_tree))
+        run(root, llm, env["trace"], registry=env.get("registry"),
+            budget=env.get("budget"), workers=env.get("workers", 6),
+            on_beat=env.get("on_beat"), beat=env.get("beat", 60),
+            sink=sink, resume=tree, seed=seed, ask=ask, say=narrate))
     try:
         await intake_task[0]
     except _Quit:
         line("\n[入口] 你在终端上中止了。")
         return None
     except asyncio.CancelledError:
-        # 运行中 Ctrl-D / Ctrl-C：intake 正跑着树被中止
+        # 运行中 Ctrl-D / Ctrl-C：入口正跑着树被中止
         line("\n[入口] 你在终端上中止了。")
         return None
     finally:

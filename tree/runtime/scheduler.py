@@ -1,8 +1,19 @@
 """调度器：广度优先、并行扇出、门槛 —— 次数不限。
 
-    每个节点（分配节点和叶子一样）都是**完整的 Loop**：读自己的形式字段 +
-    平铺对话（累积的 assistant/tool/user 消息）→ 做一个动作或出结论。
-    分配节点没有 execute 分支，叶子的动作是 bash / read / write。
+每个节点（入口 / 分配节点 / 叶子一样）都是**完整的 Loop**：读自己的形式字段 +
+平铺对话（累积的 assistant/tool/user 消息）→ 做一个动作或出结论。
+
+节点没有状态字段（没有 finished / waiting / ready / gate_id / rest）：
+它是一棵带对话的 Node，"该不该调 LLM"由共享谓词 `reconcile.actionable` 回答
+（没出结论 + 孩子都回话了 + 最后一条不是模型自己说的），孩子出结论由
+`reconcile.settle` 结算（结果投进父节点对话 + 门槛续跑/作废）——
+调度器与恢复（`session.load` 的补投递）用同一份，不各自写一遍。
+
+**一场会话 = 一棵树**：入口节点（kind="intake"）是根，谈成的任务都是它的孩子。
+`run` 跑整棵树 —— 入口在等用户（`ask`）时不占聊天名额，任务在跑时入口挂起等孩子。
+
+**workers = 同时在飞的 `llm.chat` 数**（`ChatPool`，消息传递无锁）：限的是最贵的
+那个资源，不是节点 Loop —— 节点卡在慢工具、或入口在等用户，都不占名额。
 
 原则：
   · 形式化的是字段，次数不限，判断只看已经发生的事实
@@ -11,108 +22,88 @@
   · 所以这里没有任何计数器（max_rounds / self_exec / nudged / rejects 全部删除）
 
 这个文件只管**编排**：谁先谁后、门槛过没过、并行几个。
-"一回合怎么走"在 `turn.py`；协议校验在 `protocol/gate.py`。
+"一个节点的一回合怎么走"在 `turn.py`（钩子）；"一轮消息往返的生命周期"在
+`loop.py`。调度器不认识模型、不认识工具，只认识 Outcome 的三种 kind：
+continue 在 Loop 内部消化，调度器只处理 suspend（等孩子）和 stop（完工）。
+
+事件：调度器发节点级的 `loop_start` / `loop_end`（出生 / 完工是编排时点的事实），
+其余（turn_* / message_* / tool_*）由 `loop.py` 和 `turn.py` 的钩子发。
 """
 
 import asyncio
 import os
 from collections import deque
 
-from ..protocol.fields import Node
-from ..protocol.gate import anchors
-from ..prompts.messages import child_result
+from ..llm import ChatPool
+from ..prompts import render_turn
+from ..prompts.messages import result_ids
 from .budget import Budget
 from .hands import Hands
+from .loop import Loop, Transcript, emit_for
+from . import reconcile
 from .trace import Trace
-from .turn import step
+from .turn import node_hooks, node_spec, node_tools
 
 
 def _checkpoint(nid, st, trace):
     """把节点状态写进会话记录（trace 的 `state` 事件），恢复时据此重建。
 
-    每次状态一变就落一笔：节点全字段 + 调度器的编排字段。恢复只认这个 ——
-    不再从 open/concluded 那些展示事件里猜（那些是给人看的，这里是事实本身）。
-    calls 是 (工具, 参数, 观测) 元组，转成列表才好序列化；加载后解包不碍事。
+    检查点就是全部状态：Node 全字段 + 平铺对话。没有编排字段 ——
+    编排由 `reconcile` 从这两样推导。每次状态一变就落一笔。
     """
     trace.add(nid, "state", {
         "node": st["node"].to_dict(),
-        "ready": st["ready"], "finished": st["finished"],
-        "waiting": st["waiting"], "rest": st["rest"],
-        "gate_id": st["gate_id"], "gate_name": st["gate_name"],
-        "calls": [list(c) for c in st["calls"]],
-        "contracts": st["contracts"],
-        "artifacts": sorted(st["artifacts"]),
-        "art_effects": st["art_effects"],
-        "msgs": st.get("msgs", [])})
+        "msgs": st["transcript"].to_list()})
+
+
+def _which(node):
+    """节点类型 → 提示词类型（入口 / 叶子 / 分配）。"""
+    return node.kind if node.kind in ("leaf", "intake") else "alloc"
 
 
 async def run(root, llm, trace, registry=None, budget=None, workers=6,
-              on_beat=None, beat=60, on_event=None,
-              on_delta=None, on_reasoning=None, resume=None):
-    """广度优先、并行扇出的调度器。次数不限——没有 max_depth/max_rounds。
+              on_beat=None, beat=60, sink=None, resume=None, seed=None,
+              ask=None, say=None):
+    """跑一整棵树（新会话跑入口根，恢复跑读回来的树）。次数不限。
 
-    真异步（P4）：一个节点的一回合 = 一个 asyncio task，`workers` 是同时在飞
-    的任务数。谁先完成谁先被回收（`FIRST_COMPLETED`），慢节点不拖整批。
+    真异步（P4）：一个节点的一整个 Loop = 一个 asyncio task。**workers 限的是
+    同时在飞的 `llm.chat`**（`ChatPool`），不是节点 Loop —— 入口在等用户、
+    节点卡在慢工具，都不占聊天名额。谁先完成谁先被回收（`FIRST_COMPLETED`）。
+    节点挂起（等孩子）时它的 task 就结束了，等孩子全 settle 再起一个新 task
+    续跑 —— 挂起/恢复是调度器的事，循环本身不知道"等孩子"。
 
-    on_event(node) 是可选的事件回调：每个节点**出生**和**出结论**各调一次
-    （节点状态当时分别是 running 和 done/failed）。它是给实时展示用的
-    （终端据此重画任务树）—— 调度器只管发事实，怎么显示是消费方的事。
+    sink 是事件出口（`tree/events.py`）：节点出生/完工发 loop_start/loop_end，
+    更细的事件由 loop/turn 的钩子发。没给 sink 就静默（测试直连调度器时如此）。
 
-    on_delta(node_id, text) / on_reasoning(node_id, text) 是可选的**节点级
-    实时吐字**回调：每个节点问模型时，把它吐的每一口（content / 思考）按
-    node_id 送出来，给终端画进树里。没给就不开流式（入口那一路默认要）。
+    ask / say 是入口节点的外部接线：`ask(text)` 拿用户的话（终端那次读，
+    测试里换成脚本），`say(text)` 是旁白出口。只有入口节点用它们。
 
-    resume：可选 dict {"state", "pending", "root"} —— 一棵跑了一半的树**接着跑**
-    （会话记录里恢复出来的，见 `session.load`）。恢复时：已完工的节点不再碰，
-    waiting>0 的继续等下层，其余重新排队（中断时刻在飞的那步作废，节点带着
-    完整的观测/尝试历史重新问模型）。
+    resume：可选 tree（`session.load` 的返回）{"root", "state", "pending", ...}
+    —— 一整棵树**接着跑**。恢复时：
+      ① 按检查点重建 transcript（msgs）；
+      ② 补投递：孩子有结论但父节点对话里没有（崩溃窗口）→ 用 `reconcile.settle`
+         补结算，门槛该续跑就续跑；
+      ③ 重排队列：`reconcile.actionable` 逐个问"该不该调 LLM"。
+    中断那一刻在飞的那一步作废，节点带着完整的对话重新问模型 ——
+    恢复的语义就是"接着上次停下来的那一步重来"，不是把整棵树重跑一遍。
     """
     budget = Budget() if budget is None else budget
     registry = {} if registry is None else registry
     trace = trace if isinstance(trace, Trace) else Trace(trace)
     hands = Hands()
-
-    def rebuild_msgs(node):
-        """旧 trace（没有 msgs 检查点）恢复的节点：把历史重建成平铺对话。
-
-        只写 user 消息（不带悬空 tool_call_id —— provider 会拒）。压缩只在
-        发送边界做，存储（observations）永远是原文，所以重建不丢信息。
-        叶子：观测历史；分配节点：每次分配 + 下层结论。
-        """
-        out = []
-        if node.kind == "leaf":
-            for i, o in enumerate(node.observations, 1):
-                out.append({"role": "user",
-                            "content": "（你第 %d 次做了：%s）"
-                            % (i, o.get("action", ""))})
-                out.append({"role": "user", "content": o.get("obs", "")})
-        else:
-            for a in node.attempts:
-                out.append({"role": "user", "content": "本层已有尝试: %s"
-                            % (a.get("rejected")
-                               or " ".join(c.get("name", "") for c in a.get("children", [])))})
-                for r in a.get("results", []):
-                    out.append({"role": "user", "content": child_result(r)})
-        return out
-
-    if resume is not None:
-        state, pending, root = resume["state"], resume["pending"], resume["root"]
-        # 旧 trace 没有 msgs 检查点：把历史重建成对话，别让恢复的节点失忆
-        for nid, st in state.items():
-            if st["finished"]:
-                continue
-            node = st["node"]
-            if not st.get("msgs") and (node.observations or node.attempts):
-                st["msgs"] = rebuild_msgs(node)
-    else:
-        state, pending = {}, deque()
+    pool = ChatPool(llm, workers)      # workers = 在飞的 llm.chat 数
+    session_root = root                # 入口节点（新会话）/ 树根（恢复）
+    state = {}                 # nid -> {"node", "transcript", "seen_actions"}
+    delivered = {}             # nid -> 已投递结果的孩子 id 集合（运行时账本）
+    pending = deque()
 
     def register(node):
-        state[node.id] = {"node": node, "ready": True, "finished": False,
-                          "waiting": 0, "rest": [], "gate_id": None,
-                          "gate_name": None, "calls": [],
-                          "contracts": [], "artifacts": set(), "art_effects": {},
-                          "seen_actions": {}}
+        """节点出生：建账本、进登记册、发事件、进队列。"""
+        st = {"node": node,
+              "transcript": Transcript(system=render_turn(_which(node), node)),
+              "seen_actions": {}}
+        state[node.id] = st
+        delivered.setdefault(node.id, set())
         registry[node.id] = node
         trace.add(node.id, "open", {
             "name": node.name, "detail": node.detail, "notes": node.notes,
@@ -121,136 +112,143 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
             "conc_range": node.conc_range,
             "workspace": os.path.abspath(os.getcwd())})
         pending.append(node.id)
-        _checkpoint(node.id, state[node.id], trace)
-        if on_event:
-            on_event(node)
+        _checkpoint(node.id, st, trace)
 
-    def _inject_world(pst, text):
-        """把一条世界回话（下层结论 / 门槛作废）写进父节点的平铺对话。
-
-        尽量并到上一条 user 消息里 —— 并行孩子同时完工时会连续注入多条，
-        连着的 user 消息有的 provider 不接受。
-        """
-        msgs = pst.get("msgs")
-        if msgs is None:
-            return
-        if msgs and msgs[-1].get("role") == "user":
-            msgs[-1]["content"] = str(msgs[-1]["content"]) + "\n" + text
-        else:
-            msgs.append({"role": "user", "content": text})
-
-    def settle(nid, res):
-        st = state[nid]
-        if res["kind"] == "finished":
-            st["finished"] = True
-            node = st["node"]
-            if on_event:
-                on_event(node)
-            _checkpoint(nid, st, trace)
-            parent = node.parent
-            if parent and parent in state:
-                pst = state[parent]
-                pn = pst["node"]
-                rec = node.record()
-                if pn.attempts:
-                    pn.attempts[-1].setdefault("results", []).append(rec)
-                _inject_world(pst, child_result(rec))
-                # 门槛不成立 → 整个分支作废，其余子任务永不启动
-                if pst.get("gate_id") == nid and node.verdict != "满足":
-                    skipped = [s["name"] for s in pst.get("rest") or []]
-                    pst["rest"], pst["gate_id"] = [], None
-                    if pn.attempts:
-                        pn.attempts[-1]["outcome"] = "门槛不成立（%s）: %s" % (
-                            node.name, node.conclusion)
-                        if skipped:
-                            pn.attempts[-1]["results"].append(
-                                {"name": "（以下子任务被跳过）", "outcome": "未启动",
-                                 "text": ", ".join(skipped), "evidence": []})
-                    _inject_world(pst, "门槛「%s」不成立：%s。暂缓分支作废（不启动）：%s"
-                                  % (node.name, node.conclusion,
-                                     "、".join(skipped) or "(无)"))
-                    trace.add(parent, "gate_failed",
-                              {"gate": node.name, "reason": node.conclusion,
-                               "skipped": skipped})
-                    if not pst["finished"]:
-                        pst["ready"] = True
-                        pending.append(parent)
-                    _checkpoint(parent, pst, trace)
-                    return
-                pst["waiting"] -= 1
-                _checkpoint(parent, pst, trace)
-                if pst["waiting"] <= 0 and not pst["finished"]:
-                    if pn.attempts:
-                        pn.attempts[-1]["outcome"] = "下层已全部返回"
-                    if pst.get("rest"):
-                        rest, pst["rest"], pst["gate_id"] = pst["rest"], [], None
-                        trace.add(parent, "gate_passed",
-                                  {"started": [s["name"] for s in rest]})
-                        kids = _spawn(pn, rest)
-                        for k in kids:
-                            register(k)
-                        pst["waiting"] = len(kids)
-                        _checkpoint(parent, pst, trace)
-                    else:
-                        pst["ready"] = True
-                        pending.append(parent)
-                        _checkpoint(parent, pst, trace)
-        elif res["kind"] == "children":
-            for k in res["kids"]:
-                register(k)
-            st["waiting"] = len(res["kids"])
-            st["rest"] = res.get("rest") or []
-            st["gate_id"] = res.get("gate_id")
-            _checkpoint(nid, st, trace)
-        else:                                      # again：接着再来一回合
-            if not st["finished"]:
-                st["ready"] = True
-                pending.append(nid)
-                _checkpoint(nid, st, trace)
-
-    def _spawn(parent, specs):
+    def spawn_specs(parent, specs):
+        """把子任务规格变成孩子节点并注册（派第一波 / 门槛通过续跑共用）。"""
         kids = []
         for s in specs:
-            kids.append(Node(name=s["name"], detail=s["detail"], notes=s["notes"],
-                             accept=s["accept"], kind=s["kind"], gate=s["gate"],
-                             conc_range=s["conc_range"],
-                             parent=parent.id, depth=parent.depth + 1,
-                             # 意图链只加一层，孩子不重新把祖先走一遍（§11）
-                             lineage=parent.lineage + [[parent.name, parent.detail]]))
-        parent.children += [k.id for k in kids]
+            kid = reconcile.make_child(parent, s)
+            register(kid)
+            kids.append(kid)
         return kids
 
-    ctx = {"state": state, "llm": llm, "trace": trace, "budget": budget,
-           "root_anchors": anchors(root.accept),
-           "hands": hands,
-           "on_delta": on_delta, "on_reasoning": on_reasoning}
+    def spawn_task(spec):
+        """入口的 `submit_root` 落点：把任务根挂成入口节点的孩子。
 
-    def dispatch(nid, res):
-        """把 step 的抽象结果翻译成真实的节点/子节点。"""
-        if res["kind"] != "children":
-            settle(nid, res)
-            return
+        任务根是**顶层任务**（不带入口的意图链），它的 accept 已过 `validate_root`。
+        """
+        task = reconcile.make_child(session_root, spec)
+        task.lineage = []              # 入口不是"上层意图"，任务是顶层
+        register(task)
+        return task
+
+    if resume is not None:
+        raw, root = resume["state"], resume["root"]
+        for nid, p in raw.items():
+            node = p["node"]
+            state[nid] = {"node": node,
+                          "transcript": Transcript(system=render_turn(_which(node), node),
+                                                   msgs=p.get("msgs", [])),
+                          "seen_actions": {}}
+            registry[nid] = node
+        # ① 已投递账本：从对话里的（id:…）标记重建
+        for nid, st in state.items():
+            delivered[nid] = result_ids(st["transcript"].to_list())
+        # ② 补投递：孩子有结论但没结算进父节点（崩溃窗口）—— 和运行时同一个 settle
+        for nid, st in list(state.items()):
+            node = st["node"]
+            dset = delivered[nid]
+            for cid in list(node.children):
+                cst = state.get(cid)
+                if cst is None:
+                    continue
+                if cst["node"].verdict and cid not in dset:
+                    reconcile.settle(
+                        node, cst["node"], dset, registry,
+                        inject=lambda text, s=st: s["transcript"].add_user_merged(text),
+                        trace_add=lambda n, k, pl: trace.add(n, k, pl),
+                        spawn=lambda specs, p=node: spawn_specs(p, specs))
+                    _checkpoint(nid, st, trace)
+        # ③ 重排队列：同一个谓词，调度和恢复没有第二套规则。
+        # 先清空 —— ② 补投递可能新生了孩子（门槛续跑），register 已经把它们
+        # 排过队，不清会排两遍、孩子跑两次（实测）。
+        pending.clear()
+        for nid, st in state.items():
+            if reconcile.actionable(st["node"], st["transcript"].to_list(),
+                                    delivered[nid]):
+                pending.append(nid)
+    else:
+        register(root)
+        if seed is not None:
+            state[root.id]["transcript"].add_user(seed)
+            _checkpoint(root.id, state[root.id], trace)
+
+    def on_child_settled(nid):
+        """孩子完工（stop）：先落它自己的最后一笔（判定 + 完整对话），
+        再结算进父节点（投递 + 门槛），父节点全回话就重新排队。"""
         st = state[nid]
-        pn = st["node"]
-        first = _spawn(pn, res["first"])
-        rest = res["rest"]
-        gate_kid = first[0] if res["gate_name"] else None
-        settle(nid, {"kind": "children", "kids": first,
-                     "rest": rest,
-                     "gate_id": gate_kid.id if gate_kid else None})
+        child = st["node"]
+        emit_for(sink, child.id)("loop_end", {"node": child})
+        _checkpoint(nid, st, trace)
+        pid = child.parent
+        if not pid or pid not in state:
+            return
+        pst = state[pid]
+        parent = pst["node"]
+        dset = delivered.setdefault(pid, set())
+        may_run = reconcile.settle(
+            parent, child, dset, registry,
+            inject=lambda text: pst["transcript"].add_user_merged(text),
+            trace_add=lambda n, k, pl: trace.add(n, k, pl),
+            spawn=lambda specs: spawn_specs(parent, specs))
+        _checkpoint(pid, pst, trace)
+        if may_run and not parent.verdict:
+            pending.append(pid)
+
+    # 工具与钩子共用的运行时现场（入口节点从 ask/say/spawn_task 拿外部接线）。
+    runtime = {"state": state, "llm": llm, "trace": trace, "budget": budget,
+               "hands": hands, "ask": ask, "say": say, "spawn_task": spawn_task,
+               "stream": bool(sink is not None and sink.streaming)}
+
+    def dispatch(nid, out):
+        """把 Loop 的产物翻译成编排动作。
+
+        suspend：分配节点挂起了 —— 起第一波孩子、暂缓计划落在节点上（deferred）；
+        入口节点挂起 = 任务已挂好（submit_root 干的），等它 settle。
+        stop：节点完工（出结论 / 预算耗尽 / 原地打转）—— 结算进父节点。
+        continue 永远不会冒到这里（由 Loop 内部消化）。
+        """
+        st = state[nid]
+        if out.kind == "suspend":
+            pn = st["node"]
+            payload = out.payload or {}
+            spawn_specs(pn, payload.get("first") or [])
+            pn.deferred = payload.get("rest") or []
+            _checkpoint(nid, st, trace)
+        else:
+            on_child_settled(nid)
+
+    def on_turn(nid, out):
+        # 每轮结束落一笔检查点：中断时在飞的那一步作废，节点带着完整历史重问。
+        # suspend / stop 由 dispatch 在起完孩子 / 结算后再落，这里只管 continue。
+        if out.kind == "continue":
+            _checkpoint(nid, state[nid], trace)
+
+    async def run_node(nid):
+        st = state[nid]
+        node = st["node"]
+        # 入口节点的话有 sink 就流式（终端一直要）；节点级吐字只在真终端上流式
+        stream = sink is not None if node.kind == "intake" else runtime["stream"]
+        loop = Loop(pool, st["transcript"], await node_spec(nid, runtime),
+                    node_tools(nid, runtime), node_hooks(nid, runtime),
+                    scope=nid, sink=sink, stream=stream,
+                    temperature=0.3 if node.kind == "intake" else 0.2)
+        return await loop.run(on_turn=lambda out: on_turn(nid, out))
 
     inflight = {}
     try:
-        if resume is None:
-            register(root)
         while pending or inflight:
-            while pending and len(inflight) < workers:
+            while pending:
                 nid = pending.popleft()
                 st = state[nid]
-                if st["finished"] or not st["ready"]:
+                if not reconcile.actionable(st["node"], st["transcript"].to_list(),
+                                            delivered.get(nid, set())):
                     continue
-                st["ready"] = False
-                inflight[asyncio.ensure_future(step(nid, ctx))] = nid
+                # loop_start = "这个节点的 Loop 真的要跑了"（不是在登记时）——
+                # 恢复时重新开跑的节点也发得到，终端才能在恢复时点亮任务视图。
+                emit_for(sink, nid)("loop_start", {"node": st["node"]})
+                inflight[asyncio.ensure_future(run_node(nid))] = nid
             if not inflight:
                 break
             done, _ = await asyncio.wait(list(inflight),
@@ -263,6 +261,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
                 nid = inflight.pop(fut)
                 dispatch(nid, fut.result())
     finally:
+        await pool.close()
         await hands.close()
         trace.drain()
     return root

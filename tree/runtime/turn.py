@@ -22,7 +22,7 @@ description（签名 / 超时 / 翻页语义的唯一来源），不再有「一
 （调度器注入），不再单发 render 整个历史。
 
 工具实现要拿到**每个节点自己的运行时上下文**（节点是并发的）：`_step_binding`
-是 ContextVar，step() 开头写入 (ctx, nid)，工具函数用 `Depends(get_step_binding)`
+是 ContextVar，ask() 开头写入 (ctx, nid)，工具函数用 `Depends(get_step_binding)`
 注入 —— 每个 asyncio task 的 context 是独立的，并发节点互不串（AGENTS §9 无锁）。
 
 代码只做四件事（都在形式字段上，不是计数器）：
@@ -34,21 +34,20 @@ description（签名 / 超时 / 翻页语义的唯一来源），不再有「一
 
 import contextvars
 import hashlib
-import json
 import os
 from typing import Annotated
 
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ValidationError as ToolValidationError
 
-from ..effects import ARTIFACT_EXT, accept_artifacts, effects_of
+from ..effects import effects_of
+from ..intake import intake_hooks, intake_spec, intake_tools
 from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits
-from ..protocol.tool_specs import (Artifact, ChildSpec, NODE_TOOLS, mcp,
-                                   openai_tools)
-from ..prompts import render_turn
+from ..protocol.tool_specs import ChildSpec, NODE_TOOLS, mcp, openai_tools
 from ..prompts.messages import base_user, spec_line
 from .. import config as cfg
 from ..compression import RETRIEVE_NAME, compress_messages, retrieve_original
+from .loop import Hooks, Outcome, ToolResult
 
 
 # ---------------------------------------------------------------- 工具接线
@@ -59,7 +58,7 @@ from ..compression import RETRIEVE_NAME, compress_messages, retrieve_original
 _TOOL_NAMES = {"alloc": NODE_TOOLS["alloc"],
                "leaf": NODE_TOOLS["leaf"] + (RETRIEVE_NAME,)}
 
-# step 开头写入 (ctx, nid)；工具函数用 Depends 注入它。每个 asyncio task
+# ask 开头写入 (ctx, nid)；工具函数用 Depends 注入它。每个 asyncio task
 # 的 contextvars 是独立的，所以并发节点拿到的各是各的 ctx。
 _step_binding: contextvars.ContextVar = contextvars.ContextVar(
     "step_binding", default=None)
@@ -67,6 +66,21 @@ _step_binding: contextvars.ContextVar = contextvars.ContextVar(
 
 def get_step_binding():
     return _step_binding.get()
+
+
+def _root_anchors(node, state):
+    """任务根（入口节点的孩子 / 无父节点）的可测物理量。
+
+    一场会话的根是入口节点（它没有形式字段）；一个**任务**的根是入口的孩子。
+    沿 parent 链走到最上层那个非入口节点，拿它的 accept 算锚点。
+    """
+    cur = node
+    while cur.parent:
+        p = state.get(cur.parent, {}).get("node")
+        if p is None or p.kind == "intake":
+            break
+        cur = p
+    return anchors(cur.accept)
 
 
 def _current(binding):
@@ -90,46 +104,120 @@ def _log_usage(llm, trace, node_id, phase, budget):
     budget.add_tokens(total)
 
 
-async def ask(llm, trace, node, which, budget, ctx=None, st=None):
-    """问模型。节点级的实时吐字从这里接出去：调度器把终端给的
-    `on_delta` / `on_reasoning` 放进 ctx，这里按节点包一层再传给 llm.chat ——
-    节点是并发的，回调不带 node.id 就分不清是谁在说话（§11 不建共享计数器，
-    只是给回调做标记）。没给就不开流式：入口那一路默认开，节点级没有实时展示
-    不背 SSE 的开销。
+# ---------------------------------------------------------------- 节点的语义
+# 骨架（问模型 / 跑工具 / 写对话 / 发事件）在 loop.py；这里只填"节点怎么做"：
+# 拼要发的消息、给工具表、看回复和结果定下一拍。
+def node_hooks(nid, runtime):
+    """一个节点的三处语义（loop.Hooks）。
 
-    每个节点（分配节点和叶子一样）都是**完整的 Loop**：基础 user 消息
-    （base_user，字节稳定）+ 累积的平铺对话（st["msgs"]：asst/tool/user
-    逐条累积），发送前交给 headroom 路由压缩 —— 只压 role=tool 的工具输出，
-    user/system 一字不动。压缩统计写进 trace（wire_compressed），预算计的是
-    API 真实用量，节省自动反映。
+    每个节点（分配节点和叶子一样）都是完整的 Loop：系统提示词（render_turn，
+    含字节稳定的 base_user）+ 累积的平铺对话（账本在 st["transcript"]）。
+    压缩只发生在发送边界（before_chat），只压 role=tool 的工具输出。
     """
-    trace.add(node.id, "%s_in" % which, base_user(node))
-    tools = (await openai_tools())[which]
-    stream_kw = {}
-    if ctx:
-        if ctx.get("on_delta"):
-            stream_kw["on_delta"] = lambda t: ctx["on_delta"](node.id, t)
-        if ctx.get("on_reasoning"):
-            stream_kw["on_reasoning"] = lambda t: ctx["on_reasoning"](node.id, t)
-    msgs = st.setdefault("msgs", [])
-    wire = render_turn(which, node) + msgs
-    if which == "leaf" and cfg.COMPRESS and any(m.get("role") == "tool" for m in msgs):
-        result = await compress_messages(wire, getattr(llm, "model", ""))
-        wire = result.messages
-        if result.tokens_saved > 0:
-            trace.add(node.id, "wire_compressed", {
-                "before": result.tokens_before, "after": result.tokens_after,
-                "saved": result.tokens_saved,
-                "ratio": (round(result.tokens_saved / result.tokens_before, 3)
-                           if result.tokens_before else 0.0),
-                "transforms": result.transforms_applied})
-    msg = await llm.chat(wire, tools=tools, **stream_kw)
-    _log_usage(llm, trace, node.id, which, budget)
-    trace.add(node.id, "%s_out" % which,
-              {"text": msg.text,
-               "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
-                              for tc in msg.tool_calls]})
-    return msg
+    st = runtime["state"][nid]
+    node = st["node"]
+    if node.kind == "intake":
+        return intake_hooks(nid, runtime)
+    which = "leaf" if node.kind == "leaf" else "alloc"
+    llm, trace, budget = runtime["llm"], runtime["trace"], runtime["budget"]
+
+    async def before_chat(transcript):
+        if budget.exhausted():
+            node.close("阻塞", "预算耗尽: " + budget.why(), [])
+            trace.add(node.id, "budget_exhausted", node.conclusion)
+            return Outcome("stop", reason="budget")
+        trace.add(node.id, "%s_in" % which, base_user(node))
+        wire = transcript.wire()
+        if which == "leaf" and cfg.COMPRESS and any(
+                m.get("role") == "tool" for m in wire):
+            result = await compress_messages(wire, getattr(llm, "model", ""))
+            wire = result.messages
+            if result.tokens_saved > 0:
+                trace.add(node.id, "wire_compressed", {
+                    "before": result.tokens_before, "after": result.tokens_after,
+                    "saved": result.tokens_saved,
+                    "ratio": (round(result.tokens_saved / result.tokens_before, 3)
+                              if result.tokens_before else 0.0),
+                    "transforms": result.transforms_applied})
+        return wire
+
+    async def after_chat(transcript, assistant):
+        _log_usage(llm, trace, node.id, which, budget)
+        trace.add(node.id, "%s_out" % which,
+                  {"text": assistant.text,
+                   "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
+                                  for tc in assistant.tool_calls]})
+        if not assistant.tool_calls:
+            hint = ("（你只回了一段文字，开头：%s）" % assistant.text[:60]
+                    ) if assistant.text else ""
+            why = ("这次回复没有调用任何工具%s。你必须调用一个：%s。"
+                   % (hint, " / ".join(_TOOL_NAMES[which])))
+            transcript.add_feedback(why)
+            return _to_outcome(balk(node, why, trace, st))
+        if len(assistant.tool_calls) > 1:
+            why = "一次只能调用一个工具（你调了 %d 个）" % len(assistant.tool_calls)
+            transcript.add_feedback(why)
+            return _to_outcome(balk(node, why, trace, st))
+        tc = assistant.tool_calls[0]
+        if tc.name not in _TOOL_NAMES[which]:
+            why = ("你调用的 %s 不在这一层的工具里（你能用：%s）"
+                   % (tc.name, " / ".join(_TOOL_NAMES[which])))
+            transcript.add_feedback(why)
+            return _to_outcome(balk(node, why, trace, st))
+        return None
+
+    async def after_tool(transcript, assistant, results):
+        rej = next((r.reject for r in results if r.reject), "")
+        if rej:
+            return _to_outcome(balk(node, rej, trace, st))
+        for r in results:
+            if r.effect == "stop":
+                return Outcome("stop")
+            if r.effect == "suspend":
+                return Outcome("suspend", payload=r.payload)
+        return Outcome("continue")
+
+    return Hooks(before_chat=before_chat, after_chat=after_chat,
+                 after_tool=after_tool)
+
+
+async def node_spec(nid, runtime):
+    """这个节点喂给模型的工具声明（OpenAI 格式）。"""
+    node = runtime["state"][nid]["node"]
+    if node.kind == "intake":
+        return await intake_spec(nid, runtime)
+    which = "leaf" if node.kind == "leaf" else "alloc"
+    return (await openai_tools())[which]
+
+
+def node_tools(nid, runtime):
+    """这个节点可调用的工具：名字 → async(args) -> ToolResult。"""
+    node = runtime["state"][nid]["node"]
+    if node.kind == "intake":
+        return intake_tools(nid, runtime)
+    which = "leaf" if node.kind == "leaf" else "alloc"
+
+    def make(name):
+        async def call(args):
+            _step_binding.set((runtime, nid))
+            # 取回工具：把被压过的工具输出原文写回对话（作为 tool 结果）
+            if name == RETRIEVE_NAME:
+                return ToolResult(text=retrieve_original(args))
+            tool = await mcp.get_tool(name)
+            try:
+                res = await tool.run(args)
+            except ToolValidationError as e:
+                # schema 拒的参数（缺必填 / 类型错）：一条可见的事实，让模型改
+                why = "工具参数不合形状，被退回：%s" % e
+                return ToolResult(text=why, reject=why)
+            d = res.structured_content
+            if not isinstance(d, dict):
+                raise TypeError("工具 %s 必须返回 dict（拿到 %r）" % (name, d))
+            text = d["obs"] if d.get("obs") is not None else (d.get("feedback") or "")
+            return ToolResult(text=text, effect=_effect(d), payload=_payload(d))
+        return call
+
+    return {name: make(name) for name in _TOOL_NAMES[which]}
 
 
 # ---------------------------------------------------------------- 原地打转
@@ -161,7 +249,7 @@ def bump(seen, fingerprint, trace, node, what):
                "换一个动作，或者出结论（阻塞就写清为什么）。" % (n, what))
 
 
-def balk(node, why, trace, st, kids=None):
+def balk(node, why, trace, st):
     """把"这次给的东西用不了"变成一条可见的事实，并且**按重复次数处理**。
 
     四个地方都要走它：没调工具 / 参数不合形状 / 被代码拒的分配 / 不合规的结论。
@@ -171,21 +259,12 @@ def balk(node, why, trace, st, kids=None):
 
     这不是轮次上限：换一种拆法、换一个错，指纹就不同。
     """
-    if node.kind == "leaf":
-        node.observations.append({"action": "(用不了)", "obs": why})
-    else:
-        node.attempts.append({"children": kids or [], "rejected": why})
     n, note = bump(st.setdefault("seen_actions", {}),
                    sig("(balk)", why), trace, node, "(用不了的输出)")
     if n >= 5:
         node.close("未满足", "同一份用不了的东西连续 %d 次，没有新信息：%s"
                    % (n, why), [])
         return {"kind": "finished"}
-    if note:
-        if node.kind == "leaf":
-            node.observations[-1]["obs"] += note
-        else:
-            node.attempts[-1]["rejected"] += note
     # feedback：step 会把打回理由写回本节点的平铺对话（配对成 tool/user 消息），
     # 不然模型下一回合看不到自己为什么被拒。分配节点和叶子同构。
     return {"kind": "again", "feedback": why + note}
@@ -204,35 +283,29 @@ def _obs_label(tool, args):
 
 
 def _record_effects(st, trace, node_id, tool, args, eff, pre, created, modified):
-    """把一次工具动作的产出记进节点账本（结论契约核对 + trace）。
+    """把一次工具动作的产出落成 trace 的 effects 事件（给人看的过程记录）。
 
     created / modified 是这次动作之后确实存在、属于它的产物路径。
+    历史只活在一处（节点对话）；这里只发事件，不存任何节点状态。
     """
     trace.add(node_id, "effects", {"tool": tool, "args": args,
                                    "wrote": created + modified,
                                    "effects": eff, "前置条件": pre})
-    for p in created + modified:
-        if not str(p).lower().endswith(ARTIFACT_EXT):
-            continue
-        st.setdefault("artifacts", set()).add(os.path.realpath(p))
-        st.setdefault("art_effects", {})[os.path.realpath(p)] = {
-            "effects": eff, "preconditions": pre}
 
 
 def _action_result(st, trace, node, tool, args, obs):
-    """一次工具动作的收尾：记账观测 + trace + 无进展检测。返回 step 的下一拍。
+    """一次工具动作的收尾：trace + 无进展检测。返回 step 的下一拍。
 
     同一件事重复 ≥3 次显式告警、≥5 次自己停下（指纹 = 动作 + 观测，
-    换动作或世界回话变了指纹就不同）。
+    换动作或世界回话变了指纹就不同）。历史进对话（工具结果消息），
+    这里只发事件、记账指纹。
     """
     what = _obs_label(tool, args)
-    st.setdefault("calls", []).append([tool, args, str(obs)])
     n, note = bump(st.setdefault("seen_actions", {}),
                    sig(what, obs), trace, node, what)
     if note:
         obs = str(obs) + note
     trace.add(node.id, "tool", {"tool": tool, "args": args, "obs": str(obs)})
-    node.observations.append({"action": what, "obs": obs})
     if n >= 5:
         msg = "同一件事重复 %d 次、输出完全一样，没有新信息：%s" % (n, what)
         trace.add(node.id, "stalled", msg)
@@ -248,7 +321,7 @@ async def create_children(children: list[ChildSpec],
     """把任务拆成更小的子任务交给下层节点。调它 = 再拆一层。
 
     除 notes / gate 外全部必填：缺了或形状不对，这次分配会被代码当场退回，
-    原因写进「本层已有尝试」。一次最多一个 gate。
+    原因写回本层对话。一次最多一个 gate。
     """
     st, node, trace, budget, rctx = _current(_b)
     kids_spec, reject = [], None
@@ -258,7 +331,7 @@ async def create_children(children: list[ChildSpec],
             reject = why
             break
         # ② 子任务的验收标准必须携带父/根的可测物理量
-        ra = rctx["root_anchors"]
+        ra = _root_anchors(node, rctx["state"])
         ok_parent = inherits(node.accept, s["accept"])
         ok_root = (not ra) or any(x in s["accept"] for x in ra)
         if not (ok_parent and ok_root):
@@ -273,11 +346,11 @@ async def create_children(children: list[ChildSpec],
 
     if reject:
         # 把被拒这件事变成一条可见的事实（而不是丢弃或加计数器）
-        return balk(node, reject, trace, st, kids=kids_spec)
+        return balk(node, reject, trace, st)
 
     gates = [s for s in kids_spec if s["gate"]]
     if len(gates) > 1:
-        return balk(node, "一次分配最多一个门槛", trace, st, kids=kids_spec)
+        return balk(node, "一次分配最多一个门槛", trace, st)
     gate = gates[0] if gates else None
     if gate:
         first = [gate]
@@ -286,10 +359,16 @@ async def create_children(children: list[ChildSpec],
         first, rest = kids_spec, []          # 没有门槛就没有"暂缓"，不能把全部当成暂缓
 
     if not budget.take_nodes(len(kids_spec)):
-        return balk(node, "节点预算不足", trace, st, kids=kids_spec)
-    node.attempts.append({"children": kids_spec, "results": [], "outcome": "等下层"})
+        return balk(node, "节点预算不足", trace, st)
+    gate = gates[0] if gates else None
+    if gate:
+        first = [gate]
+        rest = [s for s in kids_spec if s is not gate]
+    else:
+        first, rest = kids_spec, []          # 没有门槛就没有"暂缓"，不能把全部当成暂缓
+    node.deferred = rest                     # 暂缓计划存节点上：孩子还没出生，无处可推
     trace.add(node.id, "allocated",
-              {"round": len(node.attempts), "gate": gate["name"] if gate else None,
+              {"gate": gate["name"] if gate else None,
                "deferred": [s["name"] for s in rest] if gate else []})
     # obs = 这次分配的平铺记录，step 会把它写回本节点的对话（分配节点的历史
     # 也走对话消息累积，和叶子同构 —— 完整 Loop）。
@@ -382,23 +461,20 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
 async def conclude(verdict: str, text: str,
                    evidence: list[str] | None = None,
                    external: str = "",
-                   artifacts: list[Artifact] | None = None,
                    _b=Depends(get_step_binding)) -> dict:
     """出结论：判定这件事做没做完。分配节点和叶子共用。
 
     判定「满足」必须指得出真证据（叶子：第几次观测 / 产物路径；分配节点：
     子任务 name / 产物路径），指不出来会被降级为未满足。
-    叶子的每个产出文件都要在 artifacts 里交代（type=内部 只给自己用的）。
     """
     st, node, trace, budget, rctx = _current(_b)
     concl = {"verdict": verdict, "text": text, "evidence": evidence or [],
-             "external": external,
-             "artifacts": [a.model_dump(by_alias=True) for a in (artifacts or [])]}
-    got, err = clean_conclusion(concl, trace, node, st)
+             "external": external}
+    got, err = clean_conclusion(concl, trace, node,
+                                msgs=st["transcript"].to_list())
     if err:
         trace.add(node.id, "bad_conclusion", err)
         return balk(node, err, trace, st)
-    accept_artifacts(node, got["artifacts"], trace, st)
     node.close(got["verdict"], got["content"], got["evidence"], got["external"])
     trace.add(node.id, "concluded",
               {"verdict": got["verdict"], "text": got["content"],
@@ -406,93 +482,25 @@ async def conclude(verdict: str, text: str,
     return {"kind": "finished"}
 
 
-# ---------------------------------------------------------------- 一回合
-async def step(nid, ctx):
-    """一个节点的一回合。不递归，只返回下一步该干什么。
+# ---------------------------------------------------------------- 下一拍
+def _effect(d):
+    """工具结果 dict 的 kind → 循环的下一拍。"""
+    kind = d.get("kind")
+    if kind == "finished":
+        return "stop"
+    if kind == "children":
+        return "suspend"
+    return "continue"                           # again
 
-    每个节点（分配节点和叶子一样）都维护一段真对话（st["msgs"]，平铺消息
-    记录）：assistant 消息每回合先入账，之后工具结果 / 打回理由按 OpenAI
-    协议配对成 tool 消息 —— 每个 tool_call id 都必须有一条 tool 回话，悬空的
-    id 会让 provider 报错。bash/read/write 的观测就是 tool 消息；没调工具时的
-    打回理由没有 id 可配对，就写 user 消息（对话不能断在两个 assistant 之间）。
-    """
-    st = ctx["state"][nid]
-    node = st["node"]
-    llm, trace, budget = ctx["llm"], ctx["trace"], ctx["budget"]
 
-    if budget.exhausted():
-        node.close("阻塞", "预算耗尽: " + budget.why(), [])
-        node.status = "failed"
-        trace.add(node.id, "budget_exhausted", node.conclusion)
-        return {"kind": "finished"}
+def _payload(d):
+    """suspend 时带上孩子 / 门槛信息（分配节点挂起用）。"""
+    if d.get("kind") != "children":
+        return None
+    return {"first": d["first"], "rest": d.get("rest") or [],
+            "gate_name": d.get("gate_name")}
 
-    which = "leaf" if node.kind == "leaf" else "alloc"
-    _step_binding.set((ctx, nid))
-    msg = await ask(llm, trace, node, which, budget, ctx, st)
 
-    # ── 平铺对话。assistant 消息先入账（无论回什么）──
-    wire = st.get("msgs")
-    if wire is None:
-        wire = st["msgs"] = []
-    # id 用模型给的；没有（mock/个别 provider）就按对话长度回退 ——
-    # 每回合都从 0 数会让同一条对话里出现重复的 call_0（provider 会拒或串）。
-    ids = [tc.id or "call_%d" % (len(wire) + i)
-           for i, tc in enumerate(msg.tool_calls)]
-    wire.append({"role": "assistant", "content": msg.text or None,
-                 "tool_calls": [
-                     {"id": i, "type": "function",
-                      "function": {"name": tc.name,
-                                    "arguments": json.dumps(
-                                        tc.arguments, ensure_ascii=False)}}
-                     for i, tc in zip(ids, msg.tool_calls)] or None})
-
-    def feedback(text, ids=ids):
-        # 有 tool_call 就用 tool 回话配对；纯文本回复没有 id，写 user 消息
-        if ids:
-            for i in ids:
-                wire.append({"role": "tool", "tool_call_id": i,
-                             "content": text})
-        else:
-            wire.append({"role": "user", "content": text})
-
-    if not msg.tool_calls:
-        hint = ("（你只回了一段文字，开头：%s）" % msg.text[:60]) if msg.text else ""
-        why = ("这次回复没有调用任何工具%s。你必须调用一个：%s。"
-               % (hint, " / ".join(_TOOL_NAMES[which])))
-        feedback(why)
-        return balk(node, why, trace, st)
-    if len(msg.tool_calls) > 1:
-        why = "一次只能调用一个工具（你调了 %d 个）" % len(msg.tool_calls)
-        feedback(why)
-        return balk(node, why, trace, st)
-    tc = msg.tool_calls[0]
-    if tc.name not in _TOOL_NAMES[which]:
-        why = ("你调用的 %s 不在这一层的工具里（你能用：%s）"
-               % (tc.name, " / ".join(_TOOL_NAMES[which])))
-        feedback(why)
-        return balk(node, why, trace, st)
-
-    # 取回工具：把被压过的工具输出原文写回对话（作为 tool 结果）
-    if tc.name == RETRIEVE_NAME:
-        wire.append({"role": "tool", "tool_call_id": ids[0],
-                     "content": retrieve_original(tc.arguments)})
-        return {"kind": "again"}
-
-    tool = await mcp.get_tool(tc.name)
-    try:
-        res = await tool.run(tc.arguments)
-    except ToolValidationError as e:
-        # schema 拒的参数（缺必填 / 类型错）：一条可见的事实，让模型改
-        why = "工具参数不合形状，被退回：%s" % e
-        feedback(why)
-        return balk(node, why, trace, st)
-    d = res.structured_content
-    if not isinstance(d, dict):
-        raise TypeError("工具 %s 必须返回 dict（拿到 %r）" % (tc.name, d))
-    if d.get("obs") is not None:
-        wire.append({"role": "tool", "tool_call_id": ids[0],
-                     "content": d["obs"]})
-    elif d.get("feedback"):
-        wire.append({"role": "tool", "tool_call_id": ids[0],
-                     "content": d["feedback"]})
-    return d
+def _to_outcome(d):
+    """打回 / 停 的 dict → Outcome（balk 返回的就是这两个 kind）。"""
+    return Outcome(_effect(d))

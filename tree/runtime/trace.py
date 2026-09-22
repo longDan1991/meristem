@@ -8,11 +8,15 @@
 不静默吞掉（AGENTS §2）。
 """
 
+import hashlib
 import json
 import os
 import queue
 import threading
 import time
+from glob import glob
+
+from tree import config as cfg
 
 
 def iter_trace_lines(path):
@@ -46,8 +50,7 @@ class Trace:
     def add(self, node_id, kind, payload):
         if not self._thread.is_alive():
             raise RuntimeError("trace 写线程已死（%s）：记录不再落盘" % self.path)
-        rec = {"t": round(time.time(), 3), "node": node_id, "kind": kind,
-               "payload": payload}
+        rec = {"t": round(time.time(), 3), "node": node_id, "kind": kind, "payload": payload}
         self._q.put(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def _serve(self):
@@ -76,3 +79,19 @@ class Trace:
         self._q.join()
         if self._error is not None:
             raise self._error
+
+
+def get_trace(path=None, task=None):
+    """新会话的 trace 路径：<工作区>/runs/<时间>-<任务哈希>/trace.jsonl。"""
+    if not path:
+        slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"),
+                          hashlib.sha1((task or "intake").encode("utf-8"))
+                          .hexdigest()[:6])
+        path = os.path.join(cfg.WORKSPACE, "runs", slug, "trace.jsonl")
+    return Trace(path)
+
+
+def get_traces():
+    """历史会话（最近的在前）。`-r` 从这里列老会话。"""
+    return sorted(glob(os.path.join(cfg.WORKSPACE, "runs", "*", "trace.jsonl")),
+                  key=os.path.getmtime, reverse=True)

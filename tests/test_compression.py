@@ -5,7 +5,7 @@
 
   A. 对话形态：叶子维护真对话 —— assistant(tool_call) 与 tool(观测) 配对，
      工具调用 id 在一条对话里不重复（重复的 call_0 会被 provider 拒 / 串）。
-  B. 压缩只发生在发送边界：存储（node.observations / trace 的 tool 事件）是原文；
+  B. 压缩只发生在发送边界：存储（trace 的 tool 事件）是原文；
      第 4 回合起，最早那条大工具输出在线上被压短；user（形式字段）一字未动；
      trace 里有 wire_compressed 统计。
   C. 可逆：日志折叠（LOG）在压缩文本里嵌 `Retrieve more: hash=...`，
@@ -35,6 +35,16 @@ from tree.runtime.trace import Trace                                     # noqa:
 from tree.compression import retrieve_original                           # noqa: E402
 
 OK = []
+
+
+def stored_obs(recs, needle):
+    """trace 里某条命令的观测原文 —— 存储只活在这里（节点不再有 observations）。"""
+    for r in recs:
+        if r["kind"] != "tool":
+            continue
+        if needle in str(r["payload"]["args"]):
+            return r["payload"]["obs"]
+    raise AssertionError("trace 里没找到 %r 的 tool 事件" % needle)
 
 
 def line(tag, cond, detail=""):
@@ -123,17 +133,16 @@ def main():
     ids = [a["tool_calls"][0]["id"] for a in asst]
     line("工具调用 id 不重复", len(ids) == len(set(ids)), str(ids))
     line("观测以 tool 消息存在（小输出逐字一致）",
-         any(t["content"] == node.observations[1]["obs"]
+         any(t["content"] == stored_obs(recs, "echo 小输出2")
              for t in llm.seen[2] if t["role"] == "tool"))
 
     print("=" * 80)
     print("B. 压缩只发生在发送边界：存储原文、线上压短、user 一字未动")
     raw = next(r["payload"]["obs"] for r in recs
                if r["kind"] == "tool" and "close" in str(r["payload"]["obs"]))
-    line("存储（observations）是原文", node.observations[0]["obs"] == raw,
+    line("存储（trace 的 tool 事件）是原文",
+         any(r["kind"] == "tool" and r["payload"]["obs"] == raw for r in recs),
          "%d 字" % len(raw))
-    line("trace 的 tool 事件是原文",
-         any(r["kind"] == "tool" and r["payload"]["obs"] == raw for r in recs))
     wire4 = llm.seen[3]                       # 第四回合：最早那条大输出可压了
     tool0 = next(m for m in wire4
                  if m.get("role") == "tool" and m.get("tool_call_id") == "call_0")
@@ -150,7 +159,7 @@ def main():
          wc[0]["payload"] if wc else "")
     line("小输出低于压缩门槛，在线上保持原文",
          any(m.get("role") == "tool" and m.get("tool_call_id") == "call_4"
-             and m["content"] == node.observations[2]["obs"] for m in wire4))
+             and m["content"] == stored_obs(recs, "echo 小输出3") for m in wire4))
 
     print("=" * 80)
     print("C. 可逆：日志折叠嵌取回标记，按 hash 取回原文，FATAL 幸存")

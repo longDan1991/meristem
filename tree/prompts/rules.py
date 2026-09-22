@@ -18,7 +18,7 @@ def rules_section(which):
         lines.append("已经试过的都记在历史里 —— 别重复撞同一堵墙。")
     if "create_children" in tools:
         lines.append("create_children 除 notes / gate 外全部必填：缺一个或形状不对，"
-                     "这次分配会被代码当场退回（原因写进「本层已有尝试」）。")
+                     "这次分配会被代码当场退回（原因写回对话）。")
         lines.append("每个子任务的 accept 必须原样带上父/根的可测物理量"
                      "（日期 / 两位以上数字 / 标识符）—— 丢了会被代码拒掉，"
                      "那是把任务换成了别的东西。")
@@ -27,10 +27,7 @@ def rules_section(which):
     if "conclude" in tools:
         lines.append("判定「满足」必须指得出具体证据，指不出来会被降级为「未满足」。")
         lines.append("conclude 的 text 落在上层给的 conc_range 区间里。")
-        if "bash" in tools:                     # 叶子
-            lines.append("这次产出的每一个代码/配置/数据文件都要在 conclude 的 "
-                         "artifacts 里交代（能跑起来的给完整契约，只给自己用的标 type=内部）。")
-        else:                                   # 分配节点（自己没有观测）
+        if "bash" not in tools:                 # 分配节点（自己没有观测）
             lines.append("分配节点自己没有观测：证据只能是子任务的 name（原样照抄一个）"
                          "或磁盘上真存在的产物路径。写「第几次观测」是无效的 —— "
                          "观测只属于叶子。")

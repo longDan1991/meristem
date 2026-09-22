@@ -6,9 +6,14 @@
     完成与否由上层那条可执行标准判 —— 节点连打分的入口都没有。
 
 所以这个文件里**没有任何计数器**。
-所有"该不该停"的问题，都由"看得见的事实"回答：
-分配节点看 `attempts`（自己试过什么、下层回了什么），叶子看 `observations`。
+所有"该不该停"的问题，都由"看得见的事实"回答。
 想让它更保守，就把事实说得更清楚，而不是加一个上限。
+
+节点没有"结束"这个概念：它是一个 Loop，`msgs`（平铺对话）就是它的全部历史 ——
+观测 / 尝试 / 下层结论都以对话消息累积。它只在"有欠 LLM 一个回答"时才运行
+（`runtime/reconcile.py` 的 `actionable`，调度与恢复共用同一个谓词）。
+`deferred` 是门槛的暂缓计划（还没出生的子任务规格）—— 唯一不是"已完成事实"
+的节点数据，因为那些孩子还没出生，无处可推。
 
 **这个文件只管格子的形状与协议逻辑**：字段怎么定义、怎么落盘、怎么回给上层。
 "这个格子填得合不合规"是 `gate.py`；"落盘 / 调度"是 `runtime/`；
@@ -66,40 +71,37 @@ class Node:
     # 由 `scheduler._spawn` 从父节点上拼出来（O(1)），不在 render 时反查 registry：
     # 形式字段只读 ⇒ 父的 detail 出生后不会再变 ⇒ 物化不可能变旧（§11）。
     lineage: list = field(default_factory=list)
-    # ── 看得见的历史（程序填，模型只读）──
-    attempts: list = field(default_factory=list)     # 分配节点：每次分配 + 下层结论
-    observations: list = field(default_factory=list)  # 叶子：每次工具调用的真实返回
+    # ── 结构（程序填）──
+    children: list = field(default_factory=list)   # 已出生的孩子 id（含门槛）
+    deferred: list = field(default_factory=list)   # 门槛的暂缓计划：还没出生的子任务规格
     # ── 结局 ──
-    children: list = field(default_factory=list)
     verdict: str = ""                 # 满足 | 未满足 | 阻塞
     conclusion: str = ""
     evidence: list = field(default_factory=list)
     external: list = field(default_factory=list)   # 阻塞时：哪一类外部需求
-    status: str = "running"
 
     # ---------------------------------------------------------------- 结局
     # 消息拼接一律不在 Node —— 在 tree/prompts/messages.py（header / lineage /
     # base_user）。Node 只装数据 + 协议逻辑。
+    # 没有 status：出结论（verdict 非空）就是终态事实，"done" 由展示从 verdict 推导。
     def close(self, verdict, conclusion, evidence, external=None):
         self.verdict = verdict
         self.conclusion = conclusion
         self.evidence = evidence or []
         self.external = external or []
-        self.status = "done"
 
     # ------------------------------------------------------------ 序列化
     def to_dict(self):
         """整棵节点的快照（全字段）。给会话状态检查点用 —— 恢复时按原样
-        重建 Node，attempts/observations 一字不差地回到模型眼前。"""
+        重建 Node；对话（msgs）在检查点里和 node 并列，不在 Node 上。"""
         return {"name": self.name, "detail": self.detail, "notes": self.notes,
                 "accept": self.accept, "kind": self.kind, "gate": self.gate,
                 "conc_range": self.conc_range,
                 "id": self.id, "parent": self.parent, "depth": self.depth,
-                "lineage": self.lineage, "attempts": self.attempts,
-                "observations": self.observations, "children": self.children,
+                "lineage": self.lineage, "children": self.children,
+                "deferred": self.deferred,
                 "verdict": self.verdict, "conclusion": self.conclusion,
-                "evidence": self.evidence, "external": self.external,
-                "status": self.status}
+                "evidence": self.evidence, "external": self.external}
 
     @classmethod
     def from_dict(cls, d):
@@ -137,16 +139,17 @@ def render_tree(root, registry, prefix="", is_last=True, lines=None, streams=Non
     它不是消息拼接（那是 messages.py 的事），是给人看的展示。
     """
     b = "└─ " if is_last else "├─ "
-    mark = {"done": "✓", "failed": "✗", "running": "·"}.get(root.status, "?")
+    # 没有 status 字段：出过结论（verdict 非空）就是终态，否则运行中。
+    mark = "✓" if root.verdict == "满足" else ("✗" if root.verdict else "·")
     if lines is None:
         lines = []
-    tag = "%s%s" % ("[分配]" if root.kind == "dispatch" else "[叶子]",
+    tag = "%s%s" % ({"dispatch": "[分配]", "leaf": "[叶子]"}.get(root.kind, "[入口]"),
                      " [门槛]" if root.gate else "")
     if compact:
         # 实时视图：一行一个节点。运行中的把正在吐的字并排带上 ——
         # 正在说什么就显示什么（吐过话就显示说，还在想就显示思考）；
         # 出过结论的把判定 + 验收标准并排带上（结论留到跑完的详细帧）。
-        if root.status == "running":
+        if not root.verdict:
             extra = ""
             if streams:
                 s = streams.get(root.id)
@@ -165,7 +168,7 @@ def render_tree(root, registry, prefix="", is_last=True, lines=None, streams=Non
         lines.append("%s%s%s %s %s" % (prefix, b, mark, tag, root.name))
         lines.append("%s%s  [%s] %s" % (prefix, "  " if is_last else "│ ",
                                         root.verdict or "…", root.accept))
-        if streams and root.status == "running":
+        if streams and not root.verdict:
             s = streams.get(root.id)
             if s:
                 if s.get("thinking"):
