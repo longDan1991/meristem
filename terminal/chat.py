@@ -180,7 +180,7 @@ async def run_session(a, session=None):
     判断 / 打回 / 跑树在 `tree/runtime/scheduler.py` 里（入口是树的根节点）；
     模型由 converse 自己建（LLM()），装配层不碰 LLM。
 
-    -r：选一个老会话加载成一棵树（root/registry/state/pending），放进
+    -r：选一个老会话加载成一棵树（root/registry/state），放进
     `env["tree"]` —— 展示和续跑都吃这一棵树，不重读 trace。
     """
     _require_api_key()
@@ -204,8 +204,8 @@ async def run_session(a, session=None):
         try:
             tree = load(picked)
         except ValueError:
-            # 读不了（还没迁移 / 记录损坏）：带着是哪个会话的上下文炸出来，不静默跳过
-            print("读不了这个会话（还没迁移，或记录损坏）：%s" % picked, flush=True)
+            # 读不了（数据损坏 / 不是当前格式）：带着是哪个会话的上下文炸出来，不静默跳过
+            print("读不了这个会话（数据损坏，或不是当前格式）：%s" % picked, flush=True)
             raise
         # 会话 = 一棵树（入口节点为根）；直接交给 converse 丢进 run()。
         # registry 是运行态：run() 往里登记每个节点，终端靠它画任务树。

@@ -77,7 +77,7 @@ async def run(root, llm, trace, registry=None, budget=None, workers=6,
     ask / say 是入口节点的外部接线：`ask(text)` 拿用户的话（终端那次读，
     测试里换成脚本），`say(text)` 是旁白出口。只有入口节点用它们。
 
-    resume：可选 tree（`session.load` 的返回）{"root", "state", "pending", ...}
+    resume：可选 tree（`session.load` 的返回）{"root", "state", "registry"}
     —— 一整棵树**接着跑**。恢复时：
       ① 按检查点重建 transcript（msgs）；
       ② 补投递：孩子有结论但父节点对话里没有（崩溃窗口）→ 用 `reconcile.settle`

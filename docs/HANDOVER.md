@@ -65,9 +65,10 @@
 `python3 main.py -r` 列表选一个老会话加载成当前会话 —— 对话接着谈、
 没跑完的树接着跑（中断时在飞的那一步作废，节点带完整历史重新问模型）。
 `--intake` / `--mock` / MockLLM / 直跑模式已删（入口是唯一顶层，且要真模型）。
-**老会话（本功能之前的 trace，没有 state 检查点）用 `uv run python migrate_sessions.py`
-一次性迁移成新格式** —— 运行时只认一种格式，没有任何兼容层；旧格式只在这个
-迁移脚本里出现一次，没跑完的节点迁移后带着字段重新跑。
+**老数据只留档案、不留兼容**：空 trace / 无 state 检查点的废会话和顶层老 trace 已删除，
+`migrate_sessions.py` 随之删除 —— 运行时只认一种格式，没有任何兼容层；
+工作区里还有 29 场「入口并入根之前」的过渡格式会话，当**只读档案**留着
+（`load` 能读回任务树接着跑，但没有入口对话）。
 
 测试：**7 个测试文件、200+ 断言，全离线，不调模型**（见 §6）。
 
@@ -100,14 +101,12 @@ export TREE_API_KEY='...'
 export TREE_MODEL='deepseek-v4-flash'
 export TREE_WORKSPACE='/Users/wxlong/output/humanoid'   # ← 工作区
 export TREE_WORKERS='6'                                # 同时在飞的模型调用数（并发开关，默认 6）
-export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 ```
 
 三条路径的关系：**跑出来的东西一律落在工作区**。工作区既是 agent 的 cwd
 （上次写的代码和数据还在），也是历史 trace 的堆放地。项目目录里只有代码和提示词。
 
 - 不设 `--trace` 时，自动写 `<工作区>/runs/<月日-时分秒>-<任务哈希>/trace.jsonl`
-- `TREE_INDEX` 默认扫 `<工作区>/runs/*/trace.jsonl`，所以**新跑完的树立刻能被下次检索到**
 - **工作目录只有 `TREE_WORKSPACE` 一个来源**。没有 `-w`、没有默认值、没有先例可改。
   先例只提供"那里有过什么"（而且只在它等于当前 cwd 时才叫"工作目录"），
   不提供"你该在哪干活"。
@@ -143,7 +142,7 @@ export TREE_INDEX='/Users/wxlong/output/humanoid/runs/*/trace.jsonl'
 | `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
 | `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调。每个节点 = 一个完整的 `run_loop` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
 | `tree/runtime/reconcile.py` | 93 | **编排纯逻辑（调度与恢复共用一份）**：`actionable`（该不该调 LLM：没出结论 + 孩子全回话 + 最后一条不是模型说的）/ `settle`（孩子结论结算：投递 + 门槛续跑/作废）/ `gate_child` / `make_child` |
-| `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点）+ 树分组；`session_label` / `session_context` |
+| `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点）+ 树分组；`session_label`（检查点推导的摘要，档案认根本身） |
 | `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 
@@ -158,13 +157,11 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
 
 ```
 /Users/wxlong/output/humanoid/
-├── runs/night_quant/          ← 最值钱的那棵树：11.5 小时 / 2443 节点 / 35.7M tokens
-│   ├── trace.jsonl            （13M，能力库就是拿它挖出来的）
-│   └── ...                    （那次跑出来的 workspace：fulltext.txt、char_index.pkl…）
-├── runs/verify{2,3,4}/        ← 校验跑
-├── runs/mock*/ runs/sum/ ...  ← 小实验
+├── runs/…                     ← 29 场档案会话（入口并入根之前的数据，只读；`load` 能读回任务树续跑，无对话）
+│   ├── night_quant/           ← 最值钱的那棵树：11.5 小时 / 2443 节点 / 35.7M tokens
+│   └── verify{2,3,4}/ mock*/ 0918-*/ 0919-*/ realwrite*/ sum/ twofiles/ mkfile/
 ├── caps.jsonl                 ← 旧能力库（已删检索层，文件留着不动）
-└── trace*.jsonl / output/ / data/ / strategies/ / backtest_engine.py / run_backtest.py
+└── output/ / data/ / strategies/ / backtest_engine.py / run_backtest.py
                                ← 更早（还没有工作区概念时）跑出来的散件
 ```
 
@@ -263,13 +260,13 @@ LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程�
 | `tests/test_cli.py` | 12 | `main.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
 | `tests/test_tty.py` | 53 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
 | `tests/test_compression.py` | 19 | 平铺对话（分配节点和叶子同构）：asst/tool 配对、压缩只发生在发送边界（存储原文、线上压短、user 一字未动）、LOG 折叠嵌取回标记且按 hash 可逆、`TREE_COMPRESS=0` 保险阀、压不动的大输出完整到达 |
-| `tests/test_resume.py` | 44 | 会话续跑：从 {node, msgs} 检查点重建、崩溃窗口补投递、门槛续跑/作废、in_flight 树接着跑、结论回填、迁移的旧会话（老格式无 state 检查点） |
+| `tests/test_resume.py` | 44 | 会话续跑：从 {node, msgs} 检查点重建、崩溃窗口补投递、门槛续跑/作废、in_flight 树接着跑、结论回填、共享谓词重排队列 |
 
 ```bash
 for t in protocol tools intake compression resume cli tty; do python3 tests/test_$t.py; done
 ```
 
-**待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）；主动重验的定时跑法还没接进 `main.py`（现在是 `python -m tree.memory.verify <caps.jsonl>` 手动跑）。
+**待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）。
 
 ---
 

@@ -4,7 +4,7 @@
 核心不变量：**一场会话 = 一棵树**，入口节点（kind="intake"）是根，谈成的任务
 都是它的孩子。`trace.jsonl` 的记录里，`state` 检查点只有两样：Node 全字段 +
 平铺对话（msgs）—— 没有编排字段。退出（哪怕崩溃）后，`session.load` 读回这
-**一棵树**（root / registry / state / pending），直接丢给 `scheduler.run(..., resume=tree)`
+**一棵树**（root / registry / state），直接丢给 `scheduler.run(..., resume=tree)`
 接着跑：resume 时用 `reconcile` 补投递（崩溃窗口）、按共享谓词重排队列。
 
   A. Node 序列化往返：to_dict → from_dict 不丢任何字段（含 deferred）
@@ -16,7 +16,7 @@
   E. 整场会话（入口 + 任务）崩溃 → load 一棵树 → resume → 二次 load 全完工
   F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果
   G. 一场会话多个任务 = 一棵树多个孩子，只有没跑完的被接着跑
-  H. 迁移：老格式 / 过渡格式都收成一棵入口为根的树
+  I. session_label：当前格式认入口的孩子，档案（无入口）认根本身
 """
 
 import asyncio
@@ -29,10 +29,11 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 from tree.llm import Message, ToolCall                             # noqa: E402
 from tree.protocol.fields import Node                              # noqa: E402
+from tree.prompts.messages import result_ids                       # noqa: E402
+from tree.runtime import reconcile                                 # noqa: E402
 from tree.runtime.scheduler import run                             # noqa: E402
-from tree.runtime.session import load               # noqa: E402
+from tree.runtime.session import load, session_label               # noqa: E402
 from tree.runtime.trace import Trace, iter_trace_lines                  # noqa: E402
-from migrate_sessions import migrate                               # noqa: E402
 
 OK = []
 
@@ -51,6 +52,12 @@ def kid(name, accept="2026-12-31 收盘 >= 1"):
 def state_rec(node, msgs):
     """新格式检查点：Node 全字段 + 平铺对话，没有编排字段。"""
     return {"node": node.to_dict(), "msgs": msgs}
+
+
+def queueable(tree, nid):
+    """该不该调 LLM 的共享谓词 —— 调度器 resume 时按它重排队列。"""
+    st = tree["state"][nid]
+    return reconcile.actionable(st["node"], st["msgs"], result_ids(st["msgs"]))
 
 
 class ScriptLLM:
@@ -123,9 +130,9 @@ async def main():
     line("state 只有 node + msgs", set(t["state"][leaf.id].keys()) == {"node", "msgs"})
     line("入口对话就是根的 msgs",
          t["state"][intake.id]["msgs"][0]["content"] == "用户的任务: 帮我做X")
-    line("重排队列：叶子在跑（排队），入口等孩子（不排队）",
-         leaf.id in t["pending"] and intake.id not in t["pending"])
-    # 空记录 → 报错（老格式，没迁移）
+    line("重排队列：叶子该跑，入口等孩子（共享谓词）",
+         queueable(t, leaf.id) and not queueable(t, intake.id))
+    # 空记录 → 报错（没有 state 检查点）
     d0 = tempfile.mkdtemp()
     tp0 = os.path.join(d0, "t.jsonl")
     tr0 = Trace(tp0)
@@ -133,9 +140,9 @@ async def main():
     tr0.drain()
     try:
         load(tp0)
-        line("空记录报错（老格式？先迁移）", False)
+        line("空记录报错（没有 state 检查点）", False)
     except ValueError:
-        line("空记录报错（老格式？先迁移）", True)
+        line("空记录报错（没有 state 检查点）", True)
     # 多根 → 报错
     d_multi = tempfile.mkdtemp()
     tp_multi = os.path.join(d_multi, "t.jsonl")
@@ -147,9 +154,9 @@ async def main():
     trm.drain()
     try:
         load(tp_multi)
-        line("多个根报错（先迁移收成入口一棵树）", False)
+        line("多个根报错（不是入口为根的一棵树）", False)
     except ValueError:
-        line("多个根报错（先迁移收成入口一棵树）", True)
+        line("多个根报错（不是入口为根的一棵树）", True)
 
     # B2：孩子出了结论但投递丢了（崩溃窗口）→ 恢复补投递
     d_b2 = tempfile.mkdtemp()
@@ -164,7 +171,7 @@ async def main():
     tr_b2.drain()
     t_b2 = load(tp_b2)
     line("B2: 投递丢失 → 加载时入口不排队（孩子未结算）",
-         it2.id not in t_b2["pending"] and a.id not in t_b2["pending"])
+         not queueable(t_b2, it2.id) and not queueable(t_b2, a.id))
     try:
         await run(t_b2["root"], ScriptLLM(["甲回来了，全部完成。"]),
                   Trace(tp_b2), registry=t_b2["registry"], resume=t_b2,
@@ -346,79 +353,28 @@ async def main():
          [n for n in t_after["registry"].values() if n.name == "任务一"][0].verdict == "满足")
 
     print("=" * 80)
-    print("H. 迁移：老格式 / 过渡格式都收成一棵入口为根的树")
-    # H1：老格式（open/concluded/done，无 state）
-    d7 = tempfile.mkdtemp()
-    tp7 = os.path.join(d7, "trace.jsonl")
-    tr7 = Trace(tp7)
-    tr7.add("r1", "open", {"task": "创建 notes/summary.txt", "criteria": "内容恰好是 alpha",
-                            "depth": 0, "parent": None})
-    tr7.add("k1", "open", {"task": "写文件", "criteria": "内容恰好是 alpha",
-                            "depth": 1, "parent": "r1"})
-    tr7.add("k1", "done", {"result": "写好了"})
-    tr7.add("r1", "done", {"result": "全部完成"})
-    tr7.drain()
-    line("迁移前 load 报错（没有入口根）", _load_raises(tp7))
-    line("迁移跑了", migrate(tp7) is True)
-    line("迁移幂等（再跑就跳过）", migrate(tp7) is False)
-    t = load(tp7)
-    line("迁移后一棵树、入口为根", t["root"].kind == "intake")
-    r1 = [n for n in t["registry"].values() if n.name == "创建 notes/summary.txt"][0]
-    line("旧任务根挂成入口的孩子", r1.parent == t["root"].id
-         and t["root"].children == [r1.id])
-    line("done 被归一成满足的判定", r1.verdict == "满足")
-    line("孩子链完整", r1.children == ["k1"])
-    # H2：过渡格式（有 state + chat_*，但任务各自 parent=None）
-    d8 = tempfile.mkdtemp()
-    tp8 = os.path.join(d8, "trace.jsonl")
-    tr8 = Trace(tp8)
-    tr8.add(None, "chat_user", {"text": "用户的任务: 量化系统"})
-    tr8.add(None, "chat_model", {"text": "好，我来。", "tool_calls": None})
-    rr = Node(name="任务", accept="2026-12-31 收盘 >= 本金 x 2", kind="dispatch")
-    tr8.add(rr.id, "state", state_rec(rr, []))
-    tr8.drain()
-    line("过渡格式迁移", migrate(tp8) is True)
-    t8 = load(tp8)
-    line("入口的 msgs = 旧的 chat_*",
-         [m["content"] for m in t8["state"][t8["root"].id]["msgs"]] ==
-         ["用户的任务: 量化系统", "好，我来。"])
-    line("旧任务根挂成入口的孩子",
-         t8["root"].children == [rr.id] and t8["registry"][rr.id].parent == t8["root"].id)
-    # H3：没跑完的任务迁移后能接着跑（历史重建进对话，满足的证据指得到）
-    d9 = tempfile.mkdtemp()
-    tp9 = os.path.join(d9, "trace.jsonl")
-    tr9 = Trace(tp9)
-    tr9.add("r1", "open", {"task": "量化系统", "criteria": "2026-12-31 收盘 >= 本金 x 2",
-                            "depth": 0, "parent": None})
-    tr9.add("k1", "open", {"task": "回测", "criteria": "2026-12-31 收盘 >= 本金 x 2（回测 负责）",
-                            "depth": 1, "parent": "r1"})
-    tr9.add("k1", "leaf_tool", {"tool": "bash", "args": {"cmd": "python3 backtest.py"},
-                                 "obs": "收益 3%"})
-    tr9.drain()
-    migrate(tp9)
-    t9 = load(tp9)
-    k1 = t9["registry"]["k1"]
-    r1 = t9["registry"]["r1"]
-    line("旧格式没 kind 的叶子从动作事件推断出来", k1.kind == "leaf")
-    line("叶子观测重建进对话（恢复后知道自己试过什么）",
-         any(m.get("role") == "tool" and "收益 3%" in str(m.get("content", ""))
-             for m in t9["state"]["k1"]["msgs"]))
-    line("根的分配尝试重建进对话（满足的证据指得到）",
-         any("本层已有尝试" in str(m.get("content", ""))
-             for m in t9["state"]["r1"]["msgs"]))
-    try:
-        await run(t9["root"], ScriptLLM([
-            ("conclude", {"verdict": "满足", "text": "回测好了", "evidence": ["第1次观测"]}),
-            ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["回测"]}),
-            "都跑完了。"]),
-                  Trace(tp9), registry=t9["registry"], resume=t9,
-                  ask=lambda tx: (_ for _ in ()).throw(EOFError()))
-    except EOFError:
-        pass
-    t9_after = load(tp9)
-    line("迁移的没跑完树续跑，判定不被证据校验降级",
-         t9_after["registry"]["k1"].verdict == "满足"
-         and t9_after["registry"]["r1"].verdict == "满足")
+    print("I. session_label：当前格式认入口的孩子，档案（无入口）认根本身")
+    d_i = tempfile.mkdtemp()
+    tp_i = os.path.join(d_i, "trace.jsonl")
+    it_i = Node(name="会话", kind="intake")
+    leaf_i = Node(name="子A", accept="x", kind="leaf", parent=it_i.id, depth=1)
+    leaf_i.close("满足", "done", ["e"])
+    it_i.children = [leaf_i.id]
+    tr_i = Trace(tp_i)
+    tr_i.add(it_i.id, "state", state_rec(it_i, []))
+    tr_i.add(leaf_i.id, "state", state_rec(leaf_i, []))
+    tr_i.drain()
+    lbl = session_label(tp_i)
+    line("当前格式：任务 = 入口的孩子", "子A" in lbl and "[满足]" in lbl)
+    d_j = tempfile.mkdtemp()
+    tp_j = os.path.join(d_j, "trace.jsonl")
+    root_j = Node(name="老任务", accept="x", kind="dispatch")
+    root_j.close("阻塞", "做不了", [])
+    tr_j = Trace(tp_j)
+    tr_j.add(root_j.id, "state", state_rec(root_j, []))
+    tr_j.drain()
+    lbl2 = session_label(tp_j)
+    line("档案：没有入口，根本身就是任务", "老任务" in lbl2 and "[阻塞]" in lbl2)
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")
