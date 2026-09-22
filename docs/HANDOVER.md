@@ -10,7 +10,8 @@
 > 分配节点 / 叶子节点的分工保留（`alloc.md` / `leaf.md` 还在，内容已去掉
 > 检索相关段落）。对应模块 `tree/memory/`、`tree/runtime/box.py` 与测试
 > `test_caps.py` / `test_index.py` / `test_box.py` 已删除；`session_label`
-> 迁到 `tree/runtime/session.py`，`iter_trace_lines` 迁到 `tree/runtime/trace.py`。
+> 迁到 `tree/runtime/store.py`（后与 `load`/`new_session`/`TreeStore`/`Trace` 合一），
+> `iter_trace_lines` 也在这一个文件。
 
 > **后续：`docs/PROMPTS.md` 已实现（系统提示词 = 命名分节结构，pi 范式）。**
 > 三套整块散文（`alloc.md` / `leaf.md` / `intake.md`）连同所有 .md 提示词文件全部删掉，
@@ -122,7 +123,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | 文件 | 行数 | 干什么 |
 |---|---|---|
 | `main.py` | 55 | 薄分派：只解析参数、按参数调 `terminal.chat.run_session`，没有任何装配逻辑 |
-| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（trace/env）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["tree"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/trace.py` 的 `get_trace`/`get_traces` |
+| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（一棵树 env["tree"]）→ 打横幅、切工作目录，`-r` 时选完老会话就**当场重建整棵 Node 树**放进 `env["tree"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/store.py` 的 `trace_path`/`get_traces` |
 | `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`，树的视图 `render_tree` 在 `view.py`（展示变因，不碰协议）。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
@@ -136,14 +137,13 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tree/protocol/fields.py` | 123 | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `deferred`（门槛暂缓计划）+ `EXTERNAL_CLASSES`。渲染不在协议层 —— 树的视图在 `terminal/view.py` |
 | `tree/protocol/gate.py` | 180 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
 | `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
-| `tree/runtime/trace.py` | 78 | trace 落盘（写线程 + 队列，无锁） |
+| `tree/runtime/store.py` | 326 | **一场会话 = 一棵树 + 它自己的记录（存储只这一个概念）**：`new_session`（建新树）/ `load`（从记录读回一棵树，增量检查点按序拼回全量）/ `session_label`（摘要，只扫 node 字段）；`TreeStore` 运行时账本（内存 state/registry + 记录入口 `record`）；`Trace` 记录文件磁盘 IO（写线程 + 队列，无锁）+ `iter_trace_lines`（流式读，坏行炸 / 末行残笔跳过）+ `trace_path` + `get_traces` |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
 | `tree/runtime/loop.py` | | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` **内建**自己的 `EventSink` 并拼好带 scope 的 emit，消费方经 `Loop.subscribe` 订阅（调度器把外界的 consumer 逐个订阅到每个 Loop） |
 | `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
 | `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
 | `tree/runtime/scheduler.py` | | **调度器**（**真异步**）：广度优先、并行扇出、门槛。每个节点 = 一个完整的 `run_node` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
 | `tree/runtime/reconcile.py` | 93 | **编排纯逻辑（调度与恢复共用一份）**：`actionable`（该不该调 LLM：没出结论 + 孩子全回话 + 最后一条不是模型说的）/ `settle`（孩子结论结算：投递 + 门槛续跑/作废）/ `gate_child` / `make_child` |
-| `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点，**增量按序拼回全量**）+ 树分组；`session_label`（检查点推导的摘要，只扫 node 字段，档案认根本身） |
 | `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 

@@ -29,7 +29,7 @@ from tree.prompts import (build_system_sections, render_system,  # noqa: E402
 from tree.prompts.messages import (base_user, header, lineage,  # noqa: E402
                                    spec_line)
 from tree.runtime import scheduler as R              # noqa: E402
-from tree.runtime.session import new_session         # noqa: E402
+from tree.runtime.store import new_session         # noqa: E402
 from tree import config as cfg                       # noqa: E402
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
@@ -205,7 +205,7 @@ def line(tag, cond, detail=""):
 
 # 节点最后落盘的对话（历史只活在这一处 —— 结论审计、"本层历史"都从它推导）。
 # 检查点是**增量**的（scheduler._checkpoint）：delta 事件只带自上次以来新增的
-# 消息，这里按文件顺序拼回全量（和 session.load 同一套）。
+# 消息，这里按文件顺序拼回全量（和 load 同一套）。
 def last_msgs(recs, nid):
     full = []
     for r in (r for r in recs if r["kind"] == "state" and r["node"] == nid):

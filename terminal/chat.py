@@ -57,8 +57,7 @@ from tree import config as cfg
 from tree.llm import LLM
 from tree.protocol.fields import Node
 from tree.runtime.scheduler import run
-from tree.runtime.session import load, new_session, session_label
-from tree.runtime.trace import get_traces
+from tree.runtime.store import get_traces, load, new_session, session_label
 
 PROMPT = "› "
 

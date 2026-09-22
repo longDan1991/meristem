@@ -32,7 +32,7 @@ from tree.protocol.fields import Node                                    # noqa:
 from tree.prompts import render_turn                                     # noqa: E402
 from tree.prompts.messages import base_user                              # noqa: E402
 from tree.runtime import scheduler as R                                  # noqa: E402
-from tree.runtime.session import new_session                             # noqa: E402
+from tree.runtime.store import new_session                             # noqa: E402
 from tree.compression import retrieve_original                           # noqa: E402
 
 OK = []

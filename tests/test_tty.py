@@ -46,7 +46,7 @@ import terminal.chat as chat                               # noqa: E402
 from prompt_toolkit.input import create_pipe_input         # noqa: E402
 from tree.llm import Message, ToolCall                     # noqa: E402
 from tree.protocol.fields import Node                      # noqa: E402
-from tree.runtime.session import new_session               # noqa: E402
+from tree.runtime.store import new_session               # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TIMEOUT = 30

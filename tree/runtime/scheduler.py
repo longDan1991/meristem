@@ -7,7 +7,7 @@
 它是一棵带对话的 Node，"该不该调 LLM"由共享谓词 `reconcile.actionable` 回答
 （没出结论 + 孩子都回话了 + 最后一条不是模型自己说的），孩子出结论由
 `reconcile.settle` 结算（结果投进父节点对话 + 门槛续跑/作废）——
-调度器与恢复（`session.load` 的补投递）用同一份，不各自写一遍。
+调度器与恢复（`store.load` 的补投递）用同一份，不各自写一遍。
 
 **一场会话 = 一棵树**：入口节点（kind="intake"）是根，谈成的任务都是它的孩子。
 `run` 跑整棵树 —— 入口在等用户（`ask`）时不占聊天名额，任务在跑时入口挂起等孩子。
@@ -50,7 +50,7 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
     """跑一棵树（一场会话 = 一棵树：新会话与恢复是同一件事的两个入口）。
 
     tree = {"root", "state", "registry", "trace", "seed"} —— 会话的全部数据，
-    由 `session.new_session(root)`（新）或 `session.load(path)`（恢复）建好。
+    由 `store.new_session(root)`（新）或 `store.load(path)`（恢复）建好。
     registry 就地登记每个节点 —— 调用方拿着 tree 就能看整棵树长出来 / 接着长。
     tree["trace"] 是记录文件的路径：存储（TreeStore）构造时按它打开记录 ——
     底层文件不成为 run 的入参，也没有第二个"写哪"的入口。
