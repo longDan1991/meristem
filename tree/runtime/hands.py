@@ -16,20 +16,10 @@
 import asyncio
 import inspect
 
+from . import deliver
 from ..tools import TOOLS
 
 SERIAL = ("bash", "write")
-
-
-def _deliver(fut, task):
-    if fut.done():
-        return                 # 调用方已经等不及走了
-    if task.cancelled():
-        fut.cancel()
-    elif task.exception() is not None:
-        fut.set_exception(task.exception())
-    else:
-        fut.set_result(task.result())
 
 
 class Hands:
@@ -47,7 +37,7 @@ class Hands:
                 continue
             task = asyncio.ensure_future(call)
             task.add_done_callback(
-                lambda t, fut=fut: _deliver(fut, t))
+                lambda t, fut=fut: deliver(fut, t))
 
     async def run(self, tool, args):
         if tool not in SERIAL:

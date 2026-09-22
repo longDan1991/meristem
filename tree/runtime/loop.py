@@ -75,6 +75,20 @@ class ToolResult:
     reject: str = ""
 
 
+def outcome_after_tools(results):
+    """工具结果列表 → 下一拍：stop / suspend 优先，默认 continue。
+
+    每个节点类型（叶子 / 分配 / 入口）的 after_tool 都只做这一件事 ——
+    工具结果本身是事实，下一拍是循环的语义；两份各抄一遍就会漂。
+    """
+    for r in results:
+        if r.effect == "stop":
+            return Outcome("stop")
+        if r.effect == "suspend":
+            return Outcome("suspend", payload=r.payload)
+    return Outcome("continue")
+
+
 @dataclass(frozen=True)
 class Hooks:
     """调用方注入的三处语义。骨架（问模型 / 跑工具 / 写对话 / 发事件）在循环里。"""

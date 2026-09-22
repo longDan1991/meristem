@@ -47,7 +47,7 @@ from ..protocol.tool_specs import ChildSpec, NODE_TOOLS, mcp, openai_tools
 from ..prompts.messages import base_user, spec_line
 from .. import config as cfg
 from ..compression import RETRIEVE_NAME, compress_messages, retrieve_original
-from .loop import Hooks, Outcome, ToolResult
+from .loop import Hooks, Outcome, ToolResult, outcome_after_tools
 
 
 # ---------------------------------------------------------------- 工具接线
@@ -130,6 +130,11 @@ def _log_usage(llm, trace, node_id, phase):
 # ---------------------------------------------------------------- 节点的语义
 # 骨架（问模型 / 跑工具 / 写对话 / 发事件）在 loop.py；这里只填"节点怎么做"：
 # 拼要发的消息、给工具表、看回复和结果定下一拍。
+def which_of(node):
+    """节点类型 → 提示词类型（intake 保持；dispatch 归 alloc）。"""
+    return node.kind if node.kind in ("leaf", "intake") else "alloc"
+
+
 def node_hooks(nid, runtime):
     """一个节点的三处语义（loop.Hooks）。
 
@@ -141,7 +146,7 @@ def node_hooks(nid, runtime):
     node = st["node"]
     if node.kind == "intake":
         return intake_hooks(nid, runtime)
-    which = "leaf" if node.kind == "leaf" else "alloc"
+    which = which_of(node)
     llm, trace = runtime["llm"], runtime["trace"]
 
     async def before_chat(transcript):
@@ -172,29 +177,24 @@ def node_hooks(nid, runtime):
             why = ("这次回复没有调用任何工具%s。你必须调用一个：%s。"
                    % (hint, " / ".join(_TOOL_NAMES[which])))
             transcript.add_feedback(why)
-            return _to_outcome(balk(node, why, trace, st))
+            return Outcome(balk(node, why, trace, st)["effect"])
         if len(assistant.tool_calls) > 1:
             why = "一次只能调用一个工具（你调了 %d 个）" % len(assistant.tool_calls)
             transcript.add_feedback(why)
-            return _to_outcome(balk(node, why, trace, st))
+            return Outcome(balk(node, why, trace, st)["effect"])
         tc = assistant.tool_calls[0]
         if tc.name not in _TOOL_NAMES[which]:
             why = ("你调用的 %s 不在这一层的工具里（你能用：%s）"
                    % (tc.name, " / ".join(_TOOL_NAMES[which])))
             transcript.add_feedback(why)
-            return _to_outcome(balk(node, why, trace, st))
+            return Outcome(balk(node, why, trace, st)["effect"])
         return None
 
     async def after_tool(transcript, assistant, results):
         rej = next((r.reject for r in results if r.reject), "")
         if rej:
-            return _to_outcome(balk(node, rej, trace, st))
-        for r in results:
-            if r.effect == "stop":
-                return Outcome("stop")
-            if r.effect == "suspend":
-                return Outcome("suspend", payload=r.payload)
-        return Outcome("continue")
+            return Outcome(balk(node, rej, trace, st)["effect"])
+        return outcome_after_tools(results)
 
     return Hooks(before_chat=before_chat, after_chat=after_chat,
                  after_tool=after_tool)
@@ -205,7 +205,7 @@ async def node_spec(nid, runtime):
     node = runtime["state"][nid]["node"]
     if node.kind == "intake":
         return await intake_spec(nid, runtime)
-    which = "leaf" if node.kind == "leaf" else "alloc"
+    which = which_of(node)
     return (await openai_tools())[which]
 
 
@@ -214,7 +214,7 @@ async def node_tools(nid, runtime):
     node = runtime["state"][nid]["node"]
     if node.kind == "intake":
         return intake_tools(nid, runtime)
-    which = "leaf" if node.kind == "leaf" else "alloc"
+    which = which_of(node)
     tools = await _tools_for(which)
 
     def make(name):
@@ -233,8 +233,9 @@ async def node_tools(nid, runtime):
             d = res.structured_content
             if not isinstance(d, dict):
                 raise TypeError("工具 %s 必须返回 dict（拿到 %r）" % (name, d))
-            text = d["obs"] if d.get("obs") is not None else (d.get("feedback") or "")
-            return ToolResult(text=text, effect=_effect(d), payload=_payload(d))
+            return ToolResult(text=d.get("text") or "",
+                              effect=d.get("effect", "continue"),
+                              payload=d.get("payload"))
         return call
 
     return {name: make(name) for name in _TOOL_NAMES[which]}
@@ -284,10 +285,10 @@ def balk(node, why, trace, st):
     if n >= 5:
         node.close("未满足", "同一份用不了的东西连续 %d 次，没有新信息：%s"
                    % (n, why), [])
-        return {"kind": "finished"}
-    # feedback：step 会把打回理由写回本节点的平铺对话（配对成 tool/user 消息），
+        return {"effect": "stop"}
+    # text：make() 会把打回理由写回本节点的平铺对话（配对成 tool/user 消息），
     # 不然模型下一回合看不到自己为什么被拒。分配节点和叶子同构。
-    return {"kind": "again", "feedback": why + note}
+    return {"effect": "continue", "text": why + note}
 
 
 # ---------------------------------------------------------------- 动手
@@ -330,8 +331,8 @@ def _action_result(st, trace, node, tool, args, obs):
         msg = "同一件事重复 %d 次、输出完全一样，没有新信息：%s" % (n, what)
         trace.add(node.id, "stalled", msg)
         node.close("未满足", msg, [])
-        return {"kind": "finished"}
-    return {"kind": "again", "obs": obs}
+        return {"effect": "stop"}
+    return {"effect": "continue", "text": obs}
 
 
 # ---------------------------------------------------------------- 工具
@@ -377,21 +378,20 @@ async def create_children(children: list[ChildSpec],
         rest = [s for s in kids_spec if s is not gate]
     else:
         first, rest = kids_spec, []          # 没有门槛就没有"暂缓"，不能把全部当成暂缓
-    node.deferred = rest                     # 暂缓计划存节点上：孩子还没出生，无处可推
     trace.add(node.id, "allocated",
               {"gate": gate["name"] if gate else None,
                "deferred": [s["name"] for s in rest] if gate else []})
-    # obs = 这次分配的平铺记录，step 会把它写回本节点的对话（分配节点的历史
-    # 也走对话消息累积，和叶子同构 —— 完整 Loop）。
+    # text = 这次分配的平铺记录，会写回本节点的对话（分配节点的历史也走对话
+    # 消息累积，和叶子同构 —— 完整 Loop）。first/rest 进 payload 由 dispatch
+    # 起孩子、落 deferred —— `node.deferred` 的唯一写入方是 scheduler（这里不写）。
     alloc_lines = ["这次分配了 %d 个子任务（除 notes / gate 外全部必填）："
                    % len(kids_spec)]
     for s in kids_spec:
         alloc_lines.append("  - %s" % spec_line(s))
     if gate:
         alloc_lines.append("门槛：%s —— 它先做，不成立则其余不启动。" % gate["name"])
-    return {"kind": "children", "first": first, "rest": rest,
-            "gate_name": gate["name"] if gate else None,
-            "obs": "\n".join(alloc_lines)}
+    return {"text": "\n".join(alloc_lines), "effect": "suspend",
+            "payload": {"first": first, "rest": rest}}
 
 
 @mcp.tool
@@ -493,28 +493,6 @@ async def conclude(verdict: str, text: str,
     trace.add(node.id, "concluded",
               {"verdict": got["verdict"], "text": got["content"],
                "evidence": got["evidence"], "external": got["external"]})
-    return {"kind": "finished"}
+    return {"effect": "stop"}
 
 
-# ---------------------------------------------------------------- 下一拍
-def _effect(d):
-    """工具结果 dict 的 kind → 循环的下一拍。"""
-    kind = d.get("kind")
-    if kind == "finished":
-        return "stop"
-    if kind == "children":
-        return "suspend"
-    return "continue"                           # again
-
-
-def _payload(d):
-    """suspend 时带上孩子 / 门槛信息（分配节点挂起用）。"""
-    if d.get("kind") != "children":
-        return None
-    return {"first": d["first"], "rest": d.get("rest") or [],
-            "gate_name": d.get("gate_name")}
-
-
-def _to_outcome(d):
-    """打回 / 停 的 dict → Outcome（balk 返回的就是这两个 kind）。"""
-    return Outcome(_effect(d))

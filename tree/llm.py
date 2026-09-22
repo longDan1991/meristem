@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 
 import litellm
 
+from .runtime import deliver
+
 
 @dataclass
 class ToolCall:
@@ -198,7 +200,7 @@ class ChatPool:
         while True:
             fut, kwargs = await self._q.get()
             task = asyncio.ensure_future(self._call(kwargs))
-            task.add_done_callback(lambda t, f=fut: _deliver(f, t))
+            task.add_done_callback(lambda t, f=fut: deliver(f, t))
             await asyncio.wait([task])      # 占住名额，但不取异常（交给回调）
 
     async def _call(self, kwargs):
@@ -218,16 +220,4 @@ class ChatPool:
     async def close(self):
         for w in self._workers:
             w.cancel()
-
-
-def _deliver(fut, task):
-    """把一次聊天的结果 / 异常原样搬到调用方的 future 上（不吞、不炸消费者）。"""
-    if fut.done():
-        return
-    if task.cancelled():
-        fut.cancel()
-    elif task.exception() is not None:
-        fut.set_exception(task.exception())
-    else:
-        fut.set_result(task.result())
 

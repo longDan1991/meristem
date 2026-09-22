@@ -41,7 +41,7 @@ from .hands import Hands
 from .loop import Loop, Transcript, emit_for
 from . import reconcile
 from .trace import Trace
-from .turn import node_hooks, node_spec, node_tools
+from .turn import node_hooks, node_spec, node_tools, which_of
 
 
 def _checkpoint(nid, st, trace, ckpt_base):
@@ -61,11 +61,6 @@ def _checkpoint(nid, st, trace, ckpt_base):
         payload["delta"] = True
         payload["base"] = base
     trace.add(nid, "state", payload)
-
-
-def _which(node):
-    """节点类型 → 提示词类型（入口 / 叶子 / 分配）。"""
-    return node.kind if node.kind in ("leaf", "intake") else "alloc"
 
 
 async def run(root, llm, trace, registry=None, workers=6,
@@ -106,7 +101,7 @@ async def run(root, llm, trace, registry=None, workers=6,
     def register(node):
         """节点出生：建账本、进登记册、发事件、进队列。"""
         st = {"node": node,
-              "transcript": Transcript(system=render_turn(_which(node), node)),
+              "transcript": Transcript(system=render_turn(which_of(node), node)),
               "seen_actions": {}}
         state[node.id] = st
         delivered.setdefault(node.id, set())
@@ -145,7 +140,7 @@ async def run(root, llm, trace, registry=None, workers=6,
         for nid, p in raw.items():
             node = p["node"]
             state[nid] = {"node": node,
-                          "transcript": Transcript(system=render_turn(_which(node), node),
+                          "transcript": Transcript(system=render_turn(which_of(node), node),
                                                    msgs=p.get("msgs", [])),
                           "seen_actions": {}}
             registry[nid] = node

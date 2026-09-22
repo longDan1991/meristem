@@ -25,7 +25,7 @@ from fastmcp.exceptions import ValidationError as ToolValidationError
 
 from ..protocol.gate import validate_root
 from ..protocol.tool_specs import ChildSpec, mcp, openai_spec
-from .loop import Hooks, Outcome, ToolResult
+from .loop import Hooks, Outcome, ToolResult, outcome_after_tools
 
 # submit_root 的运行时接线：intake_tools 调用前写入 {"spawn_task", "say"}，
 # 工具函数用 Depends 注入 —— 和 turn.py 的 _step_binding 同一个模式。
@@ -50,12 +50,12 @@ async def submit_root(root: ChildSpec, _b=Depends(get_intake_binding)) -> dict:
     if got is None:
         if b["say"]:
             b["say"]("（入口交的东西用不了：%s）" % why)
-        return {"obs": "这样不行：" + why + " 改一次再给。"}
+        return {"text": "这样不行：" + why + " 改一次再给。"}
     if b["say"]:
         b["say"]("（接到任务：%s）" % got["name"])
     task = b["spawn_task"](got)
-    return {"obs": "已启动任务「%s」（它跑完把结论交回来）。" % task.name,
-            "kind": "suspend", "task": task.id}
+    return {"text": "已启动任务「%s」（它跑完把结论交回来）。" % task.name,
+            "effect": "suspend", "payload": {"task": task.id}}
 
 
 def intake_hooks(nid, runtime):
@@ -74,12 +74,7 @@ def intake_hooks(nid, runtime):
         return Outcome("continue")
 
     async def after_tool(transcript, assistant, results):
-        for r in results:
-            if r.effect == "stop":
-                return Outcome("stop")
-            if r.effect == "suspend":
-                return Outcome("suspend", payload=r.payload)
-        return Outcome("continue")
+        return outcome_after_tools(results)
 
     return Hooks(before_chat=before_chat, after_chat=after_chat,
                  after_tool=after_tool)
@@ -104,9 +99,8 @@ def intake_tools(nid, runtime):
         d = res.structured_content
         if not isinstance(d, dict):
             raise TypeError("submit_root 必须返回 dict（拿到 %r）" % d)
-        if d.get("kind") == "suspend":
-            return ToolResult(text=d.get("obs") or "", effect="suspend",
-                              payload={"task": d.get("task")})
-        return ToolResult(text=d.get("obs") or "")
+        return ToolResult(text=d.get("text") or "",
+                          effect=d.get("effect", "continue"),
+                          payload=d.get("payload"))
 
     return {"submit_root": call}

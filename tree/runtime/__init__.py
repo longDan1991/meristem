@@ -15,4 +15,22 @@
   - `intake`     入口节点（kind="intake"）的三处语义
 
 这一层因**机制**而变（并发、落盘、调度、恢复），不因协议字段而变。
+
+`deliver` 是这一层共用的 future 交付件：ChatPool（llm.py）和 Hands（hands.py）
+各用一份同样的 —— 不各自抄。
 """
+
+
+def deliver(fut, task):
+    """把一次异步任务的结果 / 异常原样搬到另一个 future 上。
+
+    不吞、也不让消费者 task 死掉（消费者死了，后面排队的人就永远等不到）。
+    """
+    if fut.done():
+        return
+    if task.cancelled():
+        fut.cancel()
+    elif task.exception() is not None:
+        fut.set_exception(task.exception())
+    else:
+        fut.set_result(task.result())
