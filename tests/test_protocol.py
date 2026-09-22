@@ -204,9 +204,17 @@ def line(tag, cond, detail=""):
 
 
 # 节点最后落盘的对话（历史只活在这一处 —— 结论审计、"本层历史"都从它推导）。
+# 检查点是**增量**的（scheduler._checkpoint）：delta 事件只带自上次以来新增的
+# 消息，这里按文件顺序拼回全量（和 session.load 同一套）。
 def last_msgs(recs, nid):
-    st = [r for r in recs if r["kind"] == "state" and r["node"] == nid][-1]
-    return st["payload"]["msgs"]
+    full = []
+    for r in (r for r in recs if r["kind"] == "state" and r["node"] == nid):
+        p = r["payload"]
+        if p.get("delta"):
+            full = full[: p.get("base", 0)] + (p.get("msgs") or [])
+        else:
+            full = p.get("msgs") or []      # 全量 / 老格式
+    return full
 
 
 def msgs_text(recs, nid):

@@ -44,15 +44,23 @@ from .trace import Trace
 from .turn import node_hooks, node_spec, node_tools
 
 
-def _checkpoint(nid, st, trace):
+def _checkpoint(nid, st, trace, ckpt_base):
     """把节点状态写进会话记录（trace 的 `state` 事件），恢复时据此重建。
 
     检查点就是全部状态：Node 全字段 + 平铺对话。没有编排字段 ——
     编排由 `reconcile` 从这两样推导。每次状态一变就落一笔。
+
+    对话**增量落盘**（§11）：每节点第一笔写全量 msgs，其余只写「自上次检查点
+    以来新增的消息」（delta + base），恢复端（session.load）按序拼回全量；
+    node 字段小，每笔全量。恢复重开时 ckpt_base 从空起，第一笔自然全量。
     """
-    trace.add(nid, "state", {
-        "node": st["node"].to_dict(),
-        "msgs": st["transcript"].to_list()})
+    msgs, is_delta, base = st["transcript"].checkpoint(ckpt_base.get(nid, 0))
+    ckpt_base[nid] = base + len(msgs)
+    payload = {"node": st["node"].to_dict(), "msgs": msgs}
+    if is_delta:
+        payload["delta"] = True
+        payload["base"] = base
+    trace.add(nid, "state", payload)
 
 
 def _which(node):
@@ -92,6 +100,7 @@ async def run(root, llm, trace, registry=None, workers=6,
     session_root = root                # 入口节点（新会话）/ 树根（恢复）
     state = {}                 # nid -> {"node", "transcript", "seen_actions"}
     delivered = {}             # nid -> 已投递结果的孩子 id 集合（运行时账本）
+    ckpt_base = {}             # nid -> 上次检查点的消息起点（增量检查点的 base）
     pending = deque()
 
     def register(node):
@@ -109,7 +118,7 @@ async def run(root, llm, trace, registry=None, workers=6,
             "conc_range": node.conc_range,
             "workspace": os.path.abspath(os.getcwd())})
         pending.append(node.id)
-        _checkpoint(node.id, st, trace)
+        _checkpoint(node.id, st, trace, ckpt_base)
 
     def spawn_specs(parent, specs):
         """把子任务规格变成孩子节点并注册（派第一波 / 门槛通过续跑共用）。"""
@@ -157,7 +166,7 @@ async def run(root, llm, trace, registry=None, workers=6,
                         inject=lambda text, s=st: s["transcript"].add_user_merged(text),
                         trace_add=lambda n, k, pl: trace.add(n, k, pl),
                         spawn=lambda specs, p=node: spawn_specs(p, specs))
-                    _checkpoint(nid, st, trace)
+                    _checkpoint(nid, st, trace, ckpt_base)
         # ③ 重排队列：同一个谓词，调度和恢复没有第二套规则。
         # 先清空 —— ② 补投递可能新生了孩子（门槛续跑），register 已经把它们
         # 排过队，不清会排两遍、孩子跑两次（实测）。
@@ -170,7 +179,7 @@ async def run(root, llm, trace, registry=None, workers=6,
         register(root)
         if seed is not None:
             state[root.id]["transcript"].add_user(seed)
-            _checkpoint(root.id, state[root.id], trace)
+            _checkpoint(root.id, state[root.id], trace, ckpt_base)
 
     def on_child_settled(nid):
         """孩子完工（stop）：先落它自己的最后一笔（判定 + 完整对话），
@@ -178,7 +187,7 @@ async def run(root, llm, trace, registry=None, workers=6,
         st = state[nid]
         child = st["node"]
         emit_for(sink, child.id)("loop_end", {"node": child})
-        _checkpoint(nid, st, trace)
+        _checkpoint(nid, st, trace, ckpt_base)
         pid = child.parent
         if not pid or pid not in state:
             return
@@ -190,7 +199,7 @@ async def run(root, llm, trace, registry=None, workers=6,
             inject=lambda text: pst["transcript"].add_user_merged(text),
             trace_add=lambda n, k, pl: trace.add(n, k, pl),
             spawn=lambda specs: spawn_specs(parent, specs))
-        _checkpoint(pid, pst, trace)
+        _checkpoint(pid, pst, trace, ckpt_base)
         if may_run and not parent.verdict:
             pending.append(pid)
 
@@ -213,7 +222,7 @@ async def run(root, llm, trace, registry=None, workers=6,
             payload = out.payload or {}
             spawn_specs(pn, payload.get("first") or [])
             pn.deferred = payload.get("rest") or []
-            _checkpoint(nid, st, trace)
+            _checkpoint(nid, st, trace, ckpt_base)
         else:
             on_child_settled(nid)
 
@@ -221,7 +230,7 @@ async def run(root, llm, trace, registry=None, workers=6,
         # 每轮结束落一笔检查点：中断时在飞的那一步作废，节点带着完整历史重问。
         # suspend / stop 由 dispatch 在起完孩子 / 结算后再落，这里只管 continue。
         if out.kind == "continue":
-            _checkpoint(nid, state[nid], trace)
+            _checkpoint(nid, state[nid], trace, ckpt_base)
 
     async def run_node(nid):
         st = state[nid]
@@ -229,7 +238,7 @@ async def run(root, llm, trace, registry=None, workers=6,
         # 入口节点的话有 sink 就流式（终端一直要）；节点级吐字只在真终端上流式
         stream = sink is not None if node.kind == "intake" else runtime["stream"]
         loop = Loop(pool, st["transcript"], await node_spec(nid, runtime),
-                    node_tools(nid, runtime), node_hooks(nid, runtime),
+                    await node_tools(nid, runtime), node_hooks(nid, runtime),
                     scope=nid, sink=sink, stream=stream,
                     temperature=0.3 if node.kind == "intake" else 0.2)
         return await loop.run(on_turn=lambda out: on_turn(nid, out))

@@ -58,6 +58,30 @@ from .loop import Hooks, Outcome, ToolResult
 _TOOL_NAMES = {"alloc": NODE_TOOLS["alloc"],
                "leaf": NODE_TOOLS["leaf"] + (RETRIEVE_NAME,)}
 
+# 解析好的工具对象（FastMCP Tool），静态、只建一次。headroom_retrieve 不是真
+# 工具，不进这张表（call 里特判）。schema 那份缓存是 openai_tools()，这里缓存
+# **执行**那份 —— 别每次调用都走 mcp.get_tool 的重查找（那还带着本项目没用上
+# 的 session-transform / auth 机制，§11）。
+_tools_cache = None
+
+
+async def _tools_for(which):
+    global _tools_cache
+    if _tools_cache is None:
+        _tools_cache = {}
+        for w in ("alloc", "leaf"):
+            _tools_cache[w] = {}
+            for name in _TOOL_NAMES[w]:
+                if name == RETRIEVE_NAME:
+                    continue
+                t = await mcp.get_tool(name)
+                if t is None:
+                    raise RuntimeError(
+                        "工具 %r 还没注册：实现注册在 tree/runtime/turn.py 的 "
+                        "import 时发生，请先 import tree.runtime.turn 再拿。" % name)
+                _tools_cache[w][name] = t
+    return _tools_cache[which]
+
 # ask 开头写入 (ctx, nid)；工具函数用 Depends 注入它。每个 asyncio task
 # 的 contextvars 是独立的，所以并发节点拿到的各是各的 ctx。
 _step_binding: contextvars.ContextVar = contextvars.ContextVar(
@@ -185,12 +209,13 @@ async def node_spec(nid, runtime):
     return (await openai_tools())[which]
 
 
-def node_tools(nid, runtime):
+async def node_tools(nid, runtime):
     """这个节点可调用的工具：名字 → async(args) -> ToolResult。"""
     node = runtime["state"][nid]["node"]
     if node.kind == "intake":
         return intake_tools(nid, runtime)
     which = "leaf" if node.kind == "leaf" else "alloc"
+    tools = await _tools_for(which)
 
     def make(name):
         async def call(args):
@@ -198,7 +223,7 @@ def node_tools(nid, runtime):
             # 取回工具：把被压过的工具输出原文写回对话（作为 tool 结果）
             if name == RETRIEVE_NAME:
                 return ToolResult(text=retrieve_original(args))
-            tool = await mcp.get_tool(name)
+            tool = tools[name]
             try:
                 res = await tool.run(args)
             except ToolValidationError as e:

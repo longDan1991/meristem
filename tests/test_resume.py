@@ -16,10 +16,12 @@
   E. 整场会话（入口 + 任务）崩溃 → load 一棵树 → resume → 二次 load 全完工
   F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果
   G. 一场会话多个任务 = 一棵树多个孩子，只有没跑完的被接着跑
+  H. 增量检查点：每节点第一笔全量、之后只带新增消息，load 按序拼回全量
   I. session_label：当前格式认入口的孩子，档案（无入口）认根本身
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -353,6 +355,41 @@ async def main():
          [n for n in t_after["registry"].values() if n.name == "任务一"][0].verdict == "满足")
 
     print("=" * 80)
+    print("H. 增量检查点：每节点第一笔全量、之后只带新增消息，load 按序拼回全量")
+    d_h = tempfile.mkdtemp()
+    tp_h = os.path.join(d_h, "trace.jsonl")
+    root_h = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
+    llm_h = ScriptLLM([
+        ("create_children", {"children": [kid("子A")]}),
+        ("bash", {"cmd": "echo hi"}),
+        ("conclude", {"verdict": "满足", "text": "子A做完了", "evidence": ["第1次观测"]}),
+        ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["子A 结论"]})])
+    await run(root_h, llm_h, Trace(tp_h))
+    events = {}                          # nid -> [state payload，按文件顺序]
+    for r in iter_trace_lines(tp_h):
+        if r.get("kind") == "state":
+            events.setdefault(r.get("node"), []).append(r.get("payload") or {})
+    child_h = root_h.children[0]
+    ch = events[child_h]
+    line("H: 第一笔全量、后续增量（base 递增）",
+         "delta" not in ch[0] and "delta" not in ch[1]
+         and ch[2].get("delta")
+         and ch[0]["msgs"] == []
+         and [len(e["msgs"]) for e in ch] == [0, 2, 2]
+         and ch[2]["base"] == 2)
+    line("H: 增量只带新增消息（不重写已写过的）",
+         [len(e["msgs"]) for e in ch[1:]] == [2, 2]
+         and ch[-1]["msgs"][-1]["role"] == "tool")
+    t_h = load(tp_h)
+    msgs_h = t_h["state"][child_h]["msgs"]
+    line("H: load 拼回完整对话（assistant/tool 配对、顺序不变）",
+         len(msgs_h) == 4
+         and [m["role"] for m in msgs_h] == ["assistant", "tool", "assistant", "tool"]
+         and msgs_h[0]["tool_calls"][0]["function"]["name"] == "bash")
+    line("H: 混着老格式全量检查点也能读（delta 字段缺省 = 全量）",
+         _delta_and_legacy_mix_loads(tp_h))
+
+    print("=" * 80)
     print("I. session_label：当前格式认入口的孩子，档案（无入口）认根本身")
     d_i = tempfile.mkdtemp()
     tp_i = os.path.join(d_i, "trace.jsonl")
@@ -379,6 +416,24 @@ async def main():
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")
     return 0 if all(OK) else 1
+
+
+def _delta_and_legacy_mix_loads(path):
+    """同一条消息先被增量检查点写过、又被老格式全量检查点覆盖 —— load 取全量。"""
+    d = tempfile.mkdtemp()
+    tp = os.path.join(d, "trace.jsonl")
+    n = Node(name="会话", kind="intake")
+    with open(tp, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"kind": "state", "node": n.id,
+                            "payload": {"node": n.to_dict(), "msgs": [],
+                                         "delta": True, "base": 0}},
+                           ensure_ascii=False) + "\n")
+        f.write(json.dumps({"kind": "state", "node": n.id,
+                            "payload": {"node": n.to_dict(), "msgs": [
+                                {"role": "user", "content": "全量覆盖"}]}},
+                           ensure_ascii=False) + "\n")
+    t = load(tp)
+    return t["state"][n.id]["msgs"] == [{"role": "user", "content": "全量覆盖"}]
 
 
 def _recs(path):

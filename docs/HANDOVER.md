@@ -30,7 +30,9 @@
 
 > **2026-09 存储重构：检查点 = `{node, msgs}`，编排字段全部删除。** Node 删掉
 > `attempts` / `observations` / `status` —— 历史只活在一处（每个节点的平铺对话 msgs），
-> 状态检查点 = `{"node": Node.to_dict(), "msgs": [...]}`，没有 ready / finished / waiting /
+> 状态检查点 = `{"node": Node.to_dict(), "msgs": [...]}`（2026-09-22 起对话**增量落盘**：
+> 每节点第一笔全量、之后只带自上次检查点以来新增的消息，`session.load` 按序拼回全量），
+> 没有 ready / finished / waiting /
 > rest / gate_id 等编排字段。编排由 `tree/runtime/reconcile.py`（actionable 谓词 + settle 结算，
 > **调度与恢复共用一份**）从节点事实和对话推导：恢复时用同一个 settle 补投递
 > （崩溃窗口：孩子出了结论、没结算进父节点）。`artifacts` / `art_effects` / `contracts`
@@ -141,7 +143,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
 | `tree/runtime/scheduler.py` | 235 | **调度器**（**真异步**）：广度优先、并行扇出、门槛、进度回调。每个节点 = 一个完整的 `run_loop` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
 | `tree/runtime/reconcile.py` | 93 | **编排纯逻辑（调度与恢复共用一份）**：`actionable`（该不该调 LLM：没出结论 + 孩子全回话 + 最后一条不是模型说的）/ `settle`（孩子结论结算：投递 + 门槛续跑/作废）/ `gate_child` / `make_child` |
-| `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点）+ 树分组；`session_label`（检查点推导的摘要，档案认根本身） |
+| `tree/runtime/session.py` | 143 | 会话恢复：`load` 纯反序列化（{node, msgs} 检查点，**增量按序拼回全量**）+ 树分组；`session_label`（检查点推导的摘要，只扫 node 字段，档案认根本身） |
 | `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
 

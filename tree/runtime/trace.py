@@ -19,21 +19,38 @@ from glob import glob
 from tree import config as cfg
 
 
-def iter_trace_lines(path):
-    """逐行读一份 trace。最后一行若是被截断的半笔（崩溃时写了一半），
-    跳过 —— 一次崩溃不该把整棵树的成果埋掉。其它位置坏行照样炸（那是真损坏）。"""
+def iter_trace_lines(path, kinds=None):
+    """逐行**流式**读一份 trace（不整文件驻留，大文件也只占一行内存）。最后
+    一行若是被截断的半笔（崩溃时写了一半），跳过 —— 一次崩溃不该把整棵树的
+    成果埋掉。其它位置坏行照样炸（那是真损坏）。
+
+    流式读不知道 EOF 在哪：用「后一行到达才解析前一行」的 lookahead 拿
+    「哪一行是最后一行」，最后一行解析失败当半笔跳过，其余坏行当场炸。
+
+    kinds：只要某种 kind（如 ("state",)）时传它 —— 行内先做子串预过滤，
+    不是目标 kind 的行连 json.loads 都省掉。大档案里大头是非 state 行（tool
+    观测 / 分配记录），这个预过滤把解析量降到只剩需要的检查点（§11）。
+    预过滤只看 kind 标记，被滤掉的行（含坏行）不参与解析，也就不报错 ——
+    「坏行照样炸」的承诺只对目标 kind 的行生效（读取方本来就只认它们）。
+    """
+    want = tuple('"kind": "%s"' % k for k in kinds) if kinds else ()
     with open(path, encoding="utf-8") as f:
-        lines = f.readlines()
-    for i, raw in enumerate(lines):
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except ValueError:
-            if i == len(lines) - 1:
-                continue
-            raise
+        prev = None
+        for raw in f:
+            if prev is not None:
+                if not want or any(w in prev for w in want):
+                    line = prev.strip()
+                    if line:
+                        yield json.loads(line)      # 非最后一行：坏行直接炸
+            prev = raw
+        if prev is not None:
+            if not want or any(w in prev for w in want):
+                line = prev.strip()
+                if line:
+                    try:
+                        yield json.loads(line)
+                    except ValueError:
+                        return                      # 最后一行：崩溃残笔，跳过
 
 
 class Trace:

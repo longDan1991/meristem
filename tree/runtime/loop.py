@@ -100,6 +100,9 @@ class Transcript:
         self._on_append = on_append
         # 暂存账本用：id 回退接在真账本后面数，否则每轮都从 call_0 起（会撞号）
         self._offset = offset
+        # 就地改写标记：add_user_merged 并进已入账的 user 时置位，检查点靠它
+        # 决定增量不可用（增量会丢/错已写过的消息，见 checkpoint）
+        self._last_mutated = False
 
     @classmethod
     def from_state(cls, st, system):
@@ -156,9 +159,11 @@ class Transcript:
             self.add_user(text)
 
     def add_user_merged(self, text):
-        """并到上一条 user 里（连着注多条世界回话时，provider 不接受两条 user）。"""
+        """并到上一条 user 里（连着注多条世界回话时，provider 不接受两条 user）。
+        就地改写会置位 `_last_mutated` —— 检查点不再信任增量（见 checkpoint）。"""
         if self.msgs and self.msgs[-1].get("role") == "user":
             self.msgs[-1]["content"] = str(self.msgs[-1]["content"]) + "\n" + text
+            self._last_mutated = True
         else:
             self.add_user(text)
 
@@ -172,6 +177,18 @@ class Transcript:
 
     def to_list(self):
         return self.msgs
+
+    def checkpoint(self, base=0):
+        """一笔状态检查点的消息负载（增量落盘，§11：不把整份历史每回合重写一遍）。
+
+        优先只给 `base` 之后新增的消息（增量）；但期间**就地改写**过头消息
+        （add_user_merged 并进已入账的 user）或 base==0（第一笔 / 恢复重开）
+        时给全量。返回 (msgs, 是不是增量, 消息起点 base)。
+        """
+        if self._last_mutated or len(self.msgs) < base or base == 0:
+            self._last_mutated = False
+            return self.msgs, False, 0
+        return self.msgs[base:], True, base
 
 
 class Loop:
