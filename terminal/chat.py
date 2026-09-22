@@ -57,7 +57,7 @@ from tree import config as cfg
 from tree.llm import LLM
 from tree.protocol.fields import Node
 from tree.runtime.scheduler import run
-from tree.runtime.store import get_traces, load, new_session, session_label
+from tree.runtime.store import Store
 
 PROMPT = "› "
 
@@ -164,10 +164,10 @@ def _seed(task):
             "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。" % task)
 
 
-def _show_resumed(tree, path):
+def _show_resumed(store, path):
     """把重建出来的老会话画给人看 —— 恢复 = 接着谈，先让他看见接的是什么。"""
     print("\n[会话] 已加载：%s" % path)
-    for ln in render_tree(tree["root"], tree["registry"]):
+    for ln in render_tree(store.root, store.registry):
         print("  " + ln)
     print("", flush=True)
 
@@ -180,7 +180,7 @@ async def run_session(a, session=None):
     模型由 converse 自己建（LLM()），装配层不碰 LLM。
 
     -r：选一个老会话加载成一棵树（root/registry/state），放进
-    `env["tree"]` —— 展示和续跑都吃这一棵树，不重读 trace。
+    `env["store"]` —— 展示和续跑都吃这一棵树，不重读 trace。
     """
     _require_api_key()
     session = session or _session()
@@ -192,28 +192,28 @@ async def run_session(a, session=None):
     print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
 
     if a.resume:
-        traces = get_traces()
+        traces = Store.roots()
         if not traces:
             print("没有可加载的老会话：工作区里还没有跑过任何树。", flush=True)
             return 1
-        picked = await pick_session([(t, session_label(t)) for t in traces])
+        picked = await pick_session(traces)
         if picked is None:
             print("取消。", flush=True)
             return 0
         try:
-            tree = load(picked)
+            store = Store.load(picked)
         except ValueError:
             # 读不了（数据损坏 / 不是当前格式）：带着是哪个会话的上下文炸出来，不静默跳过
             print("读不了这个会话（数据损坏，或不是当前格式）：%s" % picked, flush=True)
             raise
-        # 会话 = 一棵树（入口为根），树自己带着记录路径；交给 converse 丢进 run()。
-        env = {"tree": tree}
-        _show_resumed(tree, picked)
+        # 会话 = 一棵树（入口为根），存储自己带着记录路径；交给 converse 丢进 run()。
+        env = {"store": store}
+        _show_resumed(store, picked)
     else:
         task = await opening(session)
-        env = {"tree": new_session(Node(name="会话", kind="intake"),
-                                   seed=_seed(task))}
-    print("[trace] %s\n" % os.path.abspath(env["tree"]["trace"]), flush=True)
+        env = {"store": Store.new(Node(name="会话", kind="intake"),
+                                  seed=_seed(task))}
+    print("[trace] %s\n" % os.path.abspath(env["store"].path), flush=True)
 
     # 落盘由 run 兜底（任何退出路都 drain）—— 这里不再单独碰记录句柄。
     return await converse(env, session=session)
@@ -225,7 +225,7 @@ async def converse(env, session=None):
     入口**不退场**：谈成一个任务就挂到树上跑掉、把结论带回对话，再接着谈。
     **整场会话是一棵树**（入口为根）—— `run` 把它整棵跑起来，直到用户中止。
 
-    env 是运行现场（一棵树 env["tree"]，新会话 / 恢复都由 run_session 建好），
+    env 是运行现场（一份存储 env["store"]，新会话 / 恢复都由 run_session 建好），
     终端不解释它，只把树丢给 run；session 是读的那条通道（测试把管道驱动的
     会话塞进来）。
     """
@@ -305,11 +305,11 @@ async def converse(env, session=None):
     session_root = [None]              # 入口节点（会话根）
     streams = {}                       # node_id -> {"thinking","speaking"} 尾巴
 
-    # 会话 = 一棵树（入口为根），run_session 建好放进 env["tree"]；
+    # 会话 = 一棵树（入口为根），run_session 建好放进 env["store"]；
     # registry 是运行态：run() 往里登记每个节点，终端靠它画任务树。
-    tree = env["tree"]
-    registry = tree["registry"]
-    session_root[0] = tree["root"]
+    store = env["store"]
+    registry = store.registry
+    session_root[0] = store.root
 
     def current_frame():
         # 跑的时候用**每节点一行**的实时视图（compact：整棵树铺开，每个节点
@@ -467,7 +467,7 @@ async def converse(env, session=None):
 
     llm = LLM()
     intake_task[0] = asyncio.ensure_future(
-        run(tree, llm, subscribe=on_sink, ask=ask, say=narrate))
+        run(store, llm, subscribe=on_sink, ask=ask, say=narrate))
     try:
         await intake_task[0]
     except _Quit:

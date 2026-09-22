@@ -32,7 +32,7 @@ from tree.protocol.fields import Node                                    # noqa:
 from tree.prompts import render_turn                                     # noqa: E402
 from tree.prompts.messages import base_user                              # noqa: E402
 from tree.runtime import scheduler as R                                  # noqa: E402
-from tree.runtime.store import new_session                             # noqa: E402
+from tree.runtime.store import Store                             # noqa: E402
 from tree.compression import retrieve_original                           # noqa: E402
 
 OK = []
@@ -106,7 +106,7 @@ def go(calls):
     cwd = os.getcwd()
     os.chdir(d)
     try:
-        asyncio.run(R.run(new_session(node, trace=os.path.join(d, "t.jsonl")),
+        asyncio.run(R.run(Store.new(node, trace=os.path.join(d, "t.jsonl")),
                           llm))
     finally:
         os.chdir(cwd)
@@ -226,7 +226,7 @@ def main():
     cwd = os.getcwd()
     os.chdir(d)
     try:
-        asyncio.run(R.run(new_session(node5, trace=trace5), llm5))
+        asyncio.run(R.run(Store.new(node5, trace=trace5), llm5))
     finally:
         os.chdir(cwd)
     recs5 = [json.loads(x) for x in open(os.path.join(d, "t5.jsonl"))]

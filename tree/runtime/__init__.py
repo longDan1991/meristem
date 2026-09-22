@@ -2,7 +2,7 @@
 
 基础设施（各占一个文件）：
 
-  - `store`    一棵树（会话）：构造 / 读回 / 摘要 / 运行时账本 / 记录文件（append-only）
+  - `store`    一场会话的存储（一个 Store 对象）：roots / load / new / node / put（写入自动落盘）
   - `hands`    节点的三只手（bash / write 串行执行）
   - `loop`     一条消息循环的骨架（问模型 / 跑工具 / 写对话 / 发事件）
 

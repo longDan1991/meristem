@@ -46,7 +46,7 @@ import terminal.chat as chat                               # noqa: E402
 from prompt_toolkit.input import create_pipe_input         # noqa: E402
 from tree.llm import Message, ToolCall                     # noqa: E402
 from tree.protocol.fields import Node                      # noqa: E402
-from tree.runtime.store import new_session               # noqa: E402
+from tree.runtime.store import Store               # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TIMEOUT = 30
@@ -86,8 +86,8 @@ class Screen(io.StringIO):
 def _env(seed=None):
     """一次会话一棵树：新会话（入口为根）+ 它自己的记录路径。"""
     d = tempfile.mkdtemp()
-    return {"tree": new_session(Node(name="会话", kind="intake"), seed=seed,
-                                trace=os.path.join(d, "t.jsonl"))}
+    return {"store": Store.new(Node(name="会话", kind="intake"), seed=seed,
+                              trace=os.path.join(d, "t.jsonl"))}
 
 
 class FakeLLM:

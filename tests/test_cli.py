@@ -37,7 +37,7 @@ def run_session(resume, api_key="", traces=None):
     """
     os.environ["TREE_API_KEY"] = api_key
     if traces is not None:
-        chat.get_traces = lambda: traces
+        chat.Store.roots = staticmethod(lambda: traces)
     a = argparse.Namespace(resume=resume)
     out = io.StringIO()
     try:

@@ -7,10 +7,10 @@
 它是一棵带对话的 Node，"该不该调 LLM"由共享谓词 `reconcile.actionable` 回答
 （没出结论 + 孩子都回话了 + 最后一条不是模型自己说的），孩子出结论由
 `reconcile.settle` 结算（结果投进父节点对话 + 门槛续跑/作废）——
-调度器与恢复（`store.load` 的补投递）用同一份，不各自写一遍。
+调度器与恢复（补投递）用同一份，不各自写一遍。
 
 **一场会话 = 一棵树**：入口节点（kind="intake"）是根，谈成的任务都是它的孩子。
-`run` 跑整棵树 —— 入口在等用户（`ask`）时不占聊天名额，任务在跑时入口挂起等孩子。
+`run` 跑一棵树 —— 入口在等用户（`ask`）时不占聊天名额，任务在跑时入口挂起等孩子。
 
 **workers = 同时在飞的 `llm.chat` 数**（`ChatPool`，消息传递无锁）：限的是最贵的
 那个资源，不是节点 Loop —— 节点卡在慢工具、或入口在等用户，都不占名额。
@@ -23,10 +23,10 @@
 
 这个文件只管**编排**：谁先谁后、门槛过没过、并行几个。
 "一个节点的一回合怎么走"在 `turn.py`（钩子）；"一轮消息往返的生命周期"在
-`loop.py`；"节点数据放哪、怎么落盘、记录怎么写"在 `store.py`（调度器只看见
-Node 和它的结论，不碰账本/检查点/记录文件）。调度器不认识模型、不认识工具，
-只认识 Outcome 的三种 kind：continue 在 Loop 内部消化，调度器只处理
-suspend（等孩子）和 stop（完工）。
+`loop.py`；"节点数据放哪、怎么落盘"在 `store.py`（调度器只看见 Node 和它的
+结论，不碰账本/检查点）。调度器不认识模型、不认识工具，只认识 Outcome 的
+三种 kind：continue 在 Loop 内部消化，调度器只处理 suspend（等孩子）和
+stop（完工）。
 
 事件：调度器发节点级的 `loop_start` / `loop_end`（出生 / 完工是编排时点的事实），
 其余（turn_* / message_* / tool_*）由 `loop.py` 和 `turn.py` 的钩子发。
@@ -40,26 +40,17 @@ from ..events import EventSink
 from .hands import Hands
 from .loop import Loop
 from . import reconcile
-from .store import TreeStore
 from .turn import node_hooks, node_spec, node_tools
 from .. import config as cfg
 
 
-async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
+async def run(store, llm, *, workers=cfg.WORKERS, subscribe=None,
               ask=None, say=None):
-    """跑一棵树（一场会话 = 一棵树：新会话与恢复是同一件事的两个入口）。
+    """跑一场会话（store：`Store.new` 建的新树 / `Store.load` 读回的树）。
 
-    tree = {"root", "state", "registry", "trace", "seed"} —— 会话的全部数据，
-    由 `store.new_session(root)`（新）或 `store.load(path)`（恢复）建好。
-    registry 就地登记每个节点 —— 调用方拿着 tree 就能看整棵树长出来 / 接着长。
-    tree["trace"] 是记录文件的路径：存储（TreeStore）构造时按它打开记录 ——
-    底层文件不成为 run 的入参，也没有第二个"写哪"的入口。
-    llm 是模型本身（外部依赖，测试换假模型）。
-
-    编排之外的东西都归 `TreeStore`（会话的存储）：账本（transcript/registry/
-    已投递）、检查点落盘、运行事件记录 —— 这里只回答"谁该跑、谁先谁后、
-    并行几个"。新会话（state 空）登记根开跑，seed 是入口的第一句话；恢复
-    （state 非空）按检查点重建账本 + 补投递（崩溃窗口）+ 按同一个谓词重排队列。
+    存储（一块数据、一份记录）全归 `store`：`run` 只回答"谁该跑、谁先谁后、
+    并行几个"。新节点出生、状态变化都经 `store.put` 自动落盘；补投递（崩溃
+    窗口）与重排队列用共享谓词，和运行时没有第二套规则。
 
     真异步（P4）：一个节点的一整个 Loop = 一个 asyncio task。**workers 限的是
     同时在飞的 `llm.chat`**（`ChatPool`，默认取配置），不是节点 Loop —— 入口
@@ -74,9 +65,8 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
         消费者时 emit 是 no-op，测试直连时如此）；
       · ask(text) 拿用户的话、say(text) 是旁白出口 —— 只有入口节点用。
 
-    返回 tree（同一棵，registry 已长全）。
+    返回 store（同一份）。
     """
-    store = TreeStore(tree)       # 存储：新会话空账本 / 恢复按检查点重建 + 记录文件
     hands = Hands()
     pool = ChatPool(llm, workers)      # workers = 在飞的 llm.chat 数
     # 调度器自己的事件出口：loop_start / loop_end 是编排时点的事实，发生在
@@ -90,46 +80,50 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
     def emit(nid, kind, payload):
         sink.emit(kind, {"scope": nid, **payload})
 
-    def born(node):
-        """节点出生 = 建账本（store）+ 进队（调度）—— 出生时点两件事合一。"""
-        store.register(node)
-        pending.append(node.id)
-        return node
-
     def spawn_specs(parent, specs):
-        """把子任务规格变成孩子节点（派第一波 / 门槛续跑共用）。"""
-        for s in specs:
-            born(reconcile.make_child(parent, s))
+        """把子任务规格变成孩子节点挂进会话（自动落盘），并排进队。"""
+        kids = [reconcile.make_child(parent, s) for s in specs]
+        store.put(kids, on_id=parent.id)
+        for kid in kids:
+            pending.append(kid.id)
+        return kids
 
     def spawn_task(spec):
         """入口的 `submit_root` 落点：把任务根挂成入口节点的孩子。
 
         任务根是**顶层任务**（不带入口的意图链），它的 accept 已过 `validate_root`。
         """
-        task = reconcile.make_child(tree["root"], spec)
+        task = reconcile.make_child(store.root, spec)
         task.lineage = []              # 入口不是"上层意图"，任务是顶层
-        return born(task)
+        store.put([task], on_id=store.root.id)
+        pending.append(task.id)
+        return task
 
     def settle_child(pid, child):
-        """把孩子的结论结算进父节点；返回 (该不该重新排队, 父节点)。"""
-        parent = store.state[pid]["node"]
-        return store.settle(pid, child,
-                            spawn=lambda specs: spawn_specs(parent, specs))
+        """把孩子的结论结算进父节点（投递 + 门槛）并落盘。
 
-    if not store.state:
-        # 新会话：登记根开跑。
-        born(tree["root"])
-        if tree["seed"] is not None:
-            store.seed(tree["root"].id, tree["seed"])
-    else:
-        # 恢复：补投递（崩溃窗口：孩子有结论但没结算进父节点）—— 和运行时同一个 settle。
-        for nid, st in list(store.state.items()):
-            for cid in list(st["node"].children):
-                cst = store.state.get(cid)
-                if cst and cst["node"].verdict and cid not in store.delivered[nid]:
-                    settle_child(nid, cst["node"])
+        运行时（on_child_settled）与恢复补投递共用同一个 settle 接法。
+        返回 (父节点是否该重新排队, 父节点)。
+        """
+        pst = store.state[pid]
+        parent = pst["node"]
+        may_run = reconcile.settle(
+            parent, child, store.delivered.setdefault(pid, set()), store.registry,
+            inject=lambda text: pst["transcript"].add_user_merged(text),
+            trace_add=store.record,
+            spawn=lambda specs: spawn_specs(parent, specs))
+        store.put([parent])
+        return may_run, parent
 
-    # 重排队列：新会话的根 / 补投递新生孩子已由 born 排过，清掉按同一个谓词重排
+    # 补投递（崩溃窗口：孩子有结论但没结算进父节点）—— 和运行时同一个 settle。
+    # 新会话没有这种孩子，自然跳过。
+    for nid, st in list(store.state.items()):
+        for cid in list(st["node"].children):
+            cst = store.state.get(cid)
+            if cst and cst["node"].verdict and cid not in store.delivered[nid]:
+                settle_child(nid, cst["node"])
+
+    # 重排队列：补投递新生孩子已排过队，清掉按同一个谓词重排
     # （不清会排两遍、孩子跑两次 —— 实测）。
     pending.clear()
     for nid, st in store.state.items():
@@ -140,10 +134,9 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
     def on_child_settled(nid):
         """孩子完工（stop）：先落它自己的最后一笔，再结算进父节点，
         父节点全回话就重新排队。"""
-        st = store.state[nid]
-        child = st["node"]
+        child = store.state[nid]["node"]
         emit(child.id, "loop_end", {"node": child})
-        store.checkpoint(nid, st)
+        store.put([child])
         pid = child.parent
         if not pid or pid not in store.state:
             return
@@ -169,7 +162,7 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
             payload = out.payload or {}
             spawn_specs(pn, payload.get("first") or [])
             pn.deferred = payload.get("rest") or []
-            store.checkpoint(nid, st)
+            store.put([pn])
         else:
             on_child_settled(nid)
 
@@ -180,11 +173,11 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
         if subscribe is not None:
             # Loop 不认识 scope：订阅的那一刻打上 —— 这是谁的 Loop 由这里定
             loop.subscribe(lambda t, p: subscribe(t, {"scope": nid, **p}))
-        # 每轮结束落一笔检查点：中断时在飞的那一步作废，节点带着完整历史重问。
+        # 每轮结束落一笔：中断时在飞的那一步作废，节点带着完整历史重问。
         # suspend / stop 由 dispatch 在起完孩子 / 结算后再落，这里只管 continue。
         def checkpoint_turn(out):
             if out.kind == "continue":
-                store.checkpoint(nid, st)
+                store.put([st["node"]])
         return await loop.run(on_turn=checkpoint_turn)
 
     inflight = {}
@@ -213,4 +206,4 @@ async def run(tree, llm, *, workers=cfg.WORKERS, subscribe=None,
             await hands.close()
         finally:
             store.drain()     # 任何退出路（含取消）最后几笔都必须落盘
-    return tree
+    return store
