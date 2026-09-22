@@ -147,15 +147,6 @@ def _fit(lines, max_h):
     return out[:max_h]
 
 
-def _require_api_key():
-    # 入口是一次对话：要真模型。没有 API key 就不开工 —— 拿假模型去聊，
-    # 只会换来一句"你要做什么？"，那一圈是白烧的。
-    if not os.environ.get("TREE_API_KEY"):
-        print("入口是一次对话：要真模型。在 .env / 环境变量里给 TREE_API_KEY",
-              file=sys.stderr)
-        raise SystemExit(2)
-
-
 def _seed(task):
     # 种子只写用户真的说了什么：没给的就是没给（入口该去问），不许拿默认值充数。
     # 验收标准永远要入口自己提 —— CLI 已没有 -c，标准只能来自对话。
@@ -164,9 +155,9 @@ def _seed(task):
             "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。" % task)
 
 
-def _show_resumed(store, path):
+def _show_resumed(store):
     """把重建出来的老会话画给人看 —— 恢复 = 接着谈，先让他看见接的是什么。"""
-    print("\n[会话] 已加载：%s" % path)
+    print("\n[会话] 已加载：%s" % store.path)
     for ln in render_tree(store.root, store.registry):
         print("  " + ln)
     print("", flush=True)
@@ -182,21 +173,17 @@ async def run_session(a, session=None):
     -r：选一个老会话加载成一棵树（root/registry/state），放进
     `env["store"]` —— 展示和续跑都吃这一棵树，不重读 trace。
     """
-    _require_api_key()
     session = session or _session()
-    ws = cfg.WORKSPACE
-    os.makedirs(ws, exist_ok=True)
-    os.chdir(ws)
-    print("[工作目录] %s" % ws, flush=True)
+    print("[工作目录] %s" % cfg.WORKSPACE, flush=True)
     print("[并发] %d" % cfg.WORKERS, flush=True)
     print("[限制] 无。轮次/深度/节点/token/时间 全部不限，停止交给 API 自己", flush=True)
 
     if a.resume:
-        traces = Store.roots()
-        if not traces:
+        sessions = Store.roots()
+        if not sessions:
             print("没有可加载的老会话：工作区里还没有跑过任何树。", flush=True)
             return 1
-        picked = await pick_session(traces)
+        picked = await pick_session(sessions)
         if picked is None:
             print("取消。", flush=True)
             return 0
@@ -206,9 +193,9 @@ async def run_session(a, session=None):
             # 读不了（数据损坏 / 不是当前格式）：带着是哪个会话的上下文炸出来，不静默跳过
             print("读不了这个会话（数据损坏，或不是当前格式）：%s" % picked, flush=True)
             raise
-        # 会话 = 一棵树（入口为根），存储自己带着记录路径；交给 converse 丢进 run()。
+        # 会话 = 一棵树（入口为根），存储自己带着记录；交给 converse 丢进 run()。
         env = {"store": store}
-        _show_resumed(store, picked)
+        _show_resumed(store)
     else:
         task = await opening(session)
         env = {"store": Store.new(Node(name="会话", kind="intake"),

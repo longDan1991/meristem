@@ -19,6 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import main as main_mod                                     # noqa: E402
+import cli                                                  # noqa: E402
 import terminal.chat as chat                                # noqa: E402
 
 OK = []
@@ -42,6 +43,7 @@ def run_session(resume, api_key="", traces=None):
     out = io.StringIO()
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            main_mod.init()                      # 初始化（含 API key 检查）在 main
             code = asyncio.run(chat.run_session(a))
         return code, out.getvalue()
     except SystemExit as e:
@@ -68,22 +70,24 @@ def main():
     print("=" * 80)
     print("C. 守门：伪造的「用户的话」不许回来；老路已删")
     src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    cli_src = open(os.path.join(ROOT, "cli.py"), encoding="utf-8").read()
     chat_src = open(os.path.join(ROOT, "terminal", "chat.py"), encoding="utf-8").read()
-    line("main.py 只剩 -r 一个参数", '"-r"' in src and "--resume" in src
-         and "--workers" not in src and "--criteria" not in src
-         and "--max-nodes" not in src and "--max-tokens" not in src
-         and "--max-hours" not in src and "--trace" not in src
-         and "--progress" not in src and '"task"' not in src)
-    line("main.py 是薄分派（不碰终端 / 不碰运行现场）",
-         "from terminal.chat import" in src and "Trace(" not in src
-         and "converse(" not in src and "opening()" not in src and "LLM(" not in src)
-    a = main_mod.parse_args(["-r"])
+    line("cli.py 只剩 -r 一个参数", '"-r"' in cli_src and "--resume" in cli_src
+         and "--workers" not in cli_src and "--criteria" not in cli_src
+         and "--max-nodes" not in cli_src and "--max-tokens" not in cli_src
+         and "--max-hours" not in cli_src and "--trace" not in cli_src
+         and "--progress" not in cli_src and '"task"' not in cli_src)
+    line("main.py 只做初始化（不碰终端 / 不碰运行现场）",
+         "init" in src and "from terminal.chat import" not in src
+         and "Trace(" not in src and "converse(" not in src
+         and "opening()" not in src and "LLM(" not in src)
+    a = cli.parse_args(["-r"])
     line("-r 真的解析成一个参数", a.resume is True
-         and main_mod.parse_args([]).resume is False)
-    line("没有默认任务", "给我一个能赚大钱的A股量化系统" not in src + chat_src)
-    line("没有默认验收标准", "期末账户权益" not in src + chat_src)
+         and cli.parse_args([]).resume is False)
+    line("没有默认任务", "给我一个能赚大钱的A股量化系统" not in src + cli_src + chat_src)
+    line("没有默认验收标准", "期末账户权益" not in src + cli_src + chat_src)
     line("种子只写用户真说了什么", "用户没给" in chat_src)
-    line("--intake 老路已删（入口默认就是 intake）", "--intake" not in src)
+    line("--intake 老路已删（入口默认就是 intake）", "--intake" not in src + cli_src)
     line("MockLLM 已删（不再有假模型去聊天的路）",
          "MockLLM" not in open(os.path.join(ROOT, "tree", "llm.py"),
                                encoding="utf-8").read())

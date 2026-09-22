@@ -26,8 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tree.llm import Message, ToolCall                                # noqa: E402
 from tree.protocol.fields import Node                                 # noqa: E402
 from tree.protocol.gate import anchors, validate_root                 # noqa: E402
+from tree.runtime import store                              # noqa: E402
 from tree.runtime.scheduler import run                                # noqa: E402
-from tree.runtime.store import Store                               # noqa: E402
+from tree.runtime.store import Store                          # noqa: E402
 
 OK = []
 
@@ -99,10 +100,10 @@ def run_intake(llm, seed, answers):
         return answers.pop(0)
 
     d = tempfile.mkdtemp()
+    store.init(d)
     root = Node(name="会话", kind="intake")
     try:
-        asyncio.run(run(Store.new(root, seed=seed,
-                                  trace=os.path.join(d, "t.jsonl")),
+        asyncio.run(run(Store.new(root, seed=seed),
                         llm, subscribe=collect, ask=ask, say=said.append))
     except Stop:
         pass
@@ -205,10 +206,10 @@ def main():
                 got.append(p["delta"])
 
         d = tempfile.mkdtemp()
+        store.init(d)
         root = Node(name="会话", kind="intake")
         try:
-            asyncio.run(run(Store.new(root, seed="帮我赚大钱",
-                                      trace=os.path.join(d, "t.jsonl")),
+            asyncio.run(run(Store.new(root, seed="帮我赚大钱"),
                             FakeLLM([reply]), subscribe=collect, ask=stop_ask))
         except Stop:
             pass

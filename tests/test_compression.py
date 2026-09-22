@@ -19,7 +19,6 @@ headroom 的压缩是确定性的（无损折叠 / 日志折叠），所以这�
 """
 
 import asyncio
-import json
 import os
 import re
 import subprocess
@@ -32,7 +31,8 @@ from tree.protocol.fields import Node                                    # noqa:
 from tree.prompts import render_turn                                     # noqa: E402
 from tree.prompts.messages import base_user                              # noqa: E402
 from tree.runtime import scheduler as R                                  # noqa: E402
-from tree.runtime.store import Store                             # noqa: E402
+from tree.runtime import store as store_mod                              # noqa: E402
+from tree.runtime.store import Store                                     # noqa: E402
 from tree.compression import retrieve_original                           # noqa: E402
 
 OK = []
@@ -101,16 +101,16 @@ class ScriptLeaf:
 def go(calls):
     """跑一棵只有叶子的树。返回 (节点, 记录的线上消息, trace 记录)。"""
     d = tempfile.mkdtemp()
+    store_mod.init(d)
     node = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
     llm = ScriptLeaf(calls)
     cwd = os.getcwd()
     os.chdir(d)
     try:
-        asyncio.run(R.run(Store.new(node, trace=os.path.join(d, "t.jsonl")),
-                          llm))
+        st = asyncio.run(R.run(Store.new(node), llm))
     finally:
         os.chdir(cwd)
-    recs = [json.loads(x) for x in open(os.path.join(d, "t.jsonl"))]
+    recs = list(Store.iter_lines(st.path))
     return node, llm, recs
 
 
@@ -220,16 +220,16 @@ def main():
     victim = os.path.join(d, "victim.txt")
     with open(victim, "w") as f:
         f.write("要被删掉的东西")
-    trace5 = os.path.join(d, "t5.jsonl")
     node5 = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
     llm5 = ScriptLeaf([("bash", {"cmd": "rm victim.txt"})])
     cwd = os.getcwd()
     os.chdir(d)
+    store_mod.init(d)
     try:
-        asyncio.run(R.run(Store.new(node5, trace=trace5), llm5))
+        st5 = asyncio.run(R.run(Store.new(node5), llm5))
     finally:
         os.chdir(cwd)
-    recs5 = [json.loads(x) for x in open(os.path.join(d, "t5.jsonl"))]
+    recs5 = list(Store.iter_lines(st5.path))
     eff5 = next(r["payload"] for r in recs5
                 if r["kind"] == "effects" and "rm" in str(r["payload"]["args"]))
     line("rm 的目标在 effects 里记为 delete（不是被覆盖成空）",

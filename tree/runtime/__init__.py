@@ -2,7 +2,8 @@
 
 基础设施（各占一个文件）：
 
-  - `store`    一场会话的存储（一个 Store 对象）：roots / load / new / node / put（写入自动落盘）
+  - `store`    一场会话的存储（一个 Store 对象）：roots / load / new / node / put；
+               记录根由 main.init 定，写入自动落盘（内存缓冲 + pydash 节流懒写）
   - `hands`    节点的三只手（bash / write 串行执行）
   - `loop`     一条消息循环的骨架（问模型 / 跑工具 / 写对话 / 发事件）
 

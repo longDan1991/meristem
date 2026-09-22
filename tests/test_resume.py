@@ -32,6 +32,7 @@ sys.path.insert(0, ROOT)
 from tree.llm import Message, ToolCall                             # noqa: E402
 from tree.protocol.fields import Node                              # noqa: E402
 from tree.runtime import reconcile                                 # noqa: E402
+from tree.runtime import store as store_mod                        # noqa: E402
 from tree.runtime.scheduler import run                             # noqa: E402
 from tree.runtime.store import Store                               # noqa: E402
 
@@ -56,10 +57,18 @@ def state_rec(node, msgs):
 
 def write_recs(path, recs):
     """测试夹具：按磁盘格式手工写一份记录（测的是 load 的读路径）。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         for nid, kind, payload in recs:
             f.write(json.dumps({"t": 0, "node": nid, "kind": kind, "payload": payload},
                                ensure_ascii=False) + "\n")
+
+
+def load_tree(d, root, recs):
+    """夹具：记录根初始化到 d、写一份记录，再读回一棵树。"""
+    store_mod.init(d)
+    write_recs(os.path.join(d, "runs", "t", "trace.jsonl"), recs)
+    return Store.load(root.id)
 
 
 def msgs_of(store, nid):
@@ -94,12 +103,13 @@ class ScriptLLM:
         return Message(text="", tool_calls=[ToolCall(name=name, arguments=args)])
 
 
-async def _run_tree(script, path):
+async def _run_tree(script, d):
     """用脚本化模型跑一棵"根任务→拆一个叶子"的树。崩溃或跑完都返回根。"""
+    store_mod.init(d)
     root = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     llm = ScriptLLM(script)
     try:
-        await run(Store.new(root, trace=path), llm)
+        await run(Store.new(root), llm)
     except RuntimeError:
         pass
     return root
@@ -124,13 +134,12 @@ async def main():
     print("=" * 80)
     print("B. load 返回一棵树（入口为根）；没根 / 多根当场报错")
     d = tempfile.mkdtemp()
-    tp = os.path.join(d, "trace.jsonl")
     # 手工构造：入口根 + 一个跑了一半的叶子任务
     intake = Node(name="会话", kind="intake")
     leaf = Node(name="子A", accept="2026-12-31 收盘 >= 1（子A 负责）", kind="leaf",
                 parent=intake.id, depth=1)
     intake.children = [leaf.id]
-    write_recs(tp, [
+    t = load_tree(d, intake, [
         (intake.id, "state", state_rec(intake, [
             {"role": "user", "content": "用户的任务: 帮我做X"}])),
         (leaf.id, "state", state_rec(leaf, [
@@ -139,47 +148,46 @@ async def main():
                 "function": {"name": "bash", "arguments": '{"cmd": "echo hi"}'}}]},
             {"role": "tool", "tool_call_id": "call_0", "content": "hi"}])),
     ])
-    t = Store.load(tp)
     line("根是入口节点", t.root.kind == "intake" and t.root.name == "会话")
     line("检查点只有 node + msgs（没有编排字段）",
          all(set((r.get("payload") or {}).keys()) == {"node", "msgs"}
-             for r in Store.iter_lines(tp, kinds=("state",))))
+             for r in Store.iter_lines(os.path.join(d, "runs", "t", "trace.jsonl"),
+                                       kinds=("state",))))
     line("入口对话就是根的 msgs",
          msgs_of(t, intake.id)[0]["content"] == "用户的任务: 帮我做X")
     line("重排队列：叶子该跑，入口等孩子（共享谓词）",
          queueable(t, leaf.id) and not queueable(t, intake.id))
     # 空记录 → 报错（没有 state 检查点）
     d0 = tempfile.mkdtemp()
-    tp0 = os.path.join(d0, "t.jsonl")
-    write_recs(tp0, [(None, "open", {"name": "只有 open、没有 state"})])
+    store_mod.init(d0)
+    write_recs(os.path.join(d0, "runs", "t", "trace.jsonl"),
+               [(None, "open", {"name": "只有 open、没有 state"})])
     try:
-        Store.load(tp0)
+        Store.load("no-such-session")
         line("空记录报错（没有 state 检查点）", False)
     except ValueError:
         line("空记录报错（没有 state 检查点）", True)
     # 多根 → 报错
     d_multi = tempfile.mkdtemp()
-    tp_multi = os.path.join(d_multi, "t.jsonl")
     r1 = Node(name="任务一", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     r2 = Node(name="任务二", accept="2026-12-31 收盘 >= 1", kind="dispatch")
-    write_recs(tp_multi, [(r1.id, "state", state_rec(r1, [])),
-                          (r2.id, "state", state_rec(r2, []))])
+    store_mod.init(d_multi)
+    write_recs(os.path.join(d_multi, "runs", "t", "trace.jsonl"),
+               [(r1.id, "state", state_rec(r1, [])), (r2.id, "state", state_rec(r2, []))])
     try:
-        Store.load(tp_multi)
+        Store.load(r1.id)
         line("多个根报错（不是入口为根的一棵树）", False)
     except ValueError:
         line("多个根报错（不是入口为根的一棵树）", True)
 
     # B2：孩子出了结论但投递丢了（崩溃窗口）→ 恢复补投递
     d_b2 = tempfile.mkdtemp()
-    tp_b2 = os.path.join(d_b2, "trace.jsonl")
     it2 = Node(name="会话", kind="intake")
     a = Node(name="甲", accept="x（甲 负责）", kind="leaf", parent=it2.id, depth=1)
     a.close("满足", "甲好了", ["e"])
     it2.children = [a.id]
-    write_recs(tp_b2, [(it2.id, "state", state_rec(it2, [])),   # 入口对话里没有甲的结果
-                       (a.id, "state", state_rec(a, []))])
-    t_b2 = Store.load(tp_b2)
+    t_b2 = load_tree(d_b2, it2, [(it2.id, "state", state_rec(it2, [])),   # 入口对话里没有甲的结果
+                                 (a.id, "state", state_rec(a, []))])
     line("B2: 投递丢失 → 加载时入口不排队（孩子未结算）",
          not queueable(t_b2, it2.id) and not queueable(t_b2, a.id))
     try:
@@ -190,20 +198,18 @@ async def main():
     line("B2: 补投递后入口看到甲的结果（带 id 标记）",
          any("下层结论" in str(m.get("content", "")) and "id:" in str(m.get("content", ""))
              for m in msgs_of(t_b2, it2.id)))
-    line("B2: 二次 load 一棵树还在", Store.load(tp_b2).root.kind == "intake")
+    line("B2: 二次 load 一棵树还在", Store.load(it2.id).root.kind == "intake")
 
     # B3：门槛孩子出了"未满足"结论，父节点还没结算 → 恢复按结论作废暂缓分支
     d_b3 = tempfile.mkdtemp()
-    tp_b3 = os.path.join(d_b3, "trace.jsonl")
     pr3 = Node(name="父", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     gate = Node(name="门槛", accept="x（门槛 负责）", kind="leaf",
                 parent=pr3.id, depth=1, gate=True)
     gate.close("未满足", "不成立", ["e"])
     pr3.children = [gate.id]
     pr3.deferred = [kid("乙")]
-    write_recs(tp_b3, [(pr3.id, "state", state_rec(pr3, [])),
-                       (gate.id, "state", state_rec(gate, []))])
-    t_b3 = Store.load(tp_b3)
+    t_b3 = load_tree(d_b3, pr3, [(pr3.id, "state", state_rec(pr3, [])),
+                                 (gate.id, "state", state_rec(gate, []))])
     await run(t_b3, ScriptLLM([
         ("conclude", {"verdict": "满足", "text": "门槛不成立，做不了",
                       "evidence": ["门槛"]})]))
@@ -217,12 +223,11 @@ async def main():
     print("=" * 80)
     print("C. 调度器续跑：一棵树跑到一半崩溃 → load → resume → 跑完")
     d2 = tempfile.mkdtemp()
-    tp2 = os.path.join(d2, "trace.jsonl")
-    await _run_tree(
+    root2 = await _run_tree(
         [("create_children", {"children": [kid("子A")]}),
          ("bash", {"cmd": "echo hi"}),
-         RuntimeError("模拟崩溃")], tp2)
-    t = Store.load(tp2)
+         RuntimeError("模拟崩溃")], d2)
+    t = Store.load(root2.id)
     line("崩溃后 load 出一棵树", t.root.name == "根任务")
     llm2 = ScriptLLM([("conclude", {"verdict": "满足", "text": "子A做完了",
                                     "evidence": ["第1次观测"]}),
@@ -236,12 +241,12 @@ async def main():
              if m.get("role") == "assistant" and m.get("tool_calls")
              and any(tc.get("function", {}).get("name") == "bash"
                      for tc in m["tool_calls"])) == 1)
-    line("再次 load：root 判定在", Store.load(tp2).root.verdict == "满足")
+    line("再次 load：root 判定在", Store.load(root2.id).root.verdict == "满足")
 
     print("=" * 80)
     print("D. 入口对话 = 根节点的 msgs（新会话的种子进根对话）")
     d3 = tempfile.mkdtemp()
-    tp3 = os.path.join(d3, "trace.jsonl")
+    store_mod.init(d3)
     intake3 = Node(name="会话", kind="intake")
     llm3 = ScriptLLM(["你要做什么？", "明白了。"])
     asks = iter(["帮我做X", EOFError()])
@@ -251,11 +256,10 @@ async def main():
             raise a
         return a
     try:
-        await run(Store.new(intake3, seed="用户的任务: 帮我做X", trace=tp3),
-                  llm3, ask=ask3)
+        await run(Store.new(intake3, seed="用户的任务: 帮我做X"), llm3, ask=ask3)
     except EOFError:
         pass
-    t3 = Store.load(tp3)
+    t3 = Store.load(intake3.id)
     msgs = msgs_of(t3, intake3.id)
     line("种子进根对话", msgs[0]["content"] == "用户的任务: 帮我做X")
     line("入口回复与用户的话都在根对话里",
@@ -263,12 +267,12 @@ async def main():
          and msgs[-1]["content"] == "帮我做X"
          and len(msgs) == 3)
     line("没有独立的 chat_* 通道了",
-         all(r["kind"] != "chat_user" for r in _recs(tp3)))
+         all(r["kind"] != "chat_user" for r in _recs(t3.path)))
 
     print("=" * 80)
     print("E. 整场会话（入口 + 任务）崩溃 → load 一棵树 → resume → 全完工")
     d4 = tempfile.mkdtemp()
-    tp4 = os.path.join(d4, "trace.jsonl")
+    store_mod.init(d4)
     intake4 = Node(name="会话", kind="intake")
     llm4 = ScriptLLM([
         ("submit_root", {"root": {"name": "任务X", "detail": "d", "notes": "",
@@ -276,11 +280,11 @@ async def main():
                                   "conc_range": [1, 10]}}),
         RuntimeError("模拟崩溃")])            # 任务还没出生就崩（submit 之后）
     try:
-        await run(Store.new(intake4, seed="用户的任务: X", trace=tp4), llm4,
+        await run(Store.new(intake4, seed="用户的任务: X"), llm4,
                   ask=lambda t: (_ for _ in ()).throw(EOFError()))
     except (RuntimeError, EOFError):
         pass
-    t = Store.load(tp4)
+    t = Store.load(intake4.id)
     line("崩溃后一棵树、入口为根", t.root.kind == "intake")
     task = [n for n in t.registry.values() if n.parent == t.root.id]
     line("任务挂成入口的孩子", len(task) == 1 and task[0].kind == "leaf")
@@ -293,7 +297,7 @@ async def main():
                   ask=lambda tx: (_ for _ in ()).throw(EOFError()))
     except EOFError:
         pass
-    t2 = Store.load(tp4)
+    t2 = Store.load(intake4.id)
     task2 = [n for n in t2.registry.values() if n.parent == t2.root.id][0]
     line("二次 load：任务出结论", task2.verdict == "满足")
     line("入口对话带着任务结论",
@@ -302,19 +306,18 @@ async def main():
     print("=" * 80)
     print("F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果")
     d5 = tempfile.mkdtemp()
-    tp5 = os.path.join(d5, "trace.jsonl")
     intake5 = Node(name="会话", kind="intake")
-    write_recs(tp5, [(intake5.id, "state", state_rec(intake5, []))])
-    with open(tp5, "a", encoding="utf-8") as f:
+    p5 = load_tree(d5, intake5, [(intake5.id, "state", state_rec(intake5, []))]).path
+    with open(p5, "a", encoding="utf-8") as f:
         f.write('{"kind": "state", "node": "半')     # 写了一半的一笔
-    line("半行被跳过，前面的还能读", Store.load(tp5).root.kind == "intake")
+    line("半行被跳过，前面的还能读", Store.load(intake5.id).root.kind == "intake")
     line("mid-file 坏行照样炸（那是真损坏，不许吞）",
-         _midfile_corrupt_raises(tp5))
+         _midfile_corrupt_raises(p5, intake5.id))
 
     print("=" * 80)
     print("G. 一场会话多个任务 = 一棵树多个孩子，只有没跑完的被接着跑")
     d6 = tempfile.mkdtemp()
-    tp6 = os.path.join(d6, "trace.jsonl")
+    store_mod.init(d6)
     intake6 = Node(name="会话", kind="intake")
     llm6 = ScriptLLM([
         ("submit_root", {"root": {"name": "任务一", "detail": "d", "notes": "",
@@ -328,12 +331,11 @@ async def main():
                                   "conc_range": [1, 10]}}),
         RuntimeError("崩")])
     try:
-        await run(Store.new(intake6, seed="用户的任务: 两个", trace=tp6),
-                  llm6,
+        await run(Store.new(intake6, seed="用户的任务: 两个"), llm6,
                   ask=lambda t: (_ for _ in ()).throw(EOFError()))
     except (RuntimeError, EOFError):
         pass
-    t = Store.load(tp6)
+    t = Store.load(intake6.id)
     tasks = sorted([n.name for n in t.registry.values()
                     if n.parent == t.root.id])
     line("两个任务都是入口的孩子", tasks == ["任务一", "任务二"])
@@ -352,7 +354,7 @@ async def main():
                   ask=lambda tx: (_ for _ in ()).throw(EOFError()))
     except EOFError:
         pass
-    t_after = Store.load(tp6)
+    t_after = Store.load(intake6.id)
     t2_after = [n for n in t_after.registry.values() if n.name == "任务二"][0]
     line("恢复后任务二接着跑完", t2_after.verdict == "满足")
     line("任务一没被动过",
@@ -361,16 +363,16 @@ async def main():
     print("=" * 80)
     print("H. 增量检查点：每节点第一笔全量、之后只带新增消息，load 按序拼回全量")
     d_h = tempfile.mkdtemp()
-    tp_h = os.path.join(d_h, "trace.jsonl")
+    store_mod.init(d_h)
     root_h = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     llm_h = ScriptLLM([
         ("create_children", {"children": [kid("子A")]}),
         ("bash", {"cmd": "echo hi"}),
         ("conclude", {"verdict": "满足", "text": "子A做完了", "evidence": ["第1次观测"]}),
         ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["子A 结论"]})])
-    await run(Store.new(root_h, trace=tp_h), llm_h)
+    st_h = await run(Store.new(root_h), llm_h)
     events = {}                          # nid -> [state payload，按文件顺序]
-    for r in Store.iter_lines(tp_h):
+    for r in Store.iter_lines(st_h.path):
         if r.get("kind") == "state":
             events.setdefault(r.get("node"), []).append(r.get("payload") or {})
     child_h = root_h.children[0]
@@ -384,33 +386,31 @@ async def main():
     line("H: 增量只带新增消息（不重写已写过的）",
          [len(e["msgs"]) for e in ch[1:]] == [2, 2]
          and ch[-1]["msgs"][-1]["role"] == "tool")
-    t_h = Store.load(tp_h)
+    t_h = Store.load(root_h.id)
     msgs_h = msgs_of(t_h, child_h)
     line("H: load 拼回完整对话（assistant/tool 配对、顺序不变）",
          len(msgs_h) == 4
          and [m["role"] for m in msgs_h] == ["assistant", "tool", "assistant", "tool"]
          and msgs_h[0]["tool_calls"][0]["function"]["name"] == "bash")
     line("H: 混着老格式全量检查点也能读（delta 字段缺省 = 全量）",
-         _delta_and_legacy_mix_loads(tp_h))
+         _delta_and_legacy_mix_loads())
 
     print("=" * 80)
     print("I. Store.label：当前格式认入口的孩子，档案（无入口）认根本身")
     d_i = tempfile.mkdtemp()
-    tp_i = os.path.join(d_i, "trace.jsonl")
     it_i = Node(name="会话", kind="intake")
     leaf_i = Node(name="子A", accept="x", kind="leaf", parent=it_i.id, depth=1)
     leaf_i.close("满足", "done", ["e"])
     it_i.children = [leaf_i.id]
-    write_recs(tp_i, [(it_i.id, "state", state_rec(it_i, [])),
-                      (leaf_i.id, "state", state_rec(leaf_i, []))])
-    lbl = Store.label(tp_i)
+    p_i = load_tree(d_i, it_i, [(it_i.id, "state", state_rec(it_i, [])),
+                                (leaf_i.id, "state", state_rec(leaf_i, []))]).path
+    lbl = Store.label(p_i)
     line("当前格式：任务 = 入口的孩子", "子A" in lbl and "[满足]" in lbl)
     d_j = tempfile.mkdtemp()
-    tp_j = os.path.join(d_j, "trace.jsonl")
     root_j = Node(name="老任务", accept="x", kind="dispatch")
     root_j.close("阻塞", "做不了", [])
-    write_recs(tp_j, [(root_j.id, "state", state_rec(root_j, []))])
-    lbl2 = Store.label(tp_j)
+    p_j = load_tree(d_j, root_j, [(root_j.id, "state", state_rec(root_j, []))]).path
+    lbl2 = Store.label(p_j)
     line("档案：没有入口，根本身就是任务", "老任务" in lbl2 and "[阻塞]" in lbl2)
 
     print("=" * 80)
@@ -418,12 +418,14 @@ async def main():
     return 0 if all(OK) else 1
 
 
-def _delta_and_legacy_mix_loads(path):
+def _delta_and_legacy_mix_loads():
     """同一条消息先被增量检查点写过、又被老格式全量检查点覆盖 —— load 取全量。"""
     d = tempfile.mkdtemp()
-    tp = os.path.join(d, "trace.jsonl")
+    store_mod.init(d)
     n = Node(name="会话", kind="intake")
-    with open(tp, "a", encoding="utf-8") as f:
+    p = os.path.join(d, "runs", "t", "trace.jsonl")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps({"kind": "state", "node": n.id,
                             "payload": {"node": n.to_dict(), "msgs": [],
                                          "delta": True, "base": 0}},
@@ -432,7 +434,7 @@ def _delta_and_legacy_mix_loads(path):
                             "payload": {"node": n.to_dict(), "msgs": [
                                 {"role": "user", "content": "全量覆盖"}]}},
                            ensure_ascii=False) + "\n")
-    t = Store.load(tp)
+    t = Store.load(n.id)
     return msgs_of(t, n.id) == [{"role": "user", "content": "全量覆盖"}]
 
 
@@ -440,20 +442,16 @@ def _recs(path):
     return list(Store.iter_lines(path))
 
 
-def _load_raises(path):
-    try:
-        Store.load(path)
-    except ValueError:
-        return True
-    return False
-
-
-def _midfile_corrupt_raises(path):
+def _midfile_corrupt_raises(path, session_id):
     """坏行在文件中间（后面还有完整行）→ load 必须报错，不能悄悄跳过。"""
     with open(path, "a", encoding="utf-8") as f:
         f.write('{"kind": "not_json"\n')          # 中间坏行
         f.write('{"kind": "state", "x": 1}\n')   # 后面还有完整行
-    return _load_raises(path)
+    try:
+        Store.load(session_id)
+        return False
+    except ValueError:
+        return True
 
 
 if __name__ == "__main__":

@@ -122,8 +122,9 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 
 | 文件 | 行数 | 干什么 |
 |---|---|---|
-| `main.py` | 55 | 薄分派：只解析参数、按参数调 `terminal.chat.run_session`，没有任何装配逻辑 |
-| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 把参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅、切工作目录，`-r` 时选完老会话就 **`Store.load` 读回整棵 Node 树**放进 `env["store"]`；`converse` 是终端话轮。路径全部来自 `tree/config.py` / `tree/runtime/store.py` 的 `Store.roots()` |
+| `main.py` | | **程序入口 + 初始化**：`init()` 里定下跑之前需要的一切（记录根给 `store`、工作目录、真模型），再把控制权交给 `cli`。这里是唯一初始化点 |
+| `cli.py` | | **命令行**：`parse_args` / `run` / `main` —— 只剩 `-r` 一个参数，解析后交给 `terminal.chat.run_session` |
+| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时选完老会话就 **`Store.load(id)` 读回整棵 Node 树**放进 `env["store"]`；`converse` 是终端话轮。初始化（工作区 / API key / 记录根）在 `main.py` |
 | `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`，树的视图 `render_tree` 在 `view.py`（展示变因，不碰协议）。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
@@ -137,7 +138,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tree/protocol/fields.py` | 123 | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `deferred`（门槛暂缓计划）+ `EXTERNAL_CLASSES`。渲染不在协议层 —— 树的视图在 `terminal/view.py` |
 | `tree/protocol/gate.py` | 180 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
 | `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
-| `tree/runtime/store.py` | | **一场会话的存储 —— 一个 `Store` 对象，一组接口**：`Store.roots()`（树根列表，-r）/ `Store.load(path)`（从记录读回一棵树，增量检查点按序拼回全量）/ `Store.new(root, seed)`（新建）/ `store.node(nid)`（按 id 搜节点）/ `store.put(nodes, on_id)`（一组完整 Node 挂到 on_id 下：新增/更新内存 + **自动落盘**）/ `record`/`drain`（运行事件 / 保证落盘）。记录文件（append-only jsonl + 写线程，无锁）、内存索引、增量检查点全在这个对象里；`Store.iter_lines`/`Store.label` 是读记录/摘要 |
+| `tree/runtime/store.py` | | **一场会话的存储 —— 一个 `Store` 对象**：记录根由 `store.init(root)` 在程序开始时定（main.py 调）；接口 `Store.roots()`（会话列表）/ `Store.load(session)`（会话 id → 树）/ `Store.new(root, seed)` / `store.node(nid)` / `store.put(nodes, on_id)`（一组完整 Node 挂到 on_id 下：新增/更新内存 + **自动落盘**）。写盘是**内存缓冲 + `pydash.throttle` 节流懒写**（最多每 200ms 一次），读记录前/进程退出时自动补齐 —— 没有 drain，调用方只管 put/record。`Store.iter_lines`/`Store.label` 是读记录/摘要 |
 | `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
 | `tree/runtime/loop.py` | | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` **内建**自己的 `EventSink` 并拼好带 scope 的 emit，消费方经 `Loop.subscribe` 订阅（调度器把外界的 consumer 逐个订阅到每个 Loop） |
 | `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
@@ -153,6 +154,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 `hands` 用**单消费者队列**串行 bash/write（AGENTS §9，无锁）。
 **仅有的线程是会话记录文件**（`Store` 内部的 `_RecordFile`）：它是单一 I/O 记账者（写 jsonl），
 不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着。
+写盘节奏由 `pydash.throttle` 控（成熟库，不自写节流）。
 
 ### 2.2 真实数据资产（在工作区里）
 

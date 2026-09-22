@@ -201,9 +201,6 @@ async def run(store, llm, *, workers=cfg.WORKERS, subscribe=None,
                 nid = inflight.pop(fut)
                 dispatch(nid, fut.result())
     finally:
-        try:
-            await pool.close()
-            await hands.close()
-        finally:
-            store.drain()     # 任何退出路（含取消）最后几笔都必须落盘
+        await pool.close()
+        await hands.close()
     return store
