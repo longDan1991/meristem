@@ -5,11 +5,13 @@
 
 ## 已登记的旧账
 
-| 规则 | 位置 | 为什么压 | 还债方案 |
-|---|---|---|---|
-| `E402` | `tests/test_*.py` 的 `sys.path.insert(...)` 之后的 import 行 | 测试以**脚本**方式运行（`python3 tests/test_x.py`），`sys.path[0]` 是 `tests/`，必须先插入仓库根才能 `import tree`；这是脚本式测试的结构性写法，不是"import 不在顶部" | 若测试改为可安装包 / pytest 收集（`pythonpath` 配置），整批移除 |
+（无）
 
 ## 已经清零的
+
+- `E402` tests/ 各文件的 `sys.path.insert(...)` 之后的 import 行 —— 随 `tests/harness.py` 提取清掉：
+  sys.path 样板收进 harness（它只 import 标准库，无 E402），测试的 import 全部回到模块顶部、
+  不再需要 `# noqa: E402`，整批移除。
 
 - `E402` tree/run.py 中段的 import 块 —— 随 run.py 拆分进 `runtime/`、`protocol/`、`memory/` 时修复。
 - `PLC0415` tree/run.py 函数内 `import hashlib`、`from .mine import ...` —— 已提为模块顶层导入。

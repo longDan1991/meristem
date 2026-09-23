@@ -6,7 +6,7 @@ preamble 无标签放最前；节名必须匹配 `[a-z][a-z0-9_-]*`，违反当�
 节组成 = f(节点出生时静态属性)：恒在的 preamble / process / tools / rules / input，
 加条件节 `skill_gate`（node.gate）/ `skill_compression`（cfg.COMPRESS 且叶子）——
 生命周期内不变 ⇒ system 字节稳定 ⇒ provider KV 缓存按节命中。内容写在代码里，
-散文在 `prose.py`、条件节在 `skills.py`、tools / rules 从 `tool_specs.NODE_TOOLS` 推导。
+散文在 `prose.py`、条件节在 `skills.py`、tools / rules 从 `tools.specs.NODE_TOOLS` 推导。
 
 `render_turn` 只返回 system；节点的任务（`base_user`）在平铺对话 msgs[0] 里，
 发模型前由 `runtime/loop._build_wire` 拼成 wire（没回话的 tool_call 补占位）。
@@ -17,7 +17,8 @@ preamble 无标签放最前；节名必须匹配 `[a-z][a-z0-9_-]*`，违反当�
 import re
 
 from .. import config as cfg
-from ..protocol.tool_specs import NODE_TOOLS
+from ..protocol.fields import LEAF
+from tools import NODE_TOOLS
 from . import feedback
 from .prose import prose
 from .rules import rules_section
@@ -46,7 +47,7 @@ def build_system_sections(which, node=None):
          "input": prose(which, "input")}
     if node is not None and getattr(node, "gate", False):
         s["skill_gate"] = skill_gate()
-    if which == "leaf" and cfg.COMPRESS:
+    if which == LEAF and cfg.COMPRESS:
         s["skill_compression"] = skill_compression()
     return s
 

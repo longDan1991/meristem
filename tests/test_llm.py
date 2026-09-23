@@ -5,7 +5,7 @@
 
   A. 文本 + 思考 + 工具参数两段碎片 → 拼回完整 Message
   B. on_delta / on_reasoning 各自收到碎片
-  C. 收尾块 usage → last_usage 是 dict
+  C. 收尾块 usage → Message.usage 是 dict
   D. 坏参数 JSON → ValueError（fail fast）
   E. 边界：无思考块 / 无 usage 收尾不炸
   F. 自定义型 tool-call（没有 function 字段）被跳过
@@ -13,21 +13,11 @@
 """
 
 import asyncio
-import os
 import sys
 import types
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
-from core.llm import LLM                                       # noqa: E402
-
-OK = []
-
-
-def line(tag, cond, detail=""):
-    print("  %s %-52s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
+from harness import OK, line
+from core.llm import LLM
 
 
 def NS(**kw):
@@ -46,10 +36,8 @@ def chunk(delta=None, usage=None):
 
 
 async def _run(factory, on_delta=None, on_reasoning=None):
-    llm = LLM.__new__(LLM)
-    llm._tls = types.SimpleNamespace(usage=None)
-    msg = await llm._stream(factory(), on_delta, on_reasoning)
-    return llm, msg
+    msg = await LLM()._stream(factory(), on_delta, on_reasoning)
+    return msg
 
 
 def test_full():
@@ -67,7 +55,7 @@ def test_full():
         yield chunk(usage=NS(model_dump=lambda: {"total_tokens": 42, "prompt_tokens": 10,
                                                  "completion_tokens": 32}))
 
-    llm, msg = asyncio_run(_run(stream, deltas.append, think.append))
+    msg = asyncio_run(_run(stream, deltas.append, think.append))
     line("文本碎片拼回整段", msg.text == "你好。", repr(msg.text))
     line("on_delta 逐块收到", deltas == ["你", "好。"], repr(deltas))
     line("on_reasoning 收到思考", think == ["想一下"], repr(think))
@@ -77,10 +65,10 @@ def test_full():
     line("工具 id / name 取到", (msg.tool_calls[0].id == "call_1"
                                  and msg.tool_calls[0].name == "bash"),
          repr((msg.tool_calls[0].id, msg.tool_calls[0].name)))
-    line("收尾块 usage 读成 dict", llm.last_usage == {"total_tokens": 42,
-                                                      "prompt_tokens": 10,
-                                                      "completion_tokens": 32},
-         repr(llm.last_usage))
+    line("收尾块 usage 读成 dict", msg.usage == {"total_tokens": 42,
+                                                "prompt_tokens": 10,
+                                                "completion_tokens": 32},
+         repr(msg.usage))
 
 
 def test_bad_json():
@@ -102,11 +90,11 @@ def test_boundaries():
     async def plain():
         yield chunk(NS(content="纯文本", tool_calls=None))
 
-    llm, msg = asyncio_run(_run(plain))
+    msg = asyncio_run(_run(plain))
     line("无思考块不炸（reasoning_content 不存在）", msg.text == "纯文本"
          and not msg.tool_calls)
-    line("无 usage 收尾 → last_usage 为 None", llm.last_usage is None,
-         repr(llm.last_usage))
+    line("无 usage 收尾 → usage 为 None", msg.usage is None,
+         repr(msg.usage))
 
     # 自定义型 tool-call → 整条跳过不炸；同流里的标准调用照常解析
     async def custom():
@@ -114,7 +102,7 @@ def test_boundaries():
         yield chunk(NS(content=None, tool_calls=[tcd(1, tid="s1", name="bash",
                                                      args="{}")]))
 
-    _, msg = asyncio_run(_run(custom))
+    msg = asyncio_run(_run(custom))
     line("自定义型 tool-call 整条跳过", (len(msg.tool_calls) == 1
                                        and msg.tool_calls[0].name == "bash"
                                        and msg.tool_calls[0].id == "s1"),
@@ -128,7 +116,7 @@ def test_multi_index():
         yield chunk(NS(content=None, tool_calls=[tcd(0, tid="a", name="t1",
                                                      args='{"x": 1}')]))
 
-    _, msg = asyncio_run(_run(stream))
+    msg = asyncio_run(_run(stream))
     line("多个工具调用按 index 排序", [tc.name for tc in msg.tool_calls] == ["t1", "t2"]
          and [tc.arguments for tc in msg.tool_calls] == [{"x": 1}, {"x": 2}],
          repr(msg.tool_calls))

@@ -18,17 +18,15 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.llm import Message, ToolCall                                   # noqa: E402
-from core.protocol.fields import Node                                    # noqa: E402
-from core.prompts import render_turn                                     # noqa: E402
-from core.prompts.messages import base_user                              # noqa: E402
-from core.runtime.loop import run as run_loop                                  # noqa: E402
-from core.runtime import store as store_mod                              # noqa: E402
-from core.runtime.store import Store                                     # noqa: E402
-from core.compression import retrieve_original                           # noqa: E402
-
-OK = []
+from harness import OK, line
+from core.llm import Message, ToolCall
+from core.protocol.fields import Node
+from core.prompts import render_turn
+from core.prompts.messages import base_user
+from core.runtime.loop import run as run_loop
+from core.runtime import store as store_mod
+from core.runtime.store import Store
+from core.compression import retrieve_original
 
 
 def stored_obs(recs, needle):
@@ -39,11 +37,6 @@ def stored_obs(recs, needle):
         if needle in str(r["payload"]["args"]):
             return r["payload"]["obs"]
     raise AssertionError("trace 里没找到 %r 的 tool 事件" % needle)
-
-
-def line(tag, cond, detail=""):
-    print("  %s %-52s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
 
 
 # 直接给 bash 一条生成大输出的命令；引号小心：外层 Python 字符串、shell 双引号里再包 python -c。
@@ -71,11 +64,9 @@ class ScriptLeaf:
     def __init__(self, calls):
         self.calls = list(calls)
         self.seen = []
-        self.last_usage = {}
 
     async def chat(self, messages, temperature=0.2, on_delta=None,
                    on_reasoning=None, tools=None):
-        self.last_usage = {"total_tokens": 0}
         self.seen.append([dict(m) for m in messages])
         if self.calls:
             name, args = self.calls.pop(0)
@@ -175,8 +166,8 @@ def main():
     script = ("import os, sys; os.environ['TREE_COMPRESS'] = '0'; "
               "import asyncio; "
               "from core import config as cfg; "
-              "import core.runtime.tools; "   # 工具注册发生在 import 时
-              "from core.protocol.tool_specs import openai_tools; "
+              "import tools.defs; "   # 工具注册发生在 import 时
+              "from tools import openai_tools; "
               "assert not cfg.COMPRESS; "
               "names = [t['function']['name'] for t in "
               "asyncio.run(openai_tools())['leaf']]; "

@@ -14,35 +14,26 @@
 
 import asyncio
 import json
-import os
-import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.llm import Message, ToolCall                                # noqa: E402
-from core.protocol.fields import Node                                 # noqa: E402
-from core.protocol.gate import anchors, validate_root                 # noqa: E402
-from core.runtime import store                              # noqa: E402
-from core.runtime.loop import run                                # noqa: E402
-from core.runtime.store import Store                          # noqa: E402
-
-OK = []
+from harness import line
+from core.llm import Message, ToolCall
+from core.protocol.fields import Node
+from core.protocol.gate import anchors, validate_root
+from core.runtime import store
+from core.runtime.loop import run
+from core.runtime.store import Store
 
 
 class Stop(Exception):
     """脚本用完了：等价于用户在终端上中止（run 不拦，测试用它收手）。"""
 
 
-def line(tag, cond, detail=""):
-    print("  %s %-50s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
-
-
 class FakeLLM:
     """按脚本回话的模型：入口说字符串 / 交带 root 的 dict，任务节点跑一次 bash 就 conclude。"""
 
     def __init__(self, replies):
-        self.replies, self.last_usage, self.said = list(replies), {}, []
+        self.replies, self.said = list(replies), []
 
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
                    tools=None):

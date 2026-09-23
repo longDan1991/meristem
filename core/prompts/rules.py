@@ -3,8 +3,8 @@
 推导部分随工具清单变；手写部分是协议级不变量，对应 `gate.py` 的机械校验。
 """
 
-from ..protocol.fields import EXTERNAL_CLASSES
-from ..protocol.tool_specs import ACTION_TOOLS, NODE_TOOLS
+from ..protocol.fields import EXTERNAL_CLASSES, INTAKE
+from tools import ACTION_TOOLS, NODE_TOOLS
 
 # `外部需求` 四类的提示文本，从 fields 的词表拼出（改词表这里跟着变）。
 _EXTERNAL_HINT = " / ".join(EXTERNAL_CLASSES)
@@ -14,7 +14,7 @@ def rules_section(which):
     """rules 节：`which` 节点类型的操作纪律与协议规则。"""
     lines = []
     tools = set(NODE_TOOLS[which])
-    if which != "intake":
+    if which != INTAKE:
         lines.append("调用工具时可以一次调多个（并行执行），全部完成再继续；"
                      "调不在本层列表里的 → 当场打回。")
         lines.append("已经试过的都记在历史里 —— 别重复撞同一堵墙。")
@@ -46,7 +46,7 @@ def rules_section(which):
                      "「任务执行结果（系统观测，不是用户说的话）」—— 据此接着谈："
                      "把结论讲给用户，或再开下一个任务。谈成什么是什么，"
                      "跑的结果说了算，不要替它编结论。")
-    if which != "intake":
+    if which != INTAKE:
         lines.append("反复失败、或需要的动作不在工具里（比如开户/入金/留痕需要人到场），"
                      "就用「阻塞」，把原因写清楚，并指明 external 是哪一类"
                      "（%s）。"

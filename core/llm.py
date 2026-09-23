@@ -4,14 +4,14 @@
 给 `tools` 就走工具调用，给 `on_delta` 就走流式；`on_reasoning` 另开一条走模型的
 `reasoning_content`，和回答分开，终端才能把思考画成灰的。
 
-`last_usage` 是线程本地的，每个 worker 记自己那一次用量、`loop._log_usage` 立刻读走，
-不需要共享计数器也不需要锁。
+用量随回复走：`Message.usage` 就是这次调用的 token 账（没有收尾块时为 None）。
+ChatPool 的 worker 是同一线程里的 asyncio task，线程本地装不下"每次调用各自的用量"，
+所以用量跟结果对象一起回来，不经过任何共享槽。
 """
 
 import asyncio
 import json
 import os
-import threading
 from dataclasses import dataclass, field
 
 import litellm
@@ -29,9 +29,14 @@ class ToolCall:
 
 @dataclass
 class Message:
-    """模型一次回复：要么有文本、要么有工具调用（或两者）。"""
+    """模型一次回复：要么有文本、要么有工具调用（或两者）。
+
+    `usage` 是这次调用的 token 用量（dict 或 None），和消息同生共死 ——
+    并发下不会串到别的节点头上。
+    """
     text: str = ""
     tool_calls: list = field(default_factory=list)
+    usage: dict = None
 
 
 # 只依赖 OpenAI 兼容协议：模型名统一走 openai/ 前缀 + api_base，不交给 litellm 猜 provider
@@ -50,11 +55,6 @@ class LLM:
         self.model = model or os.environ.get("TREE_MODEL", "gpt-4o-mini")
         self.base_url = (base_url or os.environ.get("TREE_BASE_URL") or "").rstrip("/")
         self.api_key = api_key or os.environ.get("TREE_API_KEY")
-        self._tls = threading.local()
-
-    @property
-    def last_usage(self):
-        return getattr(self._tls, "usage", None)
 
     def _route(self, model):
         return model if "/" in model else _COMPAT_PREFIX + model
@@ -82,16 +82,21 @@ class LLM:
         return await self._stream(resp, on_delta, on_reasoning)
 
     async def _stream(self, resp, on_delta, on_reasoning):
-        """流式：话与思考逐字回调，工具调用增量按 index 拼起来组装成 Message。"""
+        """流式：话与思考逐字回调，工具调用增量按 index 拼起来组装成 Message（带 usage）。
+
+        部分 provider 把 usage 带在最后一个有内容的块上而不是独立收尾块，
+        所以每块都试着收一次，最后一次写到的就是整段调用的账。
+        """
         parts, calls = [], []
         tool_deltas = {}                     # index -> {"id", "name", "arguments": [片段]}
+        usage = None
         async for chunk in resp:
+            u = getattr(chunk, "usage", None)   # 收尾块只有 usage；有的 provider 挂在最后一块内容上
+            if u:
+                # usage 是 pydantic 对象，落到 Message.usage 前先转成 dict
+                usage = (u.model_dump() if hasattr(u, "model_dump")
+                         else dict(u))
             if not chunk.choices:            # 收尾块：没内容，只有 usage（stream_options）
-                u = getattr(chunk, "usage", None)
-                if u:
-                    # usage 是 pydantic 对象，._log_usage 要的是 dict
-                    self._tls.usage = (u.model_dump() if hasattr(u, "model_dump")
-                                       else dict(u))
                 continue
             delta = chunk.choices[0].delta
             # 无思考时字段不存在（OpenAI 规范），只能 getattr
@@ -123,7 +128,7 @@ class LLM:
                 raise ValueError("工具「%s」的参数不是合法 JSON：%r（%s）"
                                  % (slot["name"], raw, e))
             calls.append(ToolCall(id=slot["id"], name=slot["name"], arguments=args))
-        return Message(text="".join(parts), tool_calls=calls)
+        return Message(text="".join(parts), tool_calls=calls, usage=usage)
 
 
 class ChatPool:

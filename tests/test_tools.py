@@ -11,22 +11,33 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import core.tools as T                        # noqa: E402
-from core.tools import read                  # noqa: E402
+from harness import OK, line
+import tools.defs as T
+
+
+class _Store:
+    """最小假 store：bash / read / write 只用到 registry 和 record。"""
+
+    def __init__(self):
+        self.registry = {"n": None}
+
+    def record(self, *a, **k):
+        pass
+
+
+class _Loop:
+    def __init__(self):
+        self.store = _Store()
+        self.say = None
 
 
 def bash(*a, **k):
-    """bash 是真异步，测试里用同步壳调它。"""
-    return asyncio.run(T.bash(*a, **k))
-
-OK = []
+    """bash 是真异步，测试里用同步壳调它，返回模型看到的观测文本。"""
+    return asyncio.run(T.bash(*a, _b=(_Loop(), "n"), **k))["text"]
 
 
-def line(tag, cond, detail=""):
-    print("  %s %-46s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
-
+def read(*a, **k):
+    return asyncio.run(T.read(*a, _b=(_Loop(), "n"), **k))["text"]
 
 def main():
     p = "/tmp/_t_tools.txt"

@@ -28,25 +28,17 @@ import re
 import sys
 import tempfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
-import terminal.chat as chat                               # noqa: E402
-from prompt_toolkit.input import create_pipe_input         # noqa: E402
-from core.llm import Message, ToolCall                     # noqa: E402
-from core.protocol.fields import Node                      # noqa: E402
-from core.runtime import store as store_mod               # noqa: E402
-from core.runtime.store import Store                     # noqa: E402
+from harness import OK, line, ROOT
+import terminal.chat as chat
+from prompt_toolkit.input import create_pipe_input
+from core.llm import Message, ToolCall
+from core.protocol.fields import Node
+from core.runtime import store as store_mod
+from core.runtime.store import Store
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TIMEOUT = 30
-OK = []
 RAN = []
-
-
-def line(tag, cond, detail=""):
-    print("  %s %-48s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
 
 
 class Screen(io.StringIO):
@@ -83,7 +75,7 @@ class FakeLLM:
     """
 
     def __init__(self, replies, reasoning="", screen=None, slow=False, kids=1):
-        self.replies, self.last_usage, self.said = list(replies), {}, []
+        self.replies, self.said = list(replies), []
         self.seen = []
         self.reasoning, self.screen = reasoning, screen
         self.at_return, self.snapshots, self.slow, self.kids = [], [], slow, kids

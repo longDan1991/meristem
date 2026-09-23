@@ -21,21 +21,12 @@ import os
 import sys
 import tempfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
-from core.llm import Message, ToolCall                        # noqa: E402
-from core.protocol.fields import Node, node_from_dict, node_to_dict  # noqa: E402
-from core.runtime import store as store_mod                   # noqa: E402
-from core.runtime.loop import run                             # noqa: E402
-from core.runtime.store import Store                          # noqa: E402
-
-OK = []
-
-
-def line(tag, cond, detail=""):
-    print("  %s %-52s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
+from harness import OK, line
+from core.llm import Message, ToolCall
+from core.protocol.fields import Node, node_from_dict, node_to_dict
+from core.runtime import store as store_mod
+from core.runtime.loop import run
+from core.runtime.store import Store
 
 
 def kid(name, accept="2026-12-31 收盘 >= 1", kind="leaf", gate=False):
@@ -79,7 +70,6 @@ class ScriptLLM:
     async def chat(self, messages, temperature=0.2, on_delta=None,
                    on_reasoning=None, tools=None):
         self.calls += 1
-        self.last_usage = {"total_tokens": 0}
         action = self.script.pop(0) if self.script else ("text", "嗯。")
         if isinstance(action, Exception):
             raise action

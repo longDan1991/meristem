@@ -4,12 +4,12 @@
 （"等孩子"就是"最后一条是 assistant"）。孩子怎么结算、门槛怎么续跑/作废是 conclude 的副作用。
 """
 
-from ..protocol.fields import Node
+from ..protocol.fields import ALLOC, INTAKE, LEAF, Node
 
 
 def which_of(node):
     """节点类型 → 提示词/工具类型（intake 保持；dispatch 归 alloc）。"""
-    return node.kind if node.kind in ("leaf", "intake") else "alloc"
+    return node.kind if node.kind in (LEAF, INTAKE) else ALLOC
 
 
 def actionable(store, nid):
@@ -25,7 +25,7 @@ def make_child(parent, spec):
 
     任务根 lineage 为空（入口不是上层意图），普通子节点在出生时物化父的意图链（父 detail 只读）。
     """
-    lineage = [] if parent.kind == "intake" else \
+    lineage = [] if parent.kind == INTAKE else \
         parent.lineage + [[parent.name, parent.detail]]
     kid = Node(name=spec["name"], detail=spec["detail"],
                notes=spec.get("notes") or "", accept=spec["accept"],

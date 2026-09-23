@@ -14,6 +14,8 @@ import re
 _RESULT_ID = re.compile(r"（id:([0-9a-f]{6,16})）")
 # 下层结论行的开头（名字在「｜」之前）。
 _CHILD_NAME = re.compile(r"下层结论：([^｜]+)｜")
+# 空值的统一写法：字段渲染与 as_json 共用。
+EMPTY = "(无)"
 
 
 def result_marks(msgs):
@@ -31,7 +33,7 @@ def result_marks(msgs):
 def as_json(v):
     """值按 JSON 形状渲染（数组就是数组，假就是 false），空写 (无) —— 收到的与要写出去的必须同套形状。"""
     if v is None or v == "" or v == []:
-        return "(无)"
+        return EMPTY
     return json.dumps(v, ensure_ascii=False)
 
 
@@ -41,11 +43,11 @@ def header(node):
     哪一行是谁给的由 `prose.py` 的 input 节说，行内只留键和值。
     """
     return "\n".join([
-        "name: %s" % (node.name or "(无)"),
-        "detail: %s" % (node.detail or "(无)"),
-        "notes: %s" % (node.notes or "(无)"),
-        "accept: %s" % (node.accept or "(无)"),
-        "kind: %s" % (node.kind or "(无)"),
+        "name: %s" % (node.name or EMPTY),
+        "detail: %s" % (node.detail or EMPTY),
+        "notes: %s" % (node.notes or EMPTY),
+        "accept: %s" % (node.accept or EMPTY),
+        "kind: %s" % (node.kind or EMPTY),
         "gate: %s" % as_json(bool(node.gate)),
         "conc_range: %s" % as_json(node.conc_range)])
 
@@ -56,7 +58,7 @@ def lineage(node):
         return ""
     lines = ["上层意图链（从根到你上层，只读）:"]
     for i, (name, detail) in enumerate(node.lineage, start=1):
-        lines.append("  %d. %s: %s" % (i, name, detail or "(无)"))
+        lines.append("  %d. %s: %s" % (i, name, detail or EMPTY))
     return "\n\n" + "\n".join(lines)
 
 

@@ -3,7 +3,7 @@
 树长什么样是展示的变因，所以住终端层、不碰协议字段序列化：字段形状变了这里只是少画/多画一行。
 """
 
-from core.protocol.fields import SATISFIED
+from core.protocol.fields import DISPATCH, LEAF, SATISFIED
 
 
 def render_tree(root, registry, prefix="", is_last=True, lines=None, streams=None,
@@ -20,7 +20,7 @@ def render_tree(root, registry, prefix="", is_last=True, lines=None, streams=Non
     mark = "✓" if root.verdict == SATISFIED else ("✗" if root.verdict else "·")
     if lines is None:
         lines = []
-    tag = "%s%s" % ({"dispatch": "[分配]", "leaf": "[叶子]"}.get(root.kind, "[入口]"),
+    tag = "%s%s" % ({DISPATCH: "[分配]", LEAF: "[叶子]"}.get(root.kind, "[入口]"),
                      " [门槛]" if root.gate else "")
     if compact:
         # 实时视图：一行一个节点，正在说什么就显示什么（结论留到跑完的详细帧）

@@ -12,8 +12,9 @@ import re
 
 from ..prompts import feedback
 from ..prompts.messages import result_marks
-from .fields import EXTERNAL_CLASSES, SATISFIED, UNSATISFIED, VERDICTS, norm
-from .tool_specs import ACTION_TOOLS
+from .fields import (EXTERNAL_CLASSES, KINDS, SATISFIED, UNSATISFIED, VERDICTS,
+                     norm)
+from tools import ACTION_TOOLS
 
 # "可测物理量"：日期、≥2 位数字、标识符；单个数字不算
 ANCHOR_RE = re.compile(
@@ -24,12 +25,11 @@ def anchors(text):
     return set(ANCHOR_RE.findall(text or ""))
 
 
-def inherits(parent_accept, child_accept):
-    """子任务的验收标准是否继承了父任务的同一可测物理量。"""
-    a = anchors(parent_accept)
-    if not a:
+def covers(anchor_set, text):
+    """`text` 是否命中给定锚点集；空集不构成约束（放行）。anchors / 继承校验共用。"""
+    if not anchor_set:
         return True
-    return any(x in (child_accept or "") for x in a)
+    return any(x in (text or "") for x in anchor_set)
 
 
 def parse_range(v):
@@ -64,7 +64,7 @@ def clean_spec(spec):
     if missing:
         why.append(feedback.missing_fields(missing))
     # kind 不默默兜底成 dispatch：写错不是非法值，是没填对
-    if kind not in ("dispatch", "leaf"):
+    if kind not in KINDS:
         why.append(feedback.bad_kind(kind))
     if not out["conc_range"]:
         why.append(feedback.bad_conc_range())

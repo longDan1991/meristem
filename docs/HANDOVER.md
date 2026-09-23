@@ -5,6 +5,14 @@
 **这份只讲进度与交接**：怎么跑、东西在哪、做到哪一步、还剩什么、踩过哪些坑。
 **设计上的本质与不变量在 `docs/PROMPTS.md`**（原 `docs/DESIGN.md` 已删，内容并入其中）—— 这里不重复它们。
 
+> ⚠️ **本文档写于 2026-09-17，正文按当时 `tree/` 布局写的；2026-09-22 起代码已重构。**
+> 现在的结构是 `core/`（protocol + runtime + prompts）+ `tools/`（工具）+ `terminal/`（终端）。
+> `turn.py` / `hands.py` / `scheduler.py` / `reconcile.py` / `intake.py` / `tool_specs.py` /
+> `tree/` 这些名字**都不存在了**：入口（intake）就是会话树的根节点（不是独立循环），
+> 工具实现住 `tools/defs.py`（schema 与实现一体），控制流只剩 `core/runtime/loop.py` 一个。
+> 下面 §0–§8 的叙述按当时布局写，模块名一律以 §2.1 的**当前代码地图**为准；
+> 各包 docstring 与 `docs/PROMPTS.md` 是当前真相。
+
 > **2026-09 删除：keywords 检索层整体移除。** 老树索引（先例）、能力库/盒子
 > （现成做法、`search_tools`、出生即注入）全部删掉，`keywords` 字段不再存在；
 > 分配节点 / 叶子节点的分工保留（`alloc.md` / `leaf.md` 还在，内容已去掉
@@ -73,7 +81,7 @@
 工作区里还有 29 场「入口并入根之前」的过渡格式会话，当**只读档案**留着
 （`load` 能读回任务树接着跑，但没有入口对话）。
 
-测试：**7 个测试文件、200+ 断言，全离线，不调模型**（见 §6）。
+测试：**8 个测试文件、200+ 断言，全离线，不调模型**（见 §6）。
 
 ---
 
@@ -120,41 +128,37 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 
 ### 2.1 代码地图
 
-| 文件 | 行数 | 干什么 |
-|---|---|---|
-| `main.py` | | **程序入口 + 初始化**：`init()` 里定下跑之前需要的一切（记录根给 `store`、工作目录、真模型），再把控制权交给 `cli`。这里是唯一初始化点 |
-| `cli.py` | | **命令行**：`parse_args` / `run` / `main` —— 只剩 `-r` 一个参数，解析后交给 `terminal.chat.run_session` |
-| `terminal/chat.py` | | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时选完老会话就 **`Store.load(id)` 读回整棵 Node 树**放进 `env["store"]`；`converse` 是终端话轮。初始化（工作区 / API key / 记录根）在 `main.py` |
-| `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`，树的视图 `render_tree` 在 `view.py`（展示变因，不碰协议）。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
-| `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
-| `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
-| `tree/prompts/messages.py` | 126 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `base_user`（线上字节稳定基础消息）/ `child_result`（下层结论注入，带 id 标记）/ `result_marks`（从对话推导已投递的孩子 id / 名字） |
-| `tree/runtime/intake.py` | 112 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走它自己的 Loop sink（`subscribe` 暴露） |
-| `tree/config.py` | 53 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
-| `tree/compression.py` | 81 | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |
-| `tree/llm.py` | 172 | LLM（OpenAI 兼容；`acompletion` 真异步、流式、思考；`Message` = 文本 + 工具调用） |
-| `tree/tools.py` | 132 | 叶子的手（bash 真异步 / read / write）。截断与超时的落点；环境失败=观测，不 raise |
-| `tree/effects.py` | 86 | effects 抽取（bash/write 同一套壳；只进 trace 事件，不落节点状态） |
-| `tree/protocol/fields.py` | 123 | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `deferred`（门槛暂缓计划）+ `EXTERNAL_CLASSES`。渲染不在协议层 —— 树的视图在 `terminal/view.py` |
-| `tree/protocol/gate.py` | 180 | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
-| `tree/protocol/tool_specs.py` | 160 | **协议层**：工具定义（pydantic schema + FastMCP 注册 + OpenAI 适配器）+ `NODE_TOOLS`（每个节点类型的工具清单，单一事实）。`create_children` / `bash` / `read` / `write` / `conclude` / `submit_root` |
-| `tree/runtime/store.py` | | **一场会话的存储 —— 一个 `Store` 对象**：记录根由 `store.init(root)` 在程序开始时定（main.py 调）；接口 `Store.roots()`（会话列表）/ `Store.load(session)`（会话 id → 树）/ `Store.new(root, seed)` / `store.node(nid)` / `store.put(nodes, on_id)`（一组完整 Node 挂到 on_id 下：新增/更新内存 + **自动落盘**）。写盘是**内存缓冲 + `pydash.throttle` 节流懒写**（最多每 200ms 一次），读记录前/进程退出时自动补齐 —— 没有 drain，调用方只管 put/record。`Store.iter_lines`/`Store.label` 是读记录/摘要 |
-| `tree/runtime/hands.py` | 60 | bash/write 串行执行（asyncio 单消费者队列，无锁；工具异常由 done-callback 原样交付） |
-| `tree/runtime/loop.py` | | **消息循环**（唯一能力）：一轮 = before_chat → 问模型 → after_chat → 跑工具 → after_tool。骨架（问模型、跑工具、写对话、发事件）全在 `Loop` 里；事件词汇（`EventType`）+ 钩子契约（`Hooks`）+ 账本（`Transcript`：系统提示词 + 对话）也在这。`Loop` **内建**自己的 `EventSink` 并拼好带 scope 的 emit，消费方经 `Loop.subscribe` 订阅（调度器把外界的 consumer 逐个订阅到每个 Loop） |
-| `tree/events.py` | 45 | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 —— 词汇在 `loop.py`，两者不同文件 |
-| `tree/runtime/turn.py` | 480 | 一个节点的语义：`node_hooks`（`before_chat` / `after_chat` / `after_tool`）+ `node_spec`（喂模型的工具声明）+ `node_tools`（名字 → 执行函数）。`create_children` / `bash` / `read` / `write` / `conclude` 的实现在这里（ContextVar 注入每节点运行时）；产出的记账由工具自己报 |
-| `tree/runtime/scheduler.py` | | **调度器**（**真异步**）：广度优先、并行扇出、门槛。每个节点 = 一个完整的 `run_node` task；调度器只处理 `suspend`（等孩子）和 `stop`（完工），并发出生/完工的 `loop_start` / `loop_end` 事件。编排（排队 / 结算）在 `reconcile.py`，resume 时补投递 + 共享谓词重排队列 |
-| `tree/runtime/reconcile.py` | 93 | **编排纯逻辑（调度与恢复共用一份）**：`actionable`（该不该调 LLM：没出结论 + 孩子全回话 + 最后一条不是模型说的）/ `settle`（孩子结论结算：投递 + 门槛续跑/作废）/ `gate_child` / `make_child` |
-| `docs/PROMPTS.md` | | **设计文档：本质与不变量**（改代码前先看） |
-| `docs/HANDOVER.md` | | 本文档：怎么跑、资产在哪、剩余工作 |
+| 文件 | 干什么 |
+|---|---|
+| `main.py` | **程序入口 + 初始化**：`init()` 检查 API key、确保工作区存在并 chdir 进去，然后 `sys.exit(cli.main())`。唯一初始化点 |
+| `cli.py` | **命令行**：`parse_args`（只剩 `-r`）→ `asyncio.run` 派发到 `terminal.chat.run_session` |
+| `core/__init__.py` | 包初始化：`import litellm` 前钉死本地模型成本表（`LITELLM_LOCAL_MODEL_COST_MAP`），离线可跑 |
+| `core/config.py` | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7）：`WORKSPACE` / `COMPRESS` / `WORKERS` |
+| `core/llm.py` | LLM（OpenAI 兼容；`acompletion` 真异步流式 + 思考；`Message` = 文本 + 工具调用 + `usage`）；`ChatPool` = `llm.chat` 的并发上限（消息传递、无锁） |
+| `core/events.py` | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 |
+| `core/compression.py` | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |
+| `core/effects.py` | effects 抽取（bash/write 同一套壳；只进 trace 事件，不落节点状态） |
+| `core/protocol/fields.py` | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `node_to_dict` / `node_from_dict` / `task_root` / `is_task_root` + `EXTERNAL_CLASSES` / `VERDICTS` |
+| `core/protocol/gate.py` | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
+| `core/runtime/plan.py` | 纯规则：`which_of`（节点类型 → 提示词/工具类型）/ `actionable`（该不该调 LLM：没出结论 + 最后一条不是 assistant）/ `make_child` |
+| `core/runtime/dialogue.py` | 一个节点的平铺对话账本（assistant / tool / user / feedback 写方法）+ `pair` 线上配对规范化（补占位 tool 回话，不改账本） |
+| `core/runtime/store.py` | **一场会话的存储 —— 一个 `Store` 对象**：树 + 记录落盘（内存缓冲 + `pydash.throttle` 节流懒写）；接口 `Store.roots()` / `Store.load(session)` / `Store.new(root, seed)` / `put` / `append_*` / `set_verdict`；检查点 = Node 全字段 + 对话增量。`Store.iter_lines` 读记录 |
+| `core/runtime/loop.py` | **唯一的控制流**：扫活跃节点 → 调 LLM / 异步跑工具 → 折回；事件只发 `loop_start` / `loop_end` / `message_update`（带 scope）。`run(store, llm, ...)` 是入口 |
+| `core/prompts/` | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `NODE_TOOLS` 推导、`messages.py` 节点消息拼接（header / lineage / base_user / child_result / result_marks）、`feedback.py` 模型会读到的反馈文本。`__init__.py` 是节组装器（`build_system_sections` + `render_system` + `render_turn`） |
+| `tools/specs.py` | **工具清单单一事实**：`mcp` 实例 + `NODE_TOOLS`（alloc / leaf / intake 各自的工具名）+ `ChildSpec`（形式字段形状）+ `allowed_names` / `openai_tools`（转 litellm 要的 OpenAI 格式） |
+| `tools/defs.py` | 工具实现：`@mcp.tool` 函数（`create_children` / `conclude` / `submit_root` / `bash` / `read` / `write`，schema 与实现一体）+ `run_tool` 驱动（ContextVar 注入 `(loop, nid)`） |
+| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时 `Store.load(id)` 读回整棵树；`converse` 是终端话轮（ask / say / 事件路由 / rich Live 树视图） |
+| `terminal/view.py` | 树的视图：`render_tree`（每节点一行，运行中 ·、出结论 ✓/✗；compact 实时视图带吐字尾巴） |
+| `terminal/picker.py` | `-r` 的会话选择器（prompt_toolkit 自绘列表） |
+| `docs/PROMPTS.md` | **设计文档：本质与不变量**（改代码前先看） |
+| `docs/HANDOVER.md` | 本文档：怎么跑、资产在哪、剩余工作 |
 
-**并发模型（P4 后）**：整个运行时是 asyncio —— 一个节点的一回合 = 一个
-`asyncio.Task`（`scheduler` 用 `wait(FIRST_COMPLETED)` 回收，`workers` 是**同时在飞的
-`llm.chat` 数**，`ChatPool` 限的是最贵的那个资源）；LLM 走 `litellm.acompletion`、bash 走 `asyncio` 子进程，都不占线程。
-`hands` 用**单消费者队列**串行 bash/write（AGENTS §9，无锁）。
-**仅有的线程是会话记录文件**（`Store` 内部的 `_RecordFile`）：它是单一 I/O 记账者（写 jsonl），
-不是并发模型；把 writer 线程换成 task 只增加改动面、不换任何东西，所以留着。
-写盘节奏由 `pydash.throttle` 控（成熟库，不自写节流）。
+**并发模型**：整个运行时是 asyncio —— 一场会话只有一个 `Loop`（`core/runtime/loop.py`）：
+每轮把活跃节点并发发 LLM（`ChatPool` 限同时在飞的 `llm.chat` 数，最贵的资源），
+工具调用也并发发（`tools/defs.run_tool` 在 asyncio task 里跑，ContextVar 注入现场；
+bash 走 `asyncio` 子进程），都不占线程。无锁：树的变更一律走 `Store` 的写入方法，
+由单线程事件循环串行化（AGENTS §9）。落盘是内存缓冲 + `pydash.throttle` 节流懒写
+（成熟库，不自写节流），读记录前 / 进程退出时统一 flush。
 
 ### 2.2 真实数据资产（在工作区里）
 
@@ -264,9 +268,10 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tests/test_tty.py` | 53 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**裸 `--intake` 先收开场白**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、tree 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
 | `tests/test_compression.py` | 19 | 平铺对话（分配节点和叶子同构）：asst/tool 配对、压缩只发生在发送边界（存储原文、线上压短、user 一字未动）、LOG 折叠嵌取回标记且按 hash 可逆、`TREE_COMPRESS=0` 保险阀、压不动的大输出完整到达 |
 | `tests/test_resume.py` | 44 | 会话续跑：从 {node, msgs} 检查点重建、崩溃窗口补投递、门槛续跑/作废、in_flight 树接着跑、结论回填、共享谓词重排队列 |
+| `tests/test_llm.py` | 12 | `llm._stream` 流式解析：文本/思考/工具参数两段碎片拼回完整 Message、usage 随 Message 走、坏参数 JSON 当场炸、自定义型 tool-call 跳过、多个工具按 index 排序 |
 
 ```bash
-for t in protocol tools intake compression resume cli tty; do python3 tests/test_$t.py; done
+for t in protocol tools intake compression resume cli tty llm; do python3 tests/test_$t.py; done
 ```
 
 **待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）。

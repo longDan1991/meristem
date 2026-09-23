@@ -7,22 +7,32 @@ intake: submit_root）。每次调用由 Loop 用 `run_tool` 驱动，`(loop, ni
 返回 `{"text": ...}`：None = 结构类工具成功、不写 tool 回话；字符串 = 观测 / 拒绝理由。
 """
 
+import asyncio
 import contextvars
 import os
+import signal
+import subprocess
+import time
 from typing import Annotated
 
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ValidationError as ToolValidationError
 
-from ..compression import RETRIEVE_NAME, retrieve_original
-from ..effects import abs_path, effects_of
-from ..protocol.fields import EXTERNAL_CLASSES, SATISFIED, VERDICTS
-from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits, validate_root
-from ..protocol.tool_specs import ChildSpec, mcp
-from ..prompts import feedback
-from ..prompts.messages import base_user, child_result, result_marks
-from ..tools import bash as _bash, read as _read, write as _write
-from .plan import make_child
+from core.compression import RETRIEVE_NAME, retrieve_original
+from core.effects import abs_path, effects_of
+from core.protocol.fields import EXTERNAL_CLASSES, NOT_STARTED, SATISFIED, VERDICTS, task_root
+from core.protocol.gate import anchors, clean_conclusion, clean_spec, covers, validate_root
+from core.prompts import feedback
+from core.prompts.messages import base_user, child_result, result_marks
+from core.runtime.plan import make_child
+from tools.specs import ChildSpec, mcp
+
+READ_CAP = 2000
+
+# bash 必须带超时，否则一条卡住的命令会钉死整棵树；超时也是一条必须当面说清的事实，
+# 否则模型会当成"工具坏了"原样重试。
+BASH_TIMEOUT = 120        # 默认：一条命令最多跑这么久
+BASH_TIMEOUT_MAX = 3600   # 上限：更久的事请改成后台 + 轮询
 
 # Loop 调用工具前写入 (loop, nid)；工具函数用 Depends 注入。
 _binding = contextvars.ContextVar("tool_binding", default=None)
@@ -38,14 +48,8 @@ def _current(binding):
 
 
 def _root_anchors(node, registry):
-    """任务根（入口节点的孩子 / 无父节点）的可测物理量。"""
-    cur = node
-    while cur.parent:
-        p = registry.get(cur.parent)
-        if p is None or p.kind == "intake":
-            break
-        cur = p
-    return anchors(cur.accept)
+    """任务根的 accept 里的可测物理量（任务根 = 入口节点的孩子 / 无父节点）。"""
+    return anchors(task_root(node, registry).accept)
 
 
 def _record_effects(store, nid, tool, args, eff, pre, created, modified):
@@ -58,6 +62,24 @@ def _action_result(store, nid, tool, args, obs):
     """一次动作的收尾：把事实记进 trace，返回给模型看的观测文本。"""
     store.record(nid, "tool", {"tool": tool, "args": args, "obs": str(obs)})
     return obs
+
+
+def _fs_actual(declared, doomed, before):
+    """声明的路径对账成实际发生的 create/modify/delete（动作之后跑）。
+
+    `before` 是动作**之前**的存在性，调用方必须动作前捕获（动作后再查就是"已经发生"）。
+    """
+    created = [p for p in declared if not before[p] and os.path.exists(p)]
+    modified = [p for p in declared if before[p] and os.path.exists(p)]
+    deleted = [p for p in doomed if before[p] and not os.path.exists(p)]
+    return created, modified, deleted
+
+
+def _finish(store, nid, tool, obs, eff, pre, *, effects_args, tool_args,
+            created=(), modified=()):
+    """一次动作的收尾：effects 预测与 tool 观测两笔事实进 trace，返回给模型看的文本。"""
+    _record_effects(store, nid, tool, effects_args, eff, pre, created, modified)
+    return {"text": _action_result(store, nid, tool, tool_args, obs)}
 
 
 # ---------------------------------------------------------------- 结论的语义
@@ -89,7 +111,7 @@ def _resolve_gate(store, nid):
                      {"gate": node.name, "started": [c.name for c in deferred]})
     else:
         for c in deferred:
-            store.set_verdict(c.id, "未启动", feedback.gate_failed(node.conclusion), [], [])
+            store.set_verdict(c.id, NOT_STARTED, feedback.gate_failed(node.conclusion), [], [])
         store.record(parent.id, "gate_failed",
                      {"gate": node.name, "reason": node.conclusion,
                       "skipped": [c.name for c in deferred]})
@@ -118,19 +140,20 @@ async def create_children(children: list[ChildSpec],
     有门槛时只有门槛孩子拿到任务，其余对话为空 = 暂缓；成功不写 tool 回话。
     """
     _loop, store, nid, node = _current(_b)
+    parent_anchors = anchors(node.accept)
+    root_anchors = _root_anchors(node, store.registry)
     specs, reject = [], None
     for raw in [c.model_dump() for c in children]:
         s, why = clean_spec(raw)
         if why:
             reject = why
             break
-        ra = _root_anchors(node, store.registry)
-        if not (inherits(node.accept, s["accept"])
-                and ((not ra) or any(x in s["accept"] for x in ra))):
-            reject = feedback.criterion_drift(ra or anchors(node.accept))
+        if not (covers(parent_anchors, s["accept"])
+                and covers(root_anchors, s["accept"])):
+            reject = feedback.criterion_drift(root_anchors or parent_anchors)
             store.record(nid, "criterion_drift",
                          {"child": s["name"], "accept": s["accept"],
-                          "root_anchors": sorted(ra)})
+                          "root_anchors": sorted(root_anchors)})
             break
         specs.append(s)
     if reject:
@@ -202,7 +225,7 @@ async def bash(
                             "命令是唯一能改变世界的东西。"],
         timeout: Annotated[int, "超时秒数。默认 120，上限 3600；超了连同子进程一起被杀，"
                                 "并明说是超时、把已产生的输出交给你。跑很久就调大，"
-                                "或 nohup <cmd> > run.log 2>&1 & 起后台再轮询。"] = 120,
+                                "或 nohup <cmd> > run.log 2>&1 & 起后台再轮询。"] = BASH_TIMEOUT,
         _b=Depends(get_binding)) -> dict:
     """跑一条命令。命令是唯一能改变世界的东西，一次一条，次数不限。"""
     _loop, store, nid, _node = _current(_b)
@@ -213,32 +236,100 @@ async def bash(
                                        feedback.empty_cmd())}
     eff, pre = effects_of("bash", {"cmd": cmd}, cwd=cwd)
     declared = eff["fs"]["create"] + eff["fs"]["modify"]
-    existed = {p: os.path.exists(p) for p in declared}
     doomed = eff["fs"]["delete"]
-    doomed_existed = {p: os.path.exists(p) for p in doomed}
-    obs = str(await _bash(cmd, timeout=timeout))
-    created = [p for p in declared if not existed[p] and os.path.exists(p)]
-    modified = [p for p in declared if existed[p] and os.path.exists(p)]
-    deleted = [p for p in doomed if doomed_existed[p] and not os.path.exists(p)]
+    before = {p: os.path.exists(p) for p in declared + doomed}
+    obs = str(await _run_bash(cmd, timeout=timeout))
+    created, modified, deleted = _fs_actual(declared, doomed, before)
     eff["fs"] = {"create": created, "modify": modified, "delete": deleted}
-    _record_effects(store, nid, "bash", {"cmd": cmd}, eff, pre, created, modified)
-    return {"text": _action_result(store, nid, "bash",
-                                   {"cmd": cmd, "timeout": timeout}, obs)}
+    return _finish(store, nid, "bash", obs, eff, pre,
+                   effects_args={"cmd": cmd},
+                   tool_args={"cmd": cmd, "timeout": timeout},
+                   created=created, modified=modified)
+
+
+async def _run_bash(cmd, timeout=None):
+    """跑一条命令：总是有超时，但超时可见、可调、会连子进程一起杀。真异步，不占线程。"""
+    try:
+        t = int(timeout) if timeout not in (None, "") else BASH_TIMEOUT
+    except (TypeError, ValueError):
+        t = BASH_TIMEOUT
+    if t <= 0:
+        t = BASH_TIMEOUT
+    asked = t
+    if t > BASH_TIMEOUT_MAX:
+        t = BASH_TIMEOUT_MAX
+    try:
+        p = await asyncio.create_subprocess_shell(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True)
+    except OSError as e:
+        return feedback.tool_error(e)
+    # 增量读：`wait_for(p.communicate(), t)` 取消时会把已读数据一起丢掉，那样超时就交不回输出
+    chunks, timed_out = [], False
+    deadline = time.monotonic() + t
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        try:
+            chunk = await asyncio.wait_for(p.stdout.read(65536), left)
+        except asyncio.TimeoutError:
+            timed_out = True
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    if timed_out:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except OSError:
+            p.kill()
+    out = b"".join(chunks).decode("utf-8", "replace").strip()
+    rc = await p.wait()
+    if timed_out:
+        note = ("\n[超时] 这条命令跑了 %d 秒还没结束，已经被连同它起的子进程一起杀掉。"
+                % t)
+        if asked > BASH_TIMEOUT_MAX:
+            note += "（你写的是 %d 秒，被夹到上限 %d 秒）" % (asked, BASH_TIMEOUT_MAX)
+        if out:
+            note += "\n已经产生的输出在上面（不是全部）。"
+        else:
+            note += "\n它一点输出都没来得及给。"
+        note += ("\n要跑更久：把 args.timeout 调大（上限 %d 秒），"
+                 "或者把长任务改成后台：`nohup <cmd> > run.log 2>&1 &`，"
+                 "然后轮询 run.log 和产物。"
+                 % BASH_TIMEOUT_MAX)
+        return (out + note).strip()
+    return out + ("\n[exit=%d]" % rc if rc else "")
 
 
 @mcp.tool
 async def read(path: Annotated[str, "要读的文件路径（相对工作区）。"],
                offset: Annotated[int, "从第几个字开始读。"] = 0,
-               limit: Annotated[int, "最多读多少字。"] = 2000,
+               limit: Annotated[int, "最多读多少字。"] = READ_CAP,
                _b=Depends(get_binding)) -> dict:
     """读文件的一段，并明说这段在哪、还有多少。"""
     _loop, store, nid, _node = _current(_b)
-    obs = str(_read(path, offset=offset, limit=limit))
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            s = f.read()
+    except OSError as e:
+        obs = feedback.tool_error(e)
+    else:
+        n = len(s)
+        start = max(0, int(offset or 0))
+        cap = max(1, int(limit or READ_CAP))
+        seg = s[start:start + cap]
+        end = start + len(seg)
+        head = "[%s 共 %d 字，本段 %d-%d]" % (path, n, start, end)
+        if end < n:
+            head += " 还有 %d 字未显示 —— read(offset=%d) 取下一段" % (n - end, end)
+        obs = head + "\n" + seg
     eff, pre = effects_of("read", {"path": path}, cwd=os.getcwd())
-    store.record(nid, "effects", {"tool": "read", "args": {"path": path},
-                                  "effects": eff, "前置条件": pre})
-    return {"text": _action_result(store, nid, "read",
-                                   {"path": path, "offset": offset, "limit": limit}, obs)}
+    return _finish(store, nid, "read", obs, eff, pre,
+                   effects_args={"path": path},
+                   tool_args={"path": path, "offset": offset, "limit": limit})
 
 
 @mcp.tool
@@ -251,13 +342,20 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
     cwd = os.getcwd()
     ap = abs_path(path, cwd)
     existed = bool(ap) and os.path.exists(ap)
-    obs = str(_write(path, content))
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        obs = feedback.tool_error(e)
+    else:
+        obs = "written: %s (%d bytes)" % (path, len(content))
     eff, pre = effects_of("write", {"path": path}, cwd=cwd, existed_before=existed)
-    created = [ap] if (ap and not existed and os.path.exists(ap)) else []
-    modified = [ap] if (ap and existed and os.path.exists(ap)) else []
-    _record_effects(store, nid, "write", {"path": path}, eff, pre, created, modified)
-    return {"text": _action_result(store, nid, "write",
-                                   {"path": path, "content": content}, obs)}
+    created, modified, _ = _fs_actual([ap] if ap else [], [],
+                                      before={ap: existed} if ap else {})
+    return _finish(store, nid, "write", obs, eff, pre,
+                   effects_args={"path": path},
+                   tool_args={"path": path, "content": content},
+                   created=created, modified=modified)
 
 
 # ---------------------------------------------------------------- 驱动

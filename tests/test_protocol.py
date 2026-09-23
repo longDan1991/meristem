@@ -18,16 +18,16 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.llm import Message, ToolCall                      # noqa: E402
-from core.protocol.fields import Node                # noqa: E402
-from core.prompts import (build_system_sections, render_system,  # noqa: E402
+from harness import line
+from core.llm import Message, ToolCall
+from core.protocol.fields import Node
+from core.prompts import (build_system_sections, render_system,
                           render_turn)
-from core.prompts.messages import base_user, header, lineage  # noqa: E402
-from core.runtime.loop import run as run_loop        # noqa: E402
-from core.runtime import store as store_mod          # noqa: E402
-from core.runtime.store import Store                 # noqa: E402
-from core import config as cfg                       # noqa: E402
+from core.prompts.messages import base_user, header, lineage
+from core.runtime.loop import run as run_loop
+from core.runtime import store as store_mod
+from core.runtime.store import Store
+from core import config as cfg
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
@@ -56,7 +56,7 @@ class Scripted:
     """按平铺对话回话（发工具调用），mode 决定行为；每个节点都是完整的 Loop。"""
 
     def __init__(self, mode):
-        self.mode, self.calls, self.last_usage = mode, 0, {}
+        self.mode, self.calls = mode, 0
 
     @staticmethod
     def _count(messages, tname):
@@ -198,11 +198,6 @@ def has_child_node(recs):
     """记录里有没有带 parent 的节点（= 真的启动过子节点）。"""
     return any(((r.get("payload") or {}).get("node") or {}).get("parent")
                for r in recs if r["kind"] == "state")
-
-
-def line(tag, cond, detail=""):
-    print("  %s %-50s %s" % ("✓" if cond else "✗", tag, detail))
-    return bool(cond)
 
 
 # 节点最后落盘的对话（历史只活在这一处）；检查点是增量的，这里按文件顺序拼回全量。
@@ -482,12 +477,8 @@ def main():
     print("L. 并行工具调用：一次回复多个工具 → 全部执行，全部完成再继续")
 
     class Multi:
-        def __init__(self):
-            self.last_usage = {}
-
         async def chat(self, messages, temperature=0.2, on_delta=None,
                        on_reasoning=None, tools=None):
-            self.last_usage = {"total_tokens": 0}
             done = sum(1 for m in messages if m.get("role") == "tool")
             if done == 0:
                 return Message(tool_calls=[

@@ -15,8 +15,9 @@ from ..events import EventSink
 from ..llm import ChatPool
 from ..prompts import feedback, render_turn
 from ..prompts.messages import base_user
-from ..protocol.tool_specs import allowed_names, openai_tools
-from . import tools
+from ..protocol.fields import INTAKE, LEAF
+from tools import allowed_names, openai_tools
+from tools.defs import run_tool
 from .dialogue import pair
 from .plan import actionable, which_of
 
@@ -101,7 +102,7 @@ class Loop:
             self.started.add(nid)
             self.emit(nid, "loop_start", {"node": node})
 
-        wire = await _build_wire(self, nid)
+        wire = await _build_wire(self, node, which)
         store.record(nid, "%s_in" % which, base_user(node))
         assistant = await self.pool.chat(
             wire,
@@ -111,7 +112,7 @@ class Loop:
                 nid, "message_update", {"kind": "reasoning", "delta": t}
             ),
         )
-        _log_usage(self, nid, which)
+        _log_usage(self, nid, which, assistant.usage)
         store.record(
             nid,
             "%s_out" % which,
@@ -124,7 +125,7 @@ class Loop:
         )
         ids = store.append_assistant(nid, assistant.text, assistant.tool_calls)
 
-        if which == "intake" and not assistant.tool_calls:
+        if which == INTAKE and not assistant.tool_calls:
             self._fire(nid, self._ask(nid, assistant.text))
             return
         if assistant.tool_calls:
@@ -151,15 +152,16 @@ async def run(store, llm, *, workers=cfg.WORKERS, subscribe=None, ask=None, say=
 
 
 # ---------------------------------------------------------------- 内部
-async def _build_wire(loop, nid):
+async def _build_wire(loop, node, which):
     """这次发给模型的消息：system + 配对规范化后的平铺对话（叶子再压缩）。"""
     store = loop.store
-    which = which_of(store.registry[nid])
-    wire = render_turn(which, store.registry[nid]) + pair(store.dialogue(nid).to_list())
+    nid = node.id
+    msgs = store.dialogue(nid).to_list()
+    wire = render_turn(which, node) + pair(msgs)
     if (
-        which == "leaf"
+        which == LEAF
         and cfg.COMPRESS
-        and any(m.get("role") == "tool" for m in store.dialogue(nid).to_list())
+        and any(m.get("role") == "tool" for m in msgs)
     ):
         result = await compress_messages(wire, getattr(loop.llm, "model", ""))
         wire = result.messages
@@ -184,24 +186,24 @@ async def _one_tool(loop, nid, which, tc, call_id):
     if tc.name not in names:
         store.append_tool(nid, call_id, feedback.unknown_tool(tc.name, names))
         return
-    text = await tools.run_tool(loop, nid, tc.name, tc.arguments)
+    text = await run_tool(loop, nid, tc.name, tc.arguments)
     if text is not None:  # None = 结构类成功，不写回话
         store.append_tool(nid, call_id, text)
 
 
-def _log_usage(loop, nid, phase):
-    u = getattr(loop.llm, "last_usage", None)
-    if not u:
+def _log_usage(loop, nid, phase, usage):
+    """把一次调用的 token 账记进 trace；`usage` 随 Message 回来，不经过共享状态。"""
+    if not usage:
         return
     loop.store.record(
         nid,
         "usage",
         {
             "phase": phase,
-            "prompt": u.get("prompt_tokens", 0),
-            "completion": u.get("completion_tokens", 0),
-            "reasoning": (u.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
-            "cached": (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
-            "total": u.get("total_tokens", 0),
+            "prompt": usage.get("prompt_tokens", 0),
+            "completion": usage.get("completion_tokens", 0),
+            "reasoning": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
+            "cached": (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            "total": usage.get("total_tokens", 0),
         },
     )

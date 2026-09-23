@@ -20,16 +20,19 @@ import pydash
 
 from core import config as cfg
 
-from ..protocol.fields import node_from_dict, node_to_dict
+from ..protocol.fields import INTAKE, is_task_root, node_from_dict, node_to_dict
 from ..prompts.messages import base_user
 from .dialogue import Dialogue
 
-_INTAKE_SLUG = hashlib.sha1(b"intake").hexdigest()[:6]
+_INTAKE_SLUG = hashlib.sha1(INTAKE.encode()).hexdigest()[:6]
 
 _ROOT = cfg.WORKSPACE
 
 # 懒写节奏：记录最多每这么久落一次盘（毫秒）
 _THROTTLE_MS = 200
+
+# 流式读遇到末行 JSON 坏掉时的哨兵：说明是被截断的半行，停在这里。
+_TRUNCATED = object()
 
 
 def init(root=None):
@@ -96,8 +99,7 @@ class Store:
         _flush_live()
         out = []
         for path in Store._paths():
-            registry = Store._registry_of(Store._read(path))
-            root = Store._root(registry)
+            _states, registry, root = Store._open(path)
             if root is not None:
                 out.append((root.id, Store._label(registry, path)))
         return out
@@ -108,9 +110,7 @@ class Store:
         """加载一棵树；找不到 / 没有 state 检查点 / 根不唯一都当场报错，不给半成品树。"""
         _flush_live()
         for path in cls._paths():
-            states = cls._read(path)
-            registry = cls._registry_of(states)
-            root = cls._root(registry)
+            states, registry, root = cls._open(path)
             if root is not None and root.id == session:
                 return cls._build(path, states, registry)
         raise ValueError("找不到会话 %r（记录根下没有这场会话）" % session)
@@ -122,7 +122,7 @@ class Store:
         store.put([root])
         if seed is not None:
             store.append_user(root.id, seed)
-        elif root.kind != "intake":
+        elif root.kind != INTAKE:
             store.append_user(root.id, base_user(root))
         return store
 
@@ -136,9 +136,6 @@ class Store:
         self._base = {}          # nid -> 上次检查点的消息起点（增量）
 
     # ─────────────────────────────────────────── 3. 读
-    def node(self, nid):
-        return self.registry.get(nid)
-
     def dialogue(self, nid):
         return self.state[nid]["dialogue"]
 
@@ -204,27 +201,44 @@ class Store:
         """
         _flush_live()
         want = tuple('"kind": "%s"' % k for k in kinds) if kinds else ()
+
+        def parse(raw, tolerate_truncated):
+            if want and not any(w in raw for w in want):
+                return None
+            line = raw.strip()
+            if not line:
+                return None
+            try:
+                return json.loads(line)
+            except ValueError:
+                if tolerate_truncated:
+                    return _TRUNCATED
+                raise
+
         with open(path, encoding="utf-8") as f:
             prev = None
             for raw in f:
                 if prev is not None:
-                    if not want or any(w in prev for w in want):
-                        line = prev.strip()
-                        if line:
-                            yield json.loads(line)
+                    rec = parse(prev, False)
+                    if rec is not None:
+                        yield rec
                 prev = raw
             if prev is not None:
-                if not want or any(w in prev for w in want):
-                    line = prev.strip()
-                    if line:
-                        try:
-                            yield json.loads(line)
-                        except ValueError:
-                            return
+                rec = parse(prev, True)
+                if rec is not _TRUNCATED and rec is not None:
+                    yield rec
 
     @staticmethod
     def label(path):
-        return Store._label(Store._registry_of(Store._read(path)), path)
+        _states, registry, _root_node = Store._open(path)
+        return Store._label(registry, path)
+
+    @staticmethod
+    def _open(path):
+        """一条记录 → (states, registry, 唯一根)；没有 / 根不唯一时 root=None。"""
+        states = Store._read(path)
+        registry = Store._registry_of(states)
+        return states, registry, Store._root(registry)
 
     @staticmethod
     def _paths():
@@ -275,11 +289,7 @@ class Store:
         stamp = time.strftime("%m-%d %H:%M", time.localtime(mtime))
         if not registry:
             return "%s （没有 state 检查点）" % stamp
-        intake = next((n for n in registry.values() if n.kind == "intake"), None)
-        if intake is not None:
-            tasks = [registry[c] for c in intake.children if c in registry]
-        else:
-            tasks = [n for n in registry.values() if n.parent is None]
+        tasks = [n for n in registry.values() if is_task_root(n, registry)]
         if not tasks:
             return "%s （还没跑过任务）" % stamp
         latest = tasks[0]

@@ -1,7 +1,7 @@
-"""协议的工具清单与 schema 适配。
+"""工具清单与 schema 适配（`mcp` 实例也住这里，工具注册共用同一实例）。
 
 `NODE_TOOLS` 是单一事实（alloc: create_children / conclude，leaf: bash / read / write /
-conclude，intake: submit_root）。工具实现是 `runtime/tools.py` 的 `@mcp.tool` 函数；
+conclude，intake: submit_root）。工具实现是 `tools/defs.py` 的 `@mcp.tool` 函数；
 本文件只管清单、`ChildSpec` 形状、把 mcp 工具转成 litellm 要的 OpenAI 格式。
 """
 
@@ -9,27 +9,28 @@ from fastmcp import FastMCP
 from fastmcp.utilities.json_schema import replace_refs
 from pydantic import BaseModel, Field
 
-from .. import config as cfg
-from ..compression import RETRIEVE_NAME, RETRIEVE_TOOL
+from core import config as cfg
+from core.compression import RETRIEVE_NAME, RETRIEVE_TOOL
+from core.protocol.fields import ALLOC, INTAKE, LEAF
 
-# 工具都注册在同一个实例上（实现在 runtime/tools.py 的 import 时注册）；进程内当定义表用，不跑 server
+# 工具都注册在同一个实例上（实现在 tools/defs.py 的 import 时注册）；进程内当定义表用，不跑 server
 mcp = FastMCP("tree")
 
 # 每个节点类型的工具清单 —— 单一事实。
 NODE_TOOLS = {
-    "alloc": ("create_children", "conclude"),
-    "leaf": ("bash", "read", "write", "conclude"),
-    "intake": ("submit_root",),
+    ALLOC: ("create_children", "conclude"),
+    LEAF: ("bash", "read", "write", "conclude"),
+    INTAKE: ("submit_root",),
 }
 
 # 叶子的动作工具 = 亲手接触世界的那些（结论审计的观测来源）；conclude 只是出结论。
-ACTION_TOOLS = tuple(n for n in NODE_TOOLS["leaf"] if n != "conclude")
+ACTION_TOOLS = tuple(n for n in NODE_TOOLS[LEAF] if n != "conclude")
 
 
 def allowed_names(which):
     """某节点类型这次能调的工具名 —— 工具清单的唯一出口（leaf 在压缩开时加取回工具）。"""
     names = NODE_TOOLS[which]
-    if which == "leaf" and cfg.COMPRESS:
+    if which == LEAF and cfg.COMPRESS:
         names = names + (RETRIEVE_NAME,)
     return names
 
@@ -68,8 +69,8 @@ async def openai_spec(name):
     t = await mcp.get_tool(name)
     if t is None:
         raise RuntimeError(
-            "工具 %r 还没注册：实现注册在 core/runtime/tools.py 的 import 时发生，"
-            "请先 import core.runtime.tools 再拿 schema。" % name)
+            "工具 %r 还没注册：实现注册在 tools/defs.py 的 import 时发生，"
+            "请先 import tools.defs 再拿 schema。" % name)
     params = _plain(replace_refs(t.parameters))
     params.pop("$defs", None)
     return {"type": "function", "function": {

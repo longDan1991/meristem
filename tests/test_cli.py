@@ -13,19 +13,10 @@ import io
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, ROOT)
-import main as main_mod                                     # noqa: E402
-import cli                                                  # noqa: E402
-import terminal.chat as chat                                # noqa: E402
-
-OK = []
-
-
-def line(tag, cond, detail=""):
-    print("  %s %-50s %s" % ("✓" if cond else "✗", tag, detail))
-    OK.append(bool(cond))
+from harness import OK, line, ROOT
+import main as main_mod
+import cli
+import terminal.chat as chat
 
 
 def run_session(resume, api_key="", traces=None):

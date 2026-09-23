@@ -1,10 +1,10 @@
 """模型会读到的反馈文本 —— 唯一来源。
 
 runtime / protocol 只决定"发生了什么"，不自己拼给模型看的话；会写回对话的句子都在这里注册。
-（工具字段 description 是另一回事，住 `protocol/tool_specs.py`。）
+（工具字段 description 是另一回事，住 `tools/specs.py`。）
 """
 
-from ..protocol.fields import VERDICTS
+from ..protocol.fields import KINDS, VERDICTS
 
 
 def pair_placeholder():
@@ -18,6 +18,10 @@ def bad_shape(err):
 
 def unknown_tool(name, allowed):
     return "你调用的 %s 不在这一层的工具里（你能用：%s）" % (name, " / ".join(allowed))
+
+
+def tool_error(err):
+    return "工具出错: %r" % err
 
 
 def empty_cmd():
@@ -48,7 +52,7 @@ def missing_fields(fields):
 
 
 def bad_kind(kind):
-    return "kind 必须是 dispatch 或 leaf（给的是 %r）" % kind
+    return "kind 必须是 %s（给的是 %r）" % (" 或 ".join(KINDS), kind)
 
 
 def bad_conc_range():

@@ -33,7 +33,7 @@ from .picker import pick_session
 from .view import render_tree
 from core import config as cfg
 from core.llm import LLM
-from core.protocol.fields import Node
+from core.protocol.fields import INTAKE, Node, is_task_root
 from core.runtime.loop import run
 from core.runtime.store import Store
 
@@ -139,7 +139,7 @@ async def run_session(a, session=None):
         _show_resumed(store)
     else:
         task = await opening(session)
-        env = {"store": Store.new(Node(name="会话", kind="intake"),
+        env = {"store": Store.new(Node(name="会话", kind=INTAKE),
                                   seed=_seed(task))}
     print("[trace] %s\n" % os.path.abspath(env["store"].path), flush=True)
 
@@ -331,13 +331,8 @@ async def converse(env, session=None):
         if node is None:
             return
 
-        def is_task_root(n):
-            # 任务根 = 入口节点的孩子：一个任务开始 / 结束了
-            return (n is not None and n.parent is not None
-                    and sroot is not None and n.parent == sroot.id)
-
         if type == "loop_start":
-            if is_task_root(node) and not node.verdict:
+            if is_task_root(node, registry) and not node.verdict:
                 running[0] = True
                 root_ref[0] = node
                 if live_ref[0] is None and sys.stdout.isatty():
@@ -349,7 +344,7 @@ async def converse(env, session=None):
         elif type == "loop_end":
             streams.pop(scope, None)      # 出结论就不留实时尾巴
             redraw()
-            if is_task_root(node):
+            if is_task_root(node, registry):
                 running[0] = False
                 _stop_run_input()
                 if live_ref[0] is not None:

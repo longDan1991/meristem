@@ -4,11 +4,25 @@
 `prose(which, name)` 是唯一出口，组装逻辑在 `prompts/__init__.py`。
 """
 
-from ..protocol.tool_specs import ChildSpec
+from ..protocol.fields import ALLOC, INTAKE, LEAF
+from tools import ChildSpec
 
 # 形式字段清单的唯一源 = ChildSpec 的字段定义；intake 不给 gate（根没有兄弟）。
 _FIELDS = " / ".join(ChildSpec.model_fields)
 _FIELDS_INTAKE = " / ".join(k for k in ChildSpec.model_fields if k != "gate")
+# alloc / leaf 的 input 段只有第一句不同，字段说明从这句起逐字相同。
+_FIELDS_WHAT = "下面这些字段名，值就是上层填的、或程序查出来的："
+
+
+def _fields_tail():
+    """alloc / leaf 的 input 段里逐字相同的尾部（字段清单 + 意图链说明）。"""
+    return [
+        "  %s" % _FIELDS,
+        "额外需要说明的是：",
+        "",
+        "  上层意图链: 从根到你上层的每一层 detail 的孤链。"
+        "这使得你可以明白最终意图，而不至于偏离主题。",
+    ]
 
 
 def _alloc_preamble():
@@ -28,12 +42,8 @@ def _alloc_process():
 def _alloc_input():
     lines = []
     lines.append("你收到的 user 消息会有任务信息，其结构和你将要拆分的任务是同构的 —— 行首就是")
-    lines.append("下面这些字段名，值就是上层填的、或程序查出来的：")
-    lines.append("  %s" % _FIELDS)
-    lines.append("额外需要说明的是：")
-    lines.append("")
-    lines.append("  上层意图链: 从根到你上层的每一层 detail 的孤链。"
-                 "这使得你可以明白最终意图，而不至于偏离主题。")
+    lines.append(_FIELDS_WHAT)
+    lines.extend(_fields_tail())
     lines.append("  本层已有尝试: 你每一次 create_children 拆了什么、下层回了什么结论 ——")
     lines.append("    已经试过的拆法都在这，别重复拆同一套。")
     return "\n".join(lines)
@@ -58,12 +68,8 @@ def _leaf_process():
 def _leaf_input():
     lines = []
     lines.append("你收到的 user 消息会有任务信息，其结构就是你上层拆任务时填的那些形式字段 ——")
-    lines.append("行首就是下面这些字段名，值就是上层填的、或程序查出来的：")
-    lines.append("  %s" % _FIELDS)
-    lines.append("额外需要说明的是：")
-    lines.append("")
-    lines.append("  上层意图链: 从根到你上层的每一层 detail 的孤链。"
-                 "这使得你可以明白最终意图，而不至于偏离主题。")
+    lines.append("行首就是" + _FIELDS_WHAT)
+    lines.extend(_fields_tail())
     lines.append("  观测历史: 你每一次工具调用之后，世界真实的回话会以**工具结果**的形式回到")
     lines.append("    对话里 —— 它就是你的观测历史。早的观测可能被压缩（文本里带取回标记），")
     lines.append("    压缩掉的细节用 headroom_retrieve 取回来。")
@@ -105,12 +111,12 @@ def _intake_input():
 
 
 _SECTIONS = {
-    "alloc": {"preamble": _alloc_preamble, "process": _alloc_process,
-              "input": _alloc_input},
-    "leaf": {"preamble": _leaf_preamble, "process": _leaf_process,
-             "input": _leaf_input},
-    "intake": {"preamble": _intake_preamble, "process": _intake_process,
-               "input": _intake_input},
+    ALLOC: {"preamble": _alloc_preamble, "process": _alloc_process,
+            "input": _alloc_input},
+    LEAF: {"preamble": _leaf_preamble, "process": _leaf_process,
+           "input": _leaf_input},
+    INTAKE: {"preamble": _intake_preamble, "process": _intake_process,
+             "input": _intake_input},
 }
 
 
