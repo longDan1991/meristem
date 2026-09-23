@@ -2,17 +2,16 @@
 
 所有消息拼接都在这里，`class Node`（fields.py）只装数据与协议逻辑，不碰字符串。
 
-  · `base_user(node)` —— 模型每次收到的**基础 user 消息**（字节稳定，节点出生后
-    不变）：形式字段 + 意图链。历史不在这里 —— 它走**平铺对话**（`turn.node_hooks`
-    它和累积的 assistant / tool 消息拼一起），每个节点（分配节点和叶子一样）都是
-    完整的 Loop，观测 / 尝试 / 下层结论以对话消息的形式逐条累积。
+  · `base_user(node)` —— 模型每次收到的**任务消息**（字节稳定，节点出生后
+    不变）：形式字段 + 意图链。它由创建者拼进节点的平铺对话 `msgs[0]`，
+    之后 assistant / tool / user 消息逐条累积。
 
-历史不渲染成视图：trace 里每条工具动作都有 `tool` 事件原文，节点每回合发出去
-的基础消息记 `%s_in` 事件 —— 线上模型看的是平铺对话里的 tool 消息。
+历史不渲染成视图：trace 里每条工具动作都有 `tool` 事件原文，节点每次发给模型的
+任务消息记 `%s_in` 事件 —— 线上模型看的是平铺对话里的 tool 消息。
 
-`child_result(rec)` 是调度器把"一个下层节点的结论"注入父节点对话时用的那一条
+`child_result(rec)` 是把"一个下层节点的结论"注入父节点对话时用的那一条
 （分配节点自己不看观测，它的观测 = 下层回话）。注入的文本带 `（id:…）` 标记 ——
-恢复时（`runtime/reconcile.py` 的 `result_ids`）靠它判断"哪个孩子的结论已经投递"。
+恢复时（`Store.conclude` 的 `result_ids`）靠它判断"哪个孩子的结论已经投递"。
 """
 
 import json
@@ -75,7 +74,7 @@ def header(node):
 
     这是"收到的东西与要交出去的东西同构"：同一个词既在收到的行首，
     也在它输出的 JSON 里，中间没有"中文标签 → 键"的翻译层可漂移。
-    哪一行是谁给的（上层给的 / 程序查出来的）由 `tree/prompts/prose.py` 的
+    哪一行是谁给的（上层给的 / 程序查出来的）由 `core/prompts/prose.py` 的
     input 节说，不放进行内 —— 行内只留键和值。
     """
     return "\n".join([
@@ -106,7 +105,7 @@ def base_user(node):
     """模型每次收到的基础 user 消息：出生后永不变（字节稳定）。
 
     形式字段 + 意图链。观测 / 尝试 / 下层结论不在基础里 —— 它们走平铺对话
-    （assistant/tool/user 消息逐条累积，`turn.node_hooks` 拼接发送）。字节稳定 ⇒
+    （assistant/tool/user 消息逐条累积）。字节稳定 ⇒
     provider KV 缓存前缀命中，分配节点和叶子同构。
     """
     return "%s%s" % (header(node), lineage(node))

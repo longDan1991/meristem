@@ -21,7 +21,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-from tree.llm import LLM                                       # noqa: E402
+from core.llm import LLM                                       # noqa: E402
 
 OK = []
 

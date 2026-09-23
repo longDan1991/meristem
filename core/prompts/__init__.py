@@ -15,23 +15,23 @@
     `skills.py`、tools / rules 两节从 `tool_specs.NODE_TOOLS` 的工具清单推导
     （工具清单变，操作纪律跟着变，docs/PROMPTS.md §4.2）。
 
-**system 不走 @mcp.prompt，也不和 user 消息混装**：`render_turn` 直接把
-[system, 基础 user] 两条分开返回（分配节点和叶子同构）；节点的累积历史
-（观测 / 尝试 / 下层结论）是**平铺对话**，由 `turn.node_hooks` 在基础消息后面拼接
-（每个节点都是完整的 Loop，`turn.py` 里所有节点统一维护 st["msgs"]）。
+**system 不走 @mcp.prompt，也不和任务消息混装**：`render_turn` 只返回 [system]；
+节点的任务（`base_user`）在它自己的平铺对话 `msgs[0]`，之后 assistant / tool / user
+逐条累积。发模型前由 `runtime/loop._build_wire` 把 system 与配对规范化后的对话拼成
+wire（没回话的 tool_call 补占位回话）。
 
 本文件只做三件事：按在场规则组装节（`build_system_sections`）、把节渲染成
 system 文本（`render_system`）、产出线上 wire（`render_turn`）。节点消息的
 拼接在 `messages.py`（class Node 不碰字符串）。
 
-每条硬性要求都对应 `tree/protocol/gate.py` 里的一处代码检查 —— 改一边就得看另一边：
+每条硬性要求都对应 `core/protocol/gate.py` 里的一处代码检查 —— 改一边就得看另一边：
 
     "除 notes 外全部必填"        →  clean_spec：缺一个当场拒
     "必须携带父的可测物理量"      →  inherits + 根锚点，当场拒绝
     "最多一个门槛"                →  门槛先做，不成立则分支作废
     "判定满足必须指得出证据"      →  指不出来就降级为未满足
     kind                          →  clean_spec：只能是 dispatch / leaf，不给兜底
-    外部需求四类                  →  EXTERNAL_CLASSES（tree/protocol/fields.py）
+    外部需求四类                  →  EXTERNAL_CLASSES（core/protocol/fields.py）
     字段的"本质"                  →  tool_specs.py 的 schema description（provider 原样喂模型）
 
 入口（`prompts/prose.py` 的 intake 三节）是同一个协议的第一环：它交出来的
@@ -45,13 +45,13 @@ import re
 
 from .. import config as cfg
 from ..protocol.tool_specs import NODE_TOOLS
-from .messages import base_user
+from . import feedback
 from .prose import prose
 from .rules import rules_section
 from .skills import skill_compression, skill_gate
 from .tools import tools_section
 
-__all__ = ["render_turn", "build_system_sections", "render_system"]
+__all__ = ["render_turn", "build_system_sections", "render_system", "feedback"]
 
 # 节名机器校验（pi 的 SYSTEM_PROMPT_SECTION_NAME，见 docs/PROMPTS.md §3.3）。
 SECTION_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -100,16 +100,11 @@ def render_system(sections):
 
 
 def render_turn(which, node=None):
-    """一个节点回合的线上消息（dict 列表，直接喂 litellm）。
+    """一个节点发给模型的 system 消息（dict 列表，直接喂 litellm）。
 
-    **system 与 user 分开**：第一条是 system（分节文本，经 render_system），
-    第二条是基础 user 消息（形式字段 + 意图链，字节稳定，见 messages.base_user）。
-    不注册 FastMCP prompt、不混装 —— 节点的累积历史由 `turn.node_hooks` 在基础消息
-    后面拼平铺对话（每个节点都是完整的 Loop）。
-    intake 没有节点消息（它的 user 是用户说的话，在对话里），只给 system。
+    **只给 system**：节点的任务消息和累积历史都在它自己的平铺对话（`msgs`）里 ——
+    子节点出生时任务（`base_user(node)`）就被拼进 msgs[0]，之后 assistant/tool/user
+    逐条累积。这里不重复拼任务，也不注册 FastMCP prompt。
     """
-    wire = [{"role": "system",
+    return [{"role": "system",
              "content": render_system(build_system_sections(which, node))}]
-    if which != "intake":
-        wire.append({"role": "user", "content": base_user(node)})
-    return wire

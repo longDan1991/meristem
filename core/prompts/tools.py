@@ -23,8 +23,7 @@ def tools_section(which):
     if which == "intake":
         lines.append("你每次回复二选一：")
     else:
-        lines.append("每次回复**必须且只能调用其中一个工具**"
-                     "（没调 = 协议违规，会被当场退回）：")
+        lines.append("你可以调用的工具（可以一次调用多个，它们并行执行）：")
     lines.append("")
     for name in NODE_TOOLS[which]:
         lines.append("  · %s —— %s" % (name, _TOOL_GUIDE[name]))

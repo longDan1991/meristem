@@ -53,11 +53,11 @@ from rich.text import Text
 
 from .picker import pick_session
 from .view import render_tree
-from tree import config as cfg
-from tree.llm import LLM
-from tree.protocol.fields import Node
-from tree.runtime.scheduler import run
-from tree.runtime.store import Store
+from core import config as cfg
+from core.llm import LLM
+from core.protocol.fields import Node
+from core.runtime.loop import run
+from core.runtime.store import Store
 
 PROMPT = "› "
 
@@ -115,11 +115,6 @@ async def opening(session=None):
     """
     session = session or _session()
     return await _listen(session)
-
-
-# 树里每个节点的实时尾巴只留这么多字：节点出结论就删，屏幕只画最后一段 ——
-# 内存和屏宽都有界，模型吐多长都不该把这块撑成无界缓存（AGENTS §11）。
-_STREAM_SHOW = 140         # 存进 streams / 画进树的尾巴长度
 
 
 def _fit(lines, max_h):
@@ -280,7 +275,7 @@ async def converse(env, session=None):
 
     # ── 任务树实时视图 ──
     # 调度器每开/关一个节点就发一个 loop_start / loop_end，每个节点的吐字按
-    # （见 runtime/turn.py 的接线）；终端收到就把**当前整棵树**重画一次：
+    # （见 core/runtime/loop.py 的接线）；终端收到就把**当前整棵树**重画一次：
     # 真终端用 rich Live 原地重画（跑的时候终端上没有别的东西在写，
     # 这一块只属于树），不是真终端（测试 / 管道）就逐帧追加。
     # 任务根的出生（入口节点的孩子）= 新任务开始，任务根出结论 = 这一轮跑完，
@@ -325,11 +320,11 @@ async def converse(env, session=None):
             narrate(frame)             # 非终端：逐帧追加
 
     def _push_stream(node_id, key, text):
-        # 只留尾巴，节点出结论时由 loop_end 删掉 —— 有界（§11）
+        # 整段留着（一个字不截），节点出结论时由 loop_end 删掉
         if not text:
             return
         buf = streams.setdefault(node_id, {"thinking": "", "speaking": ""})
-        buf[key] = (buf[key] + text)[-_STREAM_SHOW:]
+        buf[key] = buf[key] + text
         if live_ref[0] is not None:
             live_ref[0].update(current_frame())
 

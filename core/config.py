@@ -2,7 +2,7 @@
 
 **这是全项目唯一能定义这些路径的地方，而且必须是显式配置**
 （AGENTS §7）：`.env`（或环境变量）说了算，代码不替它推算。
-业务代码一律 `from tree.config import WORKSPACE` —— 不许自己拼路径、
+业务代码一律 `from core.config import WORKSPACE` —— 不许自己拼路径、
 不许 `Path(__file__).parent.parent / "data"`、不许拿 cwd 当数据根。
 
 跑出来的东西**一律落在工作区**：工作区既是 agent 的 cwd（上次写的代码和数据
@@ -45,6 +45,5 @@ WORKSPACE = _abs(_required("TREE_WORKSPACE"))
 COMPRESS = os.environ.get("TREE_COMPRESS", "1").strip().lower() not in \
     ("0", "false", "no", "off")
 
-# 同时在飞的模型调用数（ChatPool）：终端的唯一并发开关。限的是最贵的那个
-# 资源（llm.chat），不是节点数。CLI 不暴露参数，要改走环境变量。
+# 同时在飞的模型调用数（ChatPool）：限的是最贵的那个资源（llm.chat），不是节点数。
 WORKERS = int(os.environ.get("TREE_WORKERS", "6"))

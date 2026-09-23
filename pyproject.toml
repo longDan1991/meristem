@@ -7,7 +7,8 @@ dependencies = [
     "litellm",       # LLM 客户端（OpenAI 兼容端点；流式 / 重试 / usage）
     "python-dotenv",  # .env 解析
     "rich",           # 终端渲染 / 颜色 / TTY 检测
-    "fastmcp>=4.0.5",
+    "fastmcp>=4.0.5",  # 工具定义（@mcp.tool：schema + 实现一体）
+    "pydantic",       # 工具参数与形式字段的形状
     "prompt-toolkit>=3.0.53",
     "headroom-ai",
     "pydash>=8.1.0",

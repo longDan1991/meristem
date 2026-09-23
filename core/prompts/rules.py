@@ -13,8 +13,8 @@ def rules_section(which):
     lines = []
     tools = set(NODE_TOOLS[which])
     if which != "intake":
-        lines.append("每次回复必须且只能调用一个工具；"
-                     "没调 / 调多个 / 调不在本层列表里的 → 当场打回。")
+        lines.append("调用工具时可以一次调多个（并行执行），全部完成再继续；"
+                     "调不在本层列表里的 → 当场打回。")
         lines.append("已经试过的都记在历史里 —— 别重复撞同一堵墙。")
     if "create_children" in tools:
         lines.append("create_children 除 notes / gate 外全部必填：缺一个或形状不对，"

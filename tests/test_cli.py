@@ -89,7 +89,7 @@ def main():
     line("种子只写用户真说了什么", "用户没给" in chat_src)
     line("--intake 老路已删（入口默认就是 intake）", "--intake" not in src + cli_src)
     line("MockLLM 已删（不再有假模型去聊天的路）",
-         "MockLLM" not in open(os.path.join(ROOT, "tree", "llm.py"),
+         "MockLLM" not in open(os.path.join(ROOT, "core", "llm.py"),
                                encoding="utf-8").read())
 
     print("=" * 80)

@@ -17,8 +17,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import tree.tools as T                        # noqa: E402
-from tree.tools import read                  # noqa: E402
+import core.tools as T                        # noqa: E402
+from core.tools import read                  # noqa: E402
 
 
 def bash(*a, **k):

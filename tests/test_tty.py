@@ -44,10 +44,10 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 import terminal.chat as chat                               # noqa: E402
 from prompt_toolkit.input import create_pipe_input         # noqa: E402
-from tree.llm import Message, ToolCall                     # noqa: E402
-from tree.protocol.fields import Node                      # noqa: E402
-from tree.runtime import store as store_mod               # noqa: E402
-from tree.runtime.store import Store                     # noqa: E402
+from core.llm import Message, ToolCall                     # noqa: E402
+from core.protocol.fields import Node                      # noqa: E402
+from core.runtime import store as store_mod               # noqa: E402
+from core.runtime.store import Store                     # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TIMEOUT = 30
@@ -352,25 +352,24 @@ def main():
          "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
 
     print("=" * 80)
-    print("F. 边界：依赖单向（terminal→tree，tree 不认识 terminal）")
+    print("F. 边界：依赖单向（terminal→core，core 不认识 terminal）")
     src = open(os.path.join(ROOT, "terminal", "chat.py"), encoding="utf-8").read()
-    line("终端层不碰树的决策层（不 import turn / gate / reconcile）",
-         "from tree.runtime.turn" not in src
-         and "from tree.protocol.gate" not in src
-         and "from tree.runtime.reconcile" not in src)
+    line("终端层不碰树的决策层（不 import plan / gate）",
+         "from core.protocol.gate" not in src
+         and "from core.runtime.plan" not in src)
     hand = [n for n in ast.walk(ast.parse(src))
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
             and n.func.id == "input"]
     line("终端层不再自己实现输入（不许再长出 input() 那一套）", not hand)
     back = []
-    for dirpath, _, names in os.walk(os.path.join(ROOT, "tree")):
+    for dirpath, _, names in os.walk(os.path.join(ROOT, "core")):
         for n in names:
             if n.endswith(".py"):
                 p = os.path.join(dirpath, n)
                 s = open(p, encoding="utf-8").read()
                 if re.search(r"^\s*(import|from) terminal", s, re.M):
                     back.append(os.path.relpath(p, ROOT))
-    line("tree 不许反过来 import terminal", not back, str(back))
+    line("core 不许反过来 import terminal", not back, str(back))
     main_src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
     line("终端读取只在一个地方（main.py 不再自己读输入）",
          "input(" not in main_src)

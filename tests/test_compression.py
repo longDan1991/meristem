@@ -26,14 +26,14 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tree.llm import Message, ToolCall                                   # noqa: E402
-from tree.protocol.fields import Node                                    # noqa: E402
-from tree.prompts import render_turn                                     # noqa: E402
-from tree.prompts.messages import base_user                              # noqa: E402
-from tree.runtime import scheduler as R                                  # noqa: E402
-from tree.runtime import store as store_mod                              # noqa: E402
-from tree.runtime.store import Store                                     # noqa: E402
-from tree.compression import retrieve_original                           # noqa: E402
+from core.llm import Message, ToolCall                                   # noqa: E402
+from core.protocol.fields import Node                                    # noqa: E402
+from core.prompts import render_turn                                     # noqa: E402
+from core.prompts.messages import base_user                              # noqa: E402
+from core.runtime.loop import run as run_loop                                  # noqa: E402
+from core.runtime import store as store_mod                              # noqa: E402
+from core.runtime.store import Store                                     # noqa: E402
+from core.compression import retrieve_original                           # noqa: E402
 
 OK = []
 
@@ -107,7 +107,7 @@ def go(calls):
     cwd = os.getcwd()
     os.chdir(d)
     try:
-        st = asyncio.run(R.run(Store.new(node), llm))
+        st = asyncio.run(run_loop(Store.new(node), llm))
     finally:
         os.chdir(cwd)
     recs = list(Store.iter_lines(st.path))
@@ -187,9 +187,9 @@ def main():
     print("D. TREE_COMPRESS=0：保险阀关掉压缩和取回工具")
     script = ("import os, sys; os.environ['TREE_COMPRESS'] = '0'; "
               "import asyncio; "
-              "from tree import config as cfg; "
-              "import tree.runtime.turn; "   # 工具实现注册发生在 turn.py 的 import 时
-              "from tree.protocol.tool_specs import openai_tools; "
+              "from core import config as cfg; "
+              "import core.runtime.tools; "   # 工具注册发生在 import 时
+              "from core.protocol.tool_specs import openai_tools; "
               "assert not cfg.COMPRESS; "
               "names = [t['function']['name'] for t in "
               "asyncio.run(openai_tools())['leaf']]; "
@@ -226,7 +226,7 @@ def main():
     os.chdir(d)
     store_mod.init(d)
     try:
-        st5 = asyncio.run(R.run(Store.new(node5), llm5))
+        st5 = asyncio.run(run_loop(Store.new(node5), llm5))
     finally:
         os.chdir(cwd)
     recs5 = list(Store.iter_lines(st5.path))

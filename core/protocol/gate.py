@@ -6,13 +6,14 @@
   ③ 一次最多一个门槛；门槛不成立，其余子任务不启动
   ④ 判定"满足"却指不出证据 → 降级为"未满足"
 
-提示词在 `tree/prompts/`（命名分节，见 `docs/PROMPTS.md`）——
+提示词在 `core/prompts/`（命名分节，见 `docs/PROMPTS.md`）——
 改提示词不用碰闸门代码，但改完要回来对一遍上面这几件事。
 """
 
 import os
 import re
 
+from ..prompts import feedback
 from ..prompts.messages import result_names
 from .fields import EXTERNAL_CLASSES, norm
 
@@ -66,13 +67,13 @@ def clean_spec(spec):
     why = []
     missing = [k for k in ("name", "detail", "accept") if not out[k]]
     if missing:
-        why.append("缺必填项: " + ", ".join(missing))
+        why.append(feedback.missing_fields(missing))
     # kind 不默默兜底成 dispatch：写 "dispatch|leaf" / "叶子" 不是非法值，
     # 是**没填对**，兜底会把错误藏起来（提示词也写着它必填）。
     if kind not in ("dispatch", "leaf"):
-        why.append("kind 必须是 dispatch 或 leaf（给的是 %r）" % kind)
+        why.append(feedback.bad_kind(kind))
     if not out["conc_range"]:
-        why.append("conc_range 必须是 [下限, 上限] 两个正整数，如 [100,500]")
+        why.append(feedback.bad_conc_range())
     return out, ("; ".join(why) or None)
 
 
@@ -150,7 +151,7 @@ def clean_conclusion(concl, store, node, msgs=None):
         ext = [ext]
     ext = [x for x in (str(x).strip() for x in ext) if x in EXTERNAL_CLASSES]
     if verdict not in ("满足", "未满足", "阻塞"):
-        return None, "判定必须是 满足|未满足|阻塞"
+        return None, feedback.bad_verdict()
 
     if verdict == "满足":
         valid, bad = evidence_ok(ev, msgs or [])
@@ -159,7 +160,7 @@ def clean_conclusion(concl, store, node, msgs=None):
                       {"was": "满足", "reason": "证据指不到任何真实存在的东西",
                        "evidence": bad})
             return {"verdict": "未满足", "content": content +
-                    "（原判「满足」但证据指不到真实的东西，已降级）",
+                    feedback.downgraded_suffix(),
                     "evidence": [], "external": []}, None
         if bad:
             store.record(node.id, "evidence_trimmed", {"dropped": bad, "kept": valid})
@@ -175,6 +176,5 @@ def validate_root(spec):
     if why:
         return None, why
     if not anchors(out["accept"]):
-        return None, ("验收标准里必须有一个可测物理量（日期 / 两位以上数字 / "
-                      "标识符如 hello.txt），否则这棵树判不了自己做没做完")
+        return None, feedback.root_needs_anchor()
     return out, None

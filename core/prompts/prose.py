@@ -48,7 +48,7 @@ def _leaf_process():
     lines = []
     lines.append("为了达成使命，你要做的事有两个步骤：")
     lines.append("  . 动手做：用 bash / read / write 亲手把这件事做完"
-                 "（一次一个工具调用，次数不限）。")
+                 "（可以一次调多个、并行执行，次数不限）。")
     lines.append("  . 看世界真实的回话，判断下一步做什么，还是已经可以出结论。")
     return "\n".join(lines)
 

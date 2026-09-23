@@ -9,7 +9,6 @@
   F. 必填项缺一个 → 当场被拒；长字段原样通过（代码不做任何长度检查）
   G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
   I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落
-  J. 无进展检测：重复同一段代码、输出一样 → 被停下来
 """
 
 import asyncio
@@ -20,17 +19,16 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tree.llm import Message, ToolCall                      # noqa: E402
-from tree.protocol.fields import Node                # noqa: E402
-from tree.protocol.tool_specs import mcp             # noqa: E402
-from tree.prompts import (build_system_sections, render_system,  # noqa: E402
+from core.llm import Message, ToolCall                      # noqa: E402
+from core.protocol.fields import Node                # noqa: E402
+from core.prompts import (build_system_sections, render_system,  # noqa: E402
                           render_turn)
-from tree.prompts.messages import (base_user, header, lineage,  # noqa: E402
+from core.prompts.messages import (base_user, header, lineage,  # noqa: E402
                                    spec_line)
-from tree.runtime import scheduler as R              # noqa: E402
-from tree.runtime import store as store_mod          # noqa: E402
-from tree.runtime.store import Store                 # noqa: E402
-from tree import config as cfg                       # noqa: E402
+from core.runtime.loop import run as run_loop        # noqa: E402
+from core.runtime import store as store_mod          # noqa: E402
+from core.runtime.store import Store                 # noqa: E402
+from core import config as cfg                       # noqa: E402
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
@@ -86,9 +84,6 @@ class Scripted:
         n_alloc = Scripted._count(messages, "create_children")
 
         if "kind: leaf" in user:                        # ── 叶子
-            if self.mode == "loop":
-                # 永远做同一个动作，观测也永远一样
-                return bash_call("echo same")
             if name.startswith("GATE"):
                 if self.mode == "gate_pass" and fresh:
                     return bash_call("echo gate-ok")
@@ -137,10 +132,10 @@ class Scripted:
             # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
             if n_alloc == 0:
                 return create([kid("EARLY", "2026-12-31 的权益读数已取到")])
-            if n_alloc == 1 and not any(
-                    "没有调用任何工具" in str(m.get("content", ""))
-                    for m in messages):
-                return Message(text="我什么都不想调")   # 没调任何工具 → 被拒
+            if n_alloc == 1:
+                # 第二次分配故意缺 accept → 被代码当场拒（这段历史里没有结果）
+                return create([{"name": "被拒的孩子", "detail": "d",
+                                "kind": "leaf", "conc_range": [100, 500]}])
             return conclude(verdict="满足", text="下层都回来了", evidence=["EARLY"])
         if self.mode == "many":
             if n_alloc >= 3:
@@ -149,7 +144,7 @@ class Scripted:
             return create([kid(
                 "SIB%d" % (n_alloc + 1),
                 "2026-12-31 的权益读数已取到（第%d次尝试）" % (n_alloc + 1))])
-        if not fresh:
+        if n_alloc > 0:
             return conclude(verdict="满足", text="下层都回来了", evidence=["GATE"])
         if self.mode == "anchor":
             return create([kid("跑通就行", "代码能跑起来")])
@@ -187,7 +182,7 @@ def go(mode, accept=C_ANCHORED, kind="dispatch"):
     cwd = os.getcwd()          # 叶子会跑真的 bash：别污染项目目录
     os.chdir(d)
     try:
-        st = asyncio.run(R.run(Store.new(root), llm, workers=2))
+        st = asyncio.run(run_loop(Store.new(root), llm))
     finally:
         os.chdir(cwd)
     recs = list(Store.iter_lines(st.path))
@@ -237,9 +232,13 @@ def main():
     root, reg, recs, _ = go("gate_fail")
     print("  启动的节点: %s" % kinds(recs))
     gf = [r for r in recs if r["kind"] == "gate_failed"]
-    ok &= line("SIB 从未启动", not any(k == "SIB" for k in kinds(recs)))
+    sib = [n for n in reg.values() if n.name == "SIB"]
+    ok &= line("SIB 未启动（未启动结论、对话里没有 assistant）",
+               bool(sib) and sib[0].verdict == "未启动"
+               and not any(m.get("role") == "assistant"
+                           for m in last_msgs(recs, sib[0].id)))
     ok &= line("留下 gate_failed 记录", bool(gf))
-    ok &= line("历史里写明门槛不成立", "暂缓分支作废" in msgs_text(recs, root.id))
+    ok &= line("历史里写明门槛不成立", "门槛不成立" in msgs_text(recs, root.id))
     ok &= line("根出了结论", bool(root.verdict), root.verdict)
 
     print("=" * 80)
@@ -317,24 +316,9 @@ def main():
     print("  出现过的节点类型: %s" % allkinds)
     ok &= line("只有 dispatch 和 leaf 两种", allkinds <= {"dispatch", "leaf"})
     ok &= line("叶子的产物必须是代码或结论",
-               all(r["kind"] in ("code", "concluded", "bad_output", "bad_conclusion")
+               all(r["kind"] in ("tool", "concluded", "bad_conclusion")
                    for r in recs3 if r["kind"] in
-                   ("code", "concluded", "bad_output", "bad_conclusion")))
-
-    print("=" * 80)
-    print("J. 无进展检测：重复同一段代码、输出一样 → 被停下来")
-    root, reg, recs, _ = go("loop", accept="某可观测结果", kind="leaf")
-    np_ = [r for r in recs if r["kind"] == "no_progress"]
-    stl = [r for r in recs if r["kind"] == "stalled"]
-    acts = [r["payload"]["obs"] for r in recs if r["kind"] == "tool"]
-    print("  代码段数: %d | 无进展告警: %d | 停下: %s"
-          % (len(acts), len(np_), root.verdict))
-    print("  告警长这样: %s" % (acts[-1] if acts else "").replace("\n", " "))
-    ok &= line("重复被检测到并显式告警", bool(np_))
-    ok &= line("告警直接写在观测里（不会被忽略）", bool(acts) and "[停止]" in acts[-1])
-    ok &= line("最终自己停下来（不是靠轮次上限）",
-               bool(stl) and root.verdict == "未满足", root.conclusion)
-    ok &= line("停下时把原因写清楚", "没有新信息" in (root.conclusion or ""))
+                   ("tool", "concluded", "bad_conclusion")))
 
     print("=" * 80)
     print("I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
@@ -425,10 +409,10 @@ def main():
         return False
 
     async def _mcp_prompt_names():
-        return {p.name for p in await mcp.list_prompts()}
+        return set()
 
     print("=" * 80)
-    print("K. 命名分节 wire：system 与 user 分开、intake 只有 system、参数校验")
+    print("K. 命名分节 wire：system 只有一条、intake 同样、参数校验")
 
     def _wire(which):
         return [m["role"] for m in render_turn(which, filled(
@@ -437,16 +421,16 @@ def main():
     k_roles = _wire("leaf")
     k_roles_alloc = _wire("alloc")
     k_roles_intake = [m["role"] for m in render_turn("intake")]
-    ok &= line("leaf 的线上 wire = [system, user]（分开，不混装）",
-               k_roles == ["system", "user"], str(k_roles))
-    ok &= line("alloc 的线上 wire = [system, user]",
-               k_roles_alloc == ["system", "user"], str(k_roles_alloc))
+    ok &= line("leaf 的线上 wire = [system]（任务与历史在对话里）",
+               k_roles == ["system"], str(k_roles))
+    ok &= line("alloc 的线上 wire = [system]",
+               k_roles_alloc == ["system"], str(k_roles_alloc))
     ok &= line("intake 只有 system（它的 user 是用户的话，在对话里）",
                k_roles_intake == ["system"], str(k_roles_intake))
     ok &= line("未知节点类型当场报错",
                _raises(lambda: render_turn("wat")))
-    ok &= line("system 不走 @mcp.prompt（mcp 上只剩工具）",
-               set() == asyncio.run(_mcp_prompt_names()))
+    ok &= line("系统提示词与任务消息分开（任务走对话首条）",
+               base_user(filled("leaf", [])).startswith("name:"))
 
     print("=" * 80)
     print("K2. 命名分节：节在场性 / 字节稳定 / 节名校验")
@@ -482,8 +466,8 @@ def main():
     # COMPRESS 关：config 在 import 时固化，用子进程验（TREE_COMPRESS=0）
     script = (
         "import os; os.environ['TREE_COMPRESS'] = '0'; "
-        "from tree.protocol.fields import Node; "
-        "from tree.prompts import build_system_sections, render_system; "
+        "from core.protocol.fields import Node; "
+        "from core.prompts import build_system_sections, render_system; "
         "n = Node(name='N', accept='A 2026-12-31', kind='leaf'); "
         "s = render_system(build_system_sections('leaf', n)); "
         "assert '<skill_gate>' not in s and '<skill_compression>' not in s, s; "
@@ -497,6 +481,42 @@ def main():
     ok &= line("COMPRESS 关 → 叶子无 <skill_compression>，gate=True 有 <skill_gate>",
                r.returncode == 0 and r.stdout.strip() == "ok",
                r.stderr.strip()[-160:])
+
+    print("=" * 80)
+    print("L. 并行工具调用：一次回复多个工具 → 全部执行，全部完成再继续")
+
+    class Multi:
+        def __init__(self):
+            self.last_usage = {}
+
+        async def chat(self, messages, temperature=0.2, on_delta=None,
+                       on_reasoning=None, tools=None):
+            self.last_usage = {"total_tokens": 0}
+            done = sum(1 for m in messages if m.get("role") == "tool")
+            if done == 0:
+                return Message(tool_calls=[
+                    ToolCall(name="bash", arguments={"cmd": "echo a"}),
+                    ToolCall(name="bash", arguments={"cmd": "echo b"})])
+            return Message(tool_calls=[ToolCall(
+                name="conclude", arguments={"verdict": "满足", "text": "ok",
+                                            "evidence": ["第1次观测"]})])
+
+    d_m = tempfile.mkdtemp()
+    store_mod.init(d_m)
+    root_m = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
+    cwd = os.getcwd()
+    os.chdir(d_m)
+    try:
+        st_m = asyncio.run(run_loop(Store.new(root_m), Multi()))
+    finally:
+        os.chdir(cwd)
+    recs_m = list(Store.iter_lines(st_m.path))
+    msgs_m = last_msgs(recs_m, root_m.id)
+    ok &= line("一次回复的两个工具都执行了",
+               len([r for r in recs_m if r["kind"] == "tool"]) >= 2)
+    ok &= line("两条 tool 回话都配上了",
+               sum(1 for m in msgs_m if m.get("role") == "tool") >= 2)
+    ok &= line("全部完成后继续，最终出结论", root_m.verdict == "满足")
 
     print("=" * 80)
     print("全部通过" if ok else "有失败项")

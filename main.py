@@ -7,8 +7,8 @@
 import os
 import sys
 
-from tree import config as cfg
-from tree.runtime import store
+from core import config as cfg
+from core.runtime import store
 
 import cli
 

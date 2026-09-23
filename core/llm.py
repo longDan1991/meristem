@@ -13,7 +13,7 @@ litellm 把它透传给任何 OpenAI 兼容端点。
 走它，和回答分开，终端才能把思考画成灰的、回答画成亮的。
 
 `last_usage` 是**线程本地**的：每个 worker 记自己那一次调用的用量，
-`turn._log_usage` 立刻读走，所以这里不需要共享计数器、也不需要锁（AGENTS §9）。
+`loop._log_usage` 立刻读走，所以这里不需要共享计数器、也不需要锁（AGENTS §9）。
 """
 
 import asyncio
@@ -91,7 +91,7 @@ class LLM:
             api_key=self.api_key,
             tools=tools,
             tool_choice="auto" if tools else None,
-            parallel_tool_calls=(False if tools else None),  # 一次只能调一个（balk 兜底）
+            parallel_tool_calls=(True if tools else None),  # 允许一次调多个（并行执行）
             stream=True,
             stream_options={"include_usage": True},  # 真实 usage 在收尾块里，不必攒 chunks 重拼
             num_retries=_RETRIES,
@@ -149,16 +149,11 @@ class ChatPool:
     """把 llm.chat 串成 N 路并发：workers = **同时在飞的 llm.chat 数**。
 
     请求进队列，N 个消费者各取一个跑，结果经 future 原路送回 —— 消息传递，
-    没有锁（AGENTS §9）。聊天和节点 Loop 解耦：节点卡在慢工具、或入口在等
-    用户时，不占聊天名额；真正被限的是最贵的那个资源（模型请求）。
+    没有锁（AGENTS §9）。它只限模型请求这个最贵的资源，不碰节点。
 
-    异常用 **done-callback** 原样搬到调用方的 future 上（和 hands.py 同一套）：
+    异常用 **done-callback** 原样搬到调用方的 future 上：
     不吞、也不让消费者 task 死掉（死了后面的请求就永远等不到）。`asyncio.wait`
     只等完成、不取出异常 —— 消费者靠它占住名额，又不被异常炸死。
-
-    用量仍然落在底层 llm 上（`last_usage` 线程本地）：消费者 await 完 chat
-    后**同步**写 usage、同步 resolve future，单线程 asyncio 下调用方 await 一返回
-    就读得到，中间不会插进别的 chat。
     """
 
     def __init__(self, llm, workers):
@@ -175,9 +170,9 @@ class ChatPool:
             await asyncio.wait([task])      # 占住名额，但不取异常（交给回调）
 
     async def _call(self, kwargs):
-        """把一次聊天调进一个协程：调用本身的同步错误（如签名不匹配）也变成
-        task 异常、经 done-callback 原样交付 —— 否则它会在 `ensure_future` 前
-        同步炸掉，worker 当场死、后面排队的人永远等不到（实测挂死）。"""
+        """调用本身的同步错误（如签名不匹配）也变成 task 异常、经 done-callback
+        原样交付 —— 否则它会在 `ensure_future` 前同步炸掉，worker 当场死、
+        后面排队的人永远等不到。"""
         return await self.llm.chat(**kwargs)
 
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,

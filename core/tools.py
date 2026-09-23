@@ -1,6 +1,6 @@
 """叶子的手。叶子只能通过这些工具接触世界，所以事实必须从这里产生。
 
-工具输出**不截断**：跑出多少就是多少，完整流到压缩层（tree/compression.py）——
+工具输出**不截断**：跑出多少就是多少，完整流到压缩层（core/compression.py）——
 日志/JSON 在发送边界被无损折叠，模型收到的永远是被压过的完整内容。
 截断会毁掉压缩救不回来的数据（尾部 FATAL 行、超出部分的 JSON），所以没有。
 
@@ -87,7 +87,7 @@ async def bash(cmd, timeout=None):
             note += "\n它一点输出都没来得及给。"
         note += ("\n要跑更久：把 args.timeout 调大（上限 %d 秒），"
                  "或者把长任务改成后台：`nohup <cmd> > run.log 2>&1 &`，"
-                 "然后轮询 run.log 和产物（轮询时观测会变，不会被当成原地打转）。"
+                 "然后轮询 run.log 和产物。"
                  % BASH_TIMEOUT_MAX)
         return (out + note).strip()
     return out + ("\n[exit=%d]" % rc if rc else "")
@@ -121,6 +121,3 @@ def write(path, content):
     except OSError as e:
         return "工具出错: %r" % e
     return "written: %s (%d bytes)" % (path, len(content))
-
-
-TOOLS = {"bash": bash, "read": read, "write": write}

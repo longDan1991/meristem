@@ -10,8 +10,7 @@ headroom 是成熟库（AGENTS §13），我们只做两件接线：
      按压缩文本里的 hash 从它自己的本地 SQLite 库（get_compression_store，
      默认 TTL 30 分钟）取回原文。
 
-压缩只发生在发送时：trace 的 `tool` 事件保持原文，
-`turn.sig`/`bump` 的无进展检测（对原文全量哈希）不受影响（AGENTS §2/§5）。
+压缩只发生在发送时：trace 的 `tool` 事件保持原文。
 
 不开 ML：`kompress_model="disabled"` —— 本项目的载荷是 JSON/日志/代码，
 SmartCrusher + LOG 折叠 + CodeCompressor 覆盖，散文压缩是杀鸡用牛刀。

@@ -9,18 +9,17 @@
 所有"该不该停"的问题，都由"看得见的事实"回答。
 想让它更保守，就把事实说得更清楚，而不是加一个上限。
 
-节点没有"结束"这个概念：它是一个 Loop，`msgs`（平铺对话）就是它的全部历史 ——
-观测 / 尝试 / 下层结论都以对话消息累积。它只在"有欠 LLM 一个回答"时才运行
-（`runtime/reconcile.py` 的 `actionable`，调度与恢复共用同一个谓词）。
-`deferred` 是门槛的暂缓计划（还没出生的子任务规格）—— 唯一不是"已完成事实"
-的节点数据，因为那些孩子还没出生，无处可推。
+节点没有"结束"这个概念：它是一个带对话（`msgs`）的节点，`msgs` 就是它的全部
+历史 —— 观测 / 分配记录 / 下层结论都以对话消息累积。它只在"有欠 LLM 一个回答"
+时才运行（`runtime/plan.py` 的 `actionable`，调度与恢复共用同一条判据：
+没出结论 + 最后一条不是 assistant）。
 
 **这个文件只管格子的形状与协议逻辑**：字段怎么定义、怎么落盘、怎么回给上层。
 "这个格子填得合不合规"是 `gate.py`；"落盘 / 调度"是 `runtime/`；
-"怎么渲成消息给模型看"是 `tree/prompts/messages.py` —— **class Node 里没有任何
+"怎么渲成消息给模型看"是 `core/prompts/messages.py` —— **class Node 里没有任何
 消息拼接**，全部提出去放到该放的地方。
 
-`base_user` 渲哪几段、每段叫什么名字，`tree/prompts/prose.py` 的
+`base_user` 渲哪几段、每段叫什么名字，`core/prompts/prose.py` 的
 input 节函数里都逐段点了名（`tests/test_protocol.py` 的 I 段**双向核对**；
 prose 里的「观测历史 / 本层已有尝试 / 手上的东西」是线上对话机制与工具清单的
 说明 —— 分别由 tool 消息、分配记录、工具列表承担 —— 不渲染成视图）。
@@ -68,12 +67,11 @@ class Node:
     parent: str = None
     depth: int = 0
     # 出生时物化的**上层意图链**：[[name, detail], …]，从根到自己的上层。
-    # 由 `scheduler._spawn` 从父节点上拼出来（O(1)），不在 render 时反查 registry：
+    # 由 `runtime/plan.make_child` 从父节点上拼出来（O(1)），不在 render 时反查 registry：
     # 形式字段只读 ⇒ 父的 detail 出生后不会再变 ⇒ 物化不可能变旧（§11）。
     lineage: list = field(default_factory=list)
     # ── 结构（程序填）──
     children: list = field(default_factory=list)   # 已出生的孩子 id（含门槛）
-    deferred: list = field(default_factory=list)   # 门槛的暂缓计划：还没出生的子任务规格
     # ── 结局 ──
     verdict: str = ""                 # 满足 | 未满足 | 阻塞
     conclusion: str = ""
@@ -81,7 +79,7 @@ class Node:
     external: list = field(default_factory=list)   # 阻塞时：哪一类外部需求
 
     # ---------------------------------------------------------------- 结局
-    # 消息拼接一律不在 Node —— 在 tree/prompts/messages.py（header / lineage /
+    # 消息拼接一律不在 Node —— 在 core/prompts/messages.py（header / lineage /
     # base_user）。Node 只装数据 + 协议逻辑。
     # 没有 status：出结论（verdict 非空）就是终态事实，"done" 由展示从 verdict 推导。
     def close(self, verdict, conclusion, evidence, external=None):
@@ -99,7 +97,6 @@ class Node:
                 "conc_range": self.conc_range,
                 "id": self.id, "parent": self.parent, "depth": self.depth,
                 "lineage": self.lineage, "children": self.children,
-                "deferred": self.deferred,
                 "verdict": self.verdict, "conclusion": self.conclusion,
                 "evidence": self.evidence, "external": self.external}
 

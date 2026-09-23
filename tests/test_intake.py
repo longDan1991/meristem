@@ -23,12 +23,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tree.llm import Message, ToolCall                                # noqa: E402
-from tree.protocol.fields import Node                                 # noqa: E402
-from tree.protocol.gate import anchors, validate_root                 # noqa: E402
-from tree.runtime import store                              # noqa: E402
-from tree.runtime.scheduler import run                                # noqa: E402
-from tree.runtime.store import Store                          # noqa: E402
+from core.llm import Message, ToolCall                                # noqa: E402
+from core.protocol.fields import Node                                 # noqa: E402
+from core.protocol.gate import anchors, validate_root                 # noqa: E402
+from core.runtime import store                              # noqa: E402
+from core.runtime.loop import run                                # noqa: E402
+from core.runtime.store import Store                          # noqa: E402
 
 OK = []
 
