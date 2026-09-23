@@ -1,12 +1,14 @@
 """散文节：每个节点类型的 preamble / process / input。
 
-随"流程与措辞"变，与工具清单、闸门无关。每节一个函数：`lines` 一行一条
-append，最后 `"\n".join(lines)` —— 和 pi 的 `system-prompt.ts`（`lines.push`
-+ `join("\n")`）同一个拼法，每行都看得见、改得动，不堆成一段大字符串。
-
-`prose(which, name)` 是唯一出口：组装器（`prompts/__init__.py`）按节点类型
-取节，不在这里散落任何组装逻辑。
+每节一个函数，`lines` 一行一条 append 后 `join("\n")`（和 pi 的 system-prompt.ts 同拼法）；
+`prose(which, name)` 是唯一出口，组装逻辑在 `prompts/__init__.py`。
 """
+
+from ..protocol.tool_specs import ChildSpec
+
+# 形式字段清单的唯一源 = ChildSpec 的字段定义；intake 不给 gate（根没有兄弟）。
+_FIELDS = " / ".join(ChildSpec.model_fields)
+_FIELDS_INTAKE = " / ".join(k for k in ChildSpec.model_fields if k != "gate")
 
 
 def _alloc_preamble():
@@ -27,7 +29,7 @@ def _alloc_input():
     lines = []
     lines.append("你收到的 user 消息会有任务信息，其结构和你将要拆分的任务是同构的 —— 行首就是")
     lines.append("下面这些字段名，值就是上层填的、或程序查出来的：")
-    lines.append("  name / detail / notes / accept / kind / gate / conc_range")
+    lines.append("  %s" % _FIELDS)
     lines.append("额外需要说明的是：")
     lines.append("")
     lines.append("  上层意图链: 从根到你上层的每一层 detail 的孤链。"
@@ -57,7 +59,7 @@ def _leaf_input():
     lines = []
     lines.append("你收到的 user 消息会有任务信息，其结构就是你上层拆任务时填的那些形式字段 ——")
     lines.append("行首就是下面这些字段名，值就是上层填的、或程序查出来的：")
-    lines.append("  name / detail / notes / accept / kind / gate / conc_range")
+    lines.append("  %s" % _FIELDS)
     lines.append("额外需要说明的是：")
     lines.append("")
     lines.append("  上层意图链: 从根到你上层的每一层 detail 的孤链。"
@@ -98,7 +100,7 @@ def _intake_input():
                  "之后每一轮都是用户对你的回复。")
     lines.append("它不是形式字段 —— 你交出去的形式（submit_root 的 root）"
                  "和分配节点给孩子的结构**完全一样**：")
-    lines.append("  name / detail / notes / accept / kind / conc_range，字段的含义见工具签名。")
+    lines.append("  %s，字段的含义见工具签名。" % _FIELDS_INTAKE)
     return "\n".join(lines)
 
 

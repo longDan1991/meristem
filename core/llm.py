@@ -1,19 +1,11 @@
-"""LLM 适配层：只暴露一个函数 —— 给 messages，返回 Message（文本 + 工具调用）。
+"""LLM 适配层：给 messages，返回 Message（文本 + 工具调用）。
 
-底层是 `litellm`：任何 OpenAI 兼容端点都能用（OpenAI / DeepSeek / Kimi /
-Qwen / 本地 vLLM / 火山 ark……），重试、超时、流式、usage 都是它的事，
-这里不自己写 HTTP / SSE / 退避（那是重复造轮子）。
+底层是 `litellm`（任何 OpenAI 兼容端点），重试、超时、流式、usage 都是它的事。
+给 `tools` 就走工具调用，给 `on_delta` 就走流式；`on_reasoning` 另开一条走模型的
+`reasoning_content`，和回答分开，终端才能把思考画成灰的。
 
-给了 `tools` 就走**工具调用**（非流式）：模型要么调用工具、要么回文本，
-两者都原样装进 `Message`。工具调用是现在大模型的通用基础能力，
-litellm 把它透传给任何 OpenAI 兼容端点。
-
-给了 `on_delta`（没给 tools）就换成流式：内容一个字一个字回调，同时照旧
-返回整段文本。`on_reasoning` 另开一条：推理模型的 `reasoning_content`（思考）
-走它，和回答分开，终端才能把思考画成灰的、回答画成亮的。
-
-`last_usage` 是**线程本地**的：每个 worker 记自己那一次调用的用量，
-`loop._log_usage` 立刻读走，所以这里不需要共享计数器、也不需要锁（AGENTS §9）。
+`last_usage` 是线程本地的，每个 worker 记自己那一次用量、`loop._log_usage` 立刻读走，
+不需要共享计数器也不需要锁。
 """
 
 import asyncio
@@ -29,7 +21,7 @@ from .runtime import deliver
 
 @dataclass
 class ToolCall:
-    """一次工具调用：id（多轮对话回写历史用）+ 名字 + 已解析成 dict 的参数。"""
+    """一次工具调用：id（回写历史用）+ 名字 + 已解析成 dict 的参数。"""
     id: str = ""
     name: str = ""
     arguments: dict = field(default_factory=dict)
@@ -42,18 +34,14 @@ class Message:
     tool_calls: list = field(default_factory=list)
 
 
-# 我们只依赖 OpenAI 兼容协议（Ark / vLLM / Kimi / Qwen / DeepSeek 都是），
-# 所以模型名统一走 openai/ 前缀 + api_base，不交给 litellm 猜 provider。
-# 模型名里已带 provider 前缀（如 "deepseek/deepseek-chat"）就原样用。
+# 只依赖 OpenAI 兼容协议：模型名统一走 openai/ 前缀 + api_base，不交给 litellm 猜 provider
 _COMPAT_PREFIX = "openai/"
 
 litellm.suppress_debug_info = True
 litellm.drop_params = True
 
-# 重试次数：**与流式无关**。litellm 的 num_retries 只重试"请求建立阶段"（拿到
-# 首个 chunk / 响应头之前）的错误；已经开始吐字后断流会直接抛给调用方、不重发
-# 整流 —— 所以不会把同一段话说两遍（openai 兼容端点的语义：流式断流是原样炸
-# 不是重来）。之前按"流式就不重试"一刀切，把"没吐字前可重来"也关了。
+# 重试次数与流式无关：litellm 的 num_retries 只重试请求建立阶段的错误，
+# 开始吐字后断流直接抛出、不重发，所以不会把同一段话说两遍。
 _RETRIES = 4
 
 
@@ -73,15 +61,10 @@ class LLM:
 
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
                    tools=None):
-        """给 messages，返回 Message（文本 + 工具调用）。真异步（P4）：走 `litellm.acompletion`。
+        """给 messages，返回 Message；总是流式，`tools` 给了就带工具调用。
 
-        `tools` 给了就带工具（`tool_choice="auto"`）：模型要么调工具要么回文本。
-        **总是流式**（`stream=True`）：内容每到一个字调一次 `on_delta`、模型思考
-        每到一个字调一次 `on_reasoning`（None 就不回调）—— 两条分开，终端才能
-        把思考画成灰的、回答画成亮的。流式 + tools 也支持：工具调用的参数在
-        增量里拼起来（入口那一路：话要流式吐字、形式要结构化收）。
-
-        重试（`_RETRIES`）：只在请求建立阶段生效，与流式无关（见模块注释）。
+        内容每到一个字调一次 `on_delta`、思考调一次 `on_reasoning`（None 不回调）；
+        工具调用的参数在增量里拼起来。重试只在请求建立阶段生效。
         """
         resp = await litellm.acompletion(
             model=self._route(self.model),
@@ -91,7 +74,7 @@ class LLM:
             api_key=self.api_key,
             tools=tools,
             tool_choice="auto" if tools else None,
-            parallel_tool_calls=(True if tools else None),  # 允许一次调多个（并行执行）
+            parallel_tool_calls=(True if tools else None),
             stream=True,
             stream_options={"include_usage": True},  # 真实 usage 在收尾块里，不必攒 chunks 重拼
             num_retries=_RETRIES,
@@ -99,21 +82,19 @@ class LLM:
         return await self._stream(resp, on_delta, on_reasoning)
 
     async def _stream(self, resp, on_delta, on_reasoning):
-        """流式：话（content）一个字一个字回调；思考走 on_reasoning；
-        工具调用的增量按 index 拼起来，返回时组装成 Message。"""
+        """流式：话与思考逐字回调，工具调用增量按 index 拼起来组装成 Message。"""
         parts, calls = [], []
         tool_deltas = {}                     # index -> {"id", "name", "arguments": [片段]}
         async for chunk in resp:
             if not chunk.choices:            # 收尾块：没内容，只有 usage（stream_options）
                 u = getattr(chunk, "usage", None)
                 if u:
-                    # litellm 的 usage 是 pydantic 对象，._log_usage 要的是 dict
+                    # usage 是 pydantic 对象，._log_usage 要的是 dict
                     self._tls.usage = (u.model_dump() if hasattr(u, "model_dump")
                                        else dict(u))
                 continue
             delta = chunk.choices[0].delta
-            # 无思考时 litellm 会删掉 reasoning_content 字段（OpenAI 规范），
-            # 所以只能 getattr，不能直接 . 访问
+            # 无思考时字段不存在（OpenAI 规范），只能 getattr
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning and on_reasoning is not None:
                 on_reasoning(reasoning)
@@ -146,14 +127,9 @@ class LLM:
 
 
 class ChatPool:
-    """把 llm.chat 串成 N 路并发：workers = **同时在飞的 llm.chat 数**。
+    """把 llm.chat 串成 N 路并发（workers = 同时在飞的 llm.chat 数），消息传递、无锁。
 
-    请求进队列，N 个消费者各取一个跑，结果经 future 原路送回 —— 消息传递，
-    没有锁（AGENTS §9）。它只限模型请求这个最贵的资源，不碰节点。
-
-    异常用 **done-callback** 原样搬到调用方的 future 上：
-    不吞、也不让消费者 task 死掉（死了后面的请求就永远等不到）。`asyncio.wait`
-    只等完成、不取出异常 —— 消费者靠它占住名额，又不被异常炸死。
+    异常用 done-callback 原样搬到调用方的 future 上：不吞、也不让消费者 task 死掉。
     """
 
     def __init__(self, llm, workers):
@@ -170,9 +146,7 @@ class ChatPool:
             await asyncio.wait([task])      # 占住名额，但不取异常（交给回调）
 
     async def _call(self, kwargs):
-        """调用本身的同步错误（如签名不匹配）也变成 task 异常、经 done-callback
-        原样交付 —— 否则它会在 `ensure_future` 前同步炸掉，worker 当场死、
-        后面排队的人永远等不到。"""
+        """调用本身的同步错误也变成 task 异常经回调交付，否则 worker 会当场死、后面的请求永远等不到。"""
         return await self.llm.chat(**kwargs)
 
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,

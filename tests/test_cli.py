@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""CLI 参数契约的定向测试。零成本、确定性 —— **不跑 subprocess（测试不走 CLI）**，
-直接在进程内调 `terminal.chat.run_session` / `main.parse_args`。
+"""CLI 参数契约的定向测试（不跑 subprocess，进程内直接调 `run_session` / `parse_args`）。
 
   A. 入口默认就是 intake，而且要真模型：没有 API key，新会话和 -r 都当场报错
-     （不许拿假模型去和用户聊，也不许悄悄用一个默认任务开工）
   B. -r 没有可加载的老会话 → 当场说清并退出
   C. 守门：伪造的「用户的话」不许回来；老路已删；main.py 只剩 -r 一个参数
 """
@@ -31,9 +29,8 @@ def line(tag, cond, detail=""):
 
 
 def run_session(resume, api_key="", traces=None):
-    """进程内跑 `run_session`（不走 CLI）。api_key="" = 没给。
+    """进程内跑 `run_session`（不走 CLI）；api_key="" = 没给，traces 是 -r 列表的替身。
 
-    traces：`-r` 时老会话列表的替身（测试不碰真工作区的树），不给默认空。
     返回 (退出码/返回值, 标准输出 + 标准错误)。
     """
     os.environ["TREE_API_KEY"] = api_key

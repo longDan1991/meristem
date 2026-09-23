@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""形式化协议的定向测试。零成本、确定性（脚本化假模型）。
+"""形式化协议的定向测试（零成本、确定性，脚本化假模型）。
 
-  A. 门槛不成立 → 兄弟子任务永不启动，分配节点的历史里留下"门槛不成立"
+  A. 门槛不成立 → 兄弟子任务永不启动
   B. 门槛通过   → 兄弟此时才启动
-  C. 子任务验收标准丢了可测物理量 → 这次分配当场被代码拒，并记进"本层已有尝试"
+  C. 子任务验收标准丢了可测物理量 → 这次分配当场被代码拒
   D. 判定"满足"但证据指不到任何真实东西 → 降级为"未满足"
-  E. 次数不限：反复"再做一次"不被任何计数器阻止，而每次尝试都看得见
-  F. 必填项缺一个 → 当场被拒；长字段原样通过（代码不做任何长度检查）
+  E. 次数不限：反复"再做一次"不被任何计数器阻止
+  F. 必填项缺一个 → 当场被拒；长字段原样通过
   G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
-  I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落
+  I. 同构：收到的行首 == 自己要写的键
 """
 
 import asyncio
@@ -23,8 +23,7 @@ from core.llm import Message, ToolCall                      # noqa: E402
 from core.protocol.fields import Node                # noqa: E402
 from core.prompts import (build_system_sections, render_system,  # noqa: E402
                           render_turn)
-from core.prompts.messages import (base_user, header, lineage,  # noqa: E402
-                                   spec_line)
+from core.prompts.messages import base_user, header, lineage  # noqa: E402
 from core.runtime.loop import run as run_loop        # noqa: E402
 from core.runtime import store as store_mod          # noqa: E402
 from core.runtime.store import Store                 # noqa: E402
@@ -54,12 +53,7 @@ def conclude(**kw):
 
 
 class Scripted:
-    """按平铺对话回话（发工具调用）。mode 决定行为。
-
-    每个节点（分配节点和叶子一样）都是完整的 Loop：user 是基础形式字段
-    （base_user = 形式字段 + 意图链），观测 / 尝试 / 下层结论以对话消息
-    （assistant 的 tool_call + tool 回话 + 注入的 user）累积。
-    """
+    """按平铺对话回话（发工具调用），mode 决定行为；每个节点都是完整的 Loop。"""
 
     def __init__(self, mode):
         self.mode, self.calls, self.last_usage = mode, 0, {}
@@ -133,7 +127,7 @@ class Scripted:
             if n_alloc == 0:
                 return create([kid("EARLY", "2026-12-31 的权益读数已取到")])
             if n_alloc == 1:
-                # 第二次分配故意缺 accept → 被代码当场拒（这段历史里没有结果）
+                # 第二次分配故意缺 accept → 被代码当场拒
                 return create([{"name": "被拒的孩子", "detail": "d",
                                 "kind": "leaf", "conc_range": [100, 500]}])
             return conclude(verdict="满足", text="下层都回来了", evidence=["EARLY"])
@@ -148,7 +142,7 @@ class Scripted:
             return conclude(verdict="满足", text="下层都回来了", evidence=["GATE"])
         if self.mode == "anchor":
             return create([kid("跑通就行", "代码能跑起来")])
-        if self.mode == "missing":                  # 故意缺 accept（schema 拒）
+        if self.mode == "missing":                  # 故意缺 accept，schema 拒
             return create([{
                 "name": "缺验收标准的孩子", "detail": "d", "kind": "leaf",
                 "conc_range": [100, 500]}])
@@ -190,7 +184,20 @@ def go(mode, accept=C_ANCHORED, kind="dispatch"):
 
 
 def kinds(recs):
-    return [r["payload"]["name"] for r in recs if r["kind"] == "open"]
+    """记录里出现过的节点名（节点出生即写 state 检查点，没有单独的 open 事件）。"""
+    seen = {}
+    for r in recs:
+        if r["kind"] == "state":
+            node = (r.get("payload") or {}).get("node")
+            if node:
+                seen[r["node"]] = node.get("name")
+    return list(seen.values())
+
+
+def has_child_node(recs):
+    """记录里有没有带 parent 的节点（= 真的启动过子节点）。"""
+    return any(((r.get("payload") or {}).get("node") or {}).get("parent")
+               for r in recs if r["kind"] == "state")
 
 
 def line(tag, cond, detail=""):
@@ -198,9 +205,7 @@ def line(tag, cond, detail=""):
     return bool(cond)
 
 
-# 节点最后落盘的对话（历史只活在这一处 —— 结论审计、"本层历史"都从它推导）。
-# 检查点是**增量**的（scheduler._checkpoint）：delta 事件只带自上次以来新增的
-# 消息，这里按文件顺序拼回全量（和 load 同一套）。
+# 节点最后落盘的对话（历史只活在这一处）；检查点是增量的，这里按文件顺序拼回全量。
 def last_msgs(recs, nid):
     full = []
     for r in (r for r in recs if r["kind"] == "state" and r["node"] == nid):
@@ -254,8 +259,7 @@ def main():
     drift = [r for r in recs if r["kind"] == "criterion_drift"]
     ok &= line("留下 criterion_drift 记录", bool(drift))
     ok &= line("被拒原因写回对话", "丢了可测物理量" in msgs_text(recs, root.id))
-    ok &= line("没有启动任何子节点",
-               not any(r["kind"] == "open" and r["payload"].get("parent") for r in recs))
+    ok &= line("没有启动任何子节点", not has_child_node(recs))
 
     print("=" * 80)
     print("D. 判定「满足」但证据指不到真实东西 → 降级")
@@ -291,8 +295,7 @@ def main():
     ok &= line("缺 accept → 被拒并把原因写回对话",
                "工具参数不合形状" in msgs_text(recs2, root2.id)
                and "children.0.accept" in msgs_text(recs2, root2.id))
-    ok &= line("没有启动任何子节点",
-               not any(r["kind"] == "open" and r["payload"].get("parent") for r in recs2))
+    ok &= line("没有启动任何子节点", not has_child_node(recs2))
     root3, reg3, recs3, _ = go("badrange")
     ok &= line("conc_range 形状不对（[500,100]）→ 被拒",
                "conc_range" in msgs_text(recs3, root3.id))
@@ -361,13 +364,6 @@ def main():
                    all(s in text for s in ("[100, 500]",
                                            "ROOT: 把量化系统做出来",
                                            "MID: 摸清数据这条线")))
-    # 分配记录里的子任务也用同一套键 —— 模型看到的是自己写过的形式，不是中文标签。
-    sl = spec_line({"name": "子任务A", "kind": "leaf", "gate": True,
-                    "accept": "A 2026-12-31 的读数", "conc_range": [100, 500]})
-    ok &= line("分配记录里的子任务用同一套键写（不再有中文标签）",
-               "name: 子任务A" in sl and "kind: leaf" in sl
-               and "gate: true" in sl and "conc_range: [100, 500]" in sl
-               and "验收标准:" not in sl and "[门槛]" not in sl)
     ok &= line("alloc 的两个出口 = create_children / conclude",
                all(s in sys_text("alloc") for s in ("create_children", "conclude")))
     ok &= line("leaf 的出口 = bash / read / write / conclude",

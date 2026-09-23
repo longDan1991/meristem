@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """`llm._stream` 的定向测试：流式解析（文本 / 思考 / 工具参数拼接 / usage）。
 
-零成本、确定性：不碰网络，用假 chunk（SimpleNamespace）喂 `_stream`，模拟
-litellm 流式响应（OpenAI 兼容协议形状）。测的是 llm.py 自己的解析逻辑：
+零成本、确定性：不碰网络，用假 chunk（SimpleNamespace）模拟 litellm 流式响应。
 
-  A. 文本 + 思考 + 工具参数两段碎片 → 拼回完整 Message（text / tool_calls）
+  A. 文本 + 思考 + 工具参数两段碎片 → 拼回完整 Message
   B. on_delta / on_reasoning 各自收到碎片
-  C. 收尾块 usage（stream_options）→ last_usage 是 dict
-  D. 坏参数 JSON → 带工具名 + 原始片段的 ValueError（不糊，fail fast）
-  E. 边界：无思考块（reasoning_content 字段不存在）不炸；无 usage 收尾 last_usage=None
-  F. 自定义型 tool-call（没有 function 字段）被跳过，不炸
-  G. 多个 index 的工具调用按 index 排序、各自解析
+  C. 收尾块 usage → last_usage 是 dict
+  D. 坏参数 JSON → ValueError（fail fast）
+  E. 边界：无思考块 / 无 usage 收尾不炸
+  F. 自定义型 tool-call（没有 function 字段）被跳过
+  G. 多个 index 的工具调用按 index 排序
 """
 
 import asyncio
@@ -36,8 +35,7 @@ def NS(**kw):
 
 
 def tcd(index, tid=None, name=None, args=None):
-    """一个工具调用增量（ChatCompletionDeltaToolCall 形状）。function 不给就是
-    自定义型（没有 function 字段）。"""
+    """一个工具调用增量；function 不给就是自定义型（没有 function 字段）。"""
     fn = None if (name is None and args is None) else NS(name=name, arguments=args)
     return NS(index=index, id=tid, function=fn)
 
@@ -110,8 +108,7 @@ def test_boundaries():
     line("无 usage 收尾 → last_usage 为 None", llm.last_usage is None,
          repr(llm.last_usage))
 
-    # 自定义型 tool-call（Anthropic 风格：没有 function 字段）→ 整条跳过不炸；
-    # 同流里的标准调用照常解析
+    # 自定义型 tool-call → 整条跳过不炸；同流里的标准调用照常解析
     async def custom():
         yield chunk(NS(content=None, tool_calls=[tcd(0, tid="c1")]))
         yield chunk(NS(content=None, tool_calls=[tcd(1, tid="s1", name="bash",

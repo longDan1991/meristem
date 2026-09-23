@@ -1,11 +1,7 @@
 """会话选择器：`-r` 时用一个列表让用户挑要加载哪场老会话。
 
-用 prompt_toolkit 自绘一个极简列表：上下键移动、回车选中、Ctrl-D/Ctrl-C 取消。
-不用现成的 RadioList —— 它的回车是"只选中不确认"，跟这里要的"选中即加载"
-不是一回事；改它的绑定不如自己画这几行（它还带着 checkbox 圆括号这类这里
-用不上的壳）。
-
-会话从哪来、加载后干什么，都不是它的事 —— 它只把"用户挑了哪一个"还回去。
+用 prompt_toolkit 自绘极简列表（RadioList 的回车是"只选中不确认"，与"选中即加载"不符）；
+它只把"用户挑了哪一个"还回去。
 """
 
 from prompt_toolkit.application import Application
@@ -13,7 +9,6 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 
-# 一次最多显示多少行；多了就随选中滚动
 MAX_ROWS = 12
 
 
@@ -26,9 +21,9 @@ def _visible(items, index):
 
 
 async def pick_session(items, title="选择要加载的会话", inp=None):
-    """让用户挑一个会话。items = [(值, 显示行)]。回车返回选中值，取消返回 None。
+    """让用户挑一个会话；items = [(值, 显示行)]，回车返回选中值，取消返回 None。
 
-    `inp` 只给测试用：塞一条管道进去，键位走的是生产用的同一套。
+    `inp` 只给测试塞管道，键位走的是生产用的同一套。
     """
     if not items:
         return None
@@ -72,5 +67,5 @@ async def pick_session(items, title="选择要加载的会话", inp=None):
     try:
         return await app.run_async()
     except EOFError:
-        # stdin 关了（不是终端 / 管道没输入）—— 等同于取消
+        # stdin 关了（不是终端 / 管道没输入），等同于取消
         return None

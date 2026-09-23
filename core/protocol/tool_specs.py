@@ -1,14 +1,8 @@
 """协议的工具清单与 schema 适配。
 
-工具按节点类型分（`NODE_TOOLS` 是单一事实）：
-
-  · alloc    create_children / conclude
-  · leaf     bash / read / write / conclude
-  · intake   submit_root
-
-工具的**实现**是 `runtime/tools.py` 里的 `@mcp.tool` 函数（schema 与实现一体，
-provider 拿到的是 FastMCP 从签名生成的 schema）。本文件只管：清单、形式字段的
-形状（`ChildSpec`）、把 mcp 上的工具转成 litellm 要的 OpenAI 格式。
+`NODE_TOOLS` 是单一事实（alloc: create_children / conclude，leaf: bash / read / write /
+conclude，intake: submit_root）。工具实现是 `runtime/tools.py` 的 `@mcp.tool` 函数；
+本文件只管清单、`ChildSpec` 形状、把 mcp 工具转成 litellm 要的 OpenAI 格式。
 """
 
 from fastmcp import FastMCP
@@ -16,23 +10,32 @@ from fastmcp.utilities.json_schema import replace_refs
 from pydantic import BaseModel, Field
 
 from .. import config as cfg
-from ..compression import RETRIEVE_TOOL
+from ..compression import RETRIEVE_NAME, RETRIEVE_TOOL
 
-# 工具都在同一个实例上注册（实现注册发生在 runtime/tools.py 的 import 时）。
-# 进程内当"工具定义表"用，不跑 server。
+# 工具都注册在同一个实例上（实现在 runtime/tools.py 的 import 时注册）；进程内当定义表用，不跑 server
 mcp = FastMCP("tree")
 
 # 每个节点类型的工具清单 —— 单一事实。
-# headroom_retrieve 不在表里：只在 COMPRESS 开时由 openai_tools 追加。
 NODE_TOOLS = {
     "alloc": ("create_children", "conclude"),
     "leaf": ("bash", "read", "write", "conclude"),
     "intake": ("submit_root",),
 }
 
+# 叶子的动作工具 = 亲手接触世界的那些（结论审计的观测来源）；conclude 只是出结论。
+ACTION_TOOLS = tuple(n for n in NODE_TOOLS["leaf"] if n != "conclude")
+
+
+def allowed_names(which):
+    """某节点类型这次能调的工具名 —— 工具清单的唯一出口（leaf 在压缩开时加取回工具）。"""
+    names = NODE_TOOLS[which]
+    if which == "leaf" and cfg.COMPRESS:
+        names = names + (RETRIEVE_NAME,)
+    return names
+
 
 class ChildSpec(BaseModel):
-    """一个子任务的形式字段（= 分配节点交给孩子的格子）。"""
+    """一个子任务的形式字段（分配节点交给孩子的格子）。"""
 
     name: str = Field(description="≤20 字。这件事叫什么，你和孩子靠它互相指认。")
     detail: str = Field(description="≤240 字。孩子看不见你的脑子，只能看你写的字。")
@@ -80,12 +83,11 @@ async def openai_tools():
     """每个节点类型的工具清单（OpenAI 格式，给 litellm）。只建一次。"""
     global _openai_cache
     if _openai_cache is None:
-        leaf = [await openai_spec(n) for n in NODE_TOOLS["leaf"]]
-        if cfg.COMPRESS:
-            leaf.append(RETRIEVE_TOOL)
-        _openai_cache = {
-            "alloc": [await openai_spec(n) for n in NODE_TOOLS["alloc"]],
-            "leaf": leaf,
-            "intake": [await openai_spec(n) for n in NODE_TOOLS["intake"]],
-        }
+        specs = {}
+        for which in NODE_TOOLS:
+            specs[which] = [
+                RETRIEVE_TOOL if n == RETRIEVE_NAME else await openai_spec(n)
+                for n in allowed_names(which)
+            ]
+        _openai_cache = specs
     return _openai_cache

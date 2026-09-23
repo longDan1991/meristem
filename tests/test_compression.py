@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
-"""选项 B 的定向测试：叶子工具输出走真 role=tool 消息 + 发送边界压缩。
+"""叶子工具输出走真 role=tool 消息 + 发送边界压缩的定向测试。
 
-验证四件事（都是 B 的核心不变量）：
+  A. 对话形态：assistant(tool_call) 与 tool(观测) 配对，工具调用 id 不重复
+  B. 压缩只发生在发送边界：存储是原文，线上压短，user 一字未动
+  C. 可逆：日志折叠嵌 `Retrieve more: hash=...`，按 hash 可取回原文；FATAL 行幸存
+  D. TREE_COMPRESS=0（保险阀）：不挂取回工具、不产生 wire_compressed
+  F. 命名分节：叶子 system 不含工具签名、不含 <skill_gate>
+  G. 产出记账：bash 的 rm 在 effects 里记为 delete
 
-  A. 对话形态：叶子维护真对话 —— assistant(tool_call) 与 tool(观测) 配对，
-     工具调用 id 在一条对话里不重复（重复的 call_0 会被 provider 拒 / 串）。
-  B. 压缩只发生在发送边界：存储（trace 的 tool 事件）是原文；
-     第 4 回合起，最早那条大工具输出在线上被压短；user（形式字段）一字未动；
-     trace 里有 wire_compressed 统计。
-  C. 可逆：日志折叠（LOG）在压缩文本里嵌 `Retrieve more: hash=...`，
-     按 hash 调 retrieve_original 取回与原文完全一致的文本；FATAL 行幸存。
-  D. TREE_COMPRESS=0（保险阀）：不挂取回工具、不产生 wire_compressed。
-  F. 命名分节：叶子 system 不含 bash/read/write 签名（它们住在各自工具的
-     schema description）、不含 <skill_gate> 节。
-  G. 产出记账：bash 的 rm 在 effects 里记为 delete（修：turn.py 曾把 delete 覆盖成空）。
-
-headroom 的压缩是确定性的（无损折叠 / 日志折叠），所以这些断言不依赖网络。
+headroom 的压缩是确定性的，所以这些断言不依赖网络。
 """
 
 import asyncio
@@ -39,7 +32,7 @@ OK = []
 
 
 def stored_obs(recs, needle):
-    """trace 里某条命令的观测原文 —— 存储只活在这里（节点不再有 observations）。"""
+    """trace 里某条命令的观测原文 —— 存储只活在这里。"""
     for r in recs:
         if r["kind"] != "tool":
             continue
@@ -53,9 +46,7 @@ def line(tag, cond, detail=""):
     OK.append(bool(cond))
 
 
-# 三条大输出的制造方式：直接给 bash 一条生成大输出的命令（直接工具模型，
-# 不再有"一段代码"这个中间载体）。引号小心：外层是 Python 字符串，
-# shell 双引号里再包 python -c 的单引号 dict 键。
+# 直接给 bash 一条生成大输出的命令；引号小心：外层 Python 字符串、shell 双引号里再包 python -c。
 def big_json_cmd():
     return ('python3 -c "import json; print(json.dumps('
             "[{'date': '2026-12-31', 'close': i, 'vol': i * 2} "
@@ -75,11 +66,7 @@ def big_unique_cmd():
 
 
 class ScriptLeaf:
-    """按脚本回话的叶子：依次调工具（每个都真跑），跑完出结论。
-
-    把每次收到的 messages 原样记下来 —— 测试断言的是**线上形态**
-    （压缩发生在发送边界，这里看到的就是模型真收到的）。
-    """
+    """按脚本回话的叶子：依次调工具，跑完出结论；把每次收到的 messages 原样记下来。"""
 
     def __init__(self, calls):
         self.calls = list(calls)

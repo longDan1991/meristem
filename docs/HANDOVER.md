@@ -20,7 +20,7 @@
 > join，对齐 pi 的 `system-prompt.ts`）。
 > **system 不走 @mcp.prompt**：`tree/prompts/__init__.py` 的 `render_turn` 直接返回
 > `[system, 基础 user]` 分开两条；**class Node 不碰字符串**，消息拼接全部在
-> `tree/prompts/messages.py`（header / lineage / base_user / spec_line / child_result）。
+> `tree/prompts/messages.py`（header / lineage / base_user / child_result）。
 > **每个节点（分配节点和叶子一样）都是完整 Loop**：统一维护平铺对话
 > （基础 user 字节稳定 + 累积的 assistant/tool/user），分配节点的每次分配（create_children
 > 的 tool 回话）和下层结论（调度器注入）都在对话里，不再单发 render 整个历史。
@@ -31,7 +31,7 @@
 
 > **2026-09 存储重构：检查点 = `{node, msgs}`，编排字段全部删除。** Node 删掉
 > `attempts` / `observations` / `status` —— 历史只活在一处（每个节点的平铺对话 msgs），
-> 状态检查点 = `{"node": Node.to_dict(), "msgs": [...]}`（2026-09-22 起对话**增量落盘**：
+> 状态检查点 = `{"node": node_to_dict(node), "msgs": [...]}`（2026-09-22 起对话**增量落盘**：
 > 每节点第一笔全量、之后只带自上次检查点以来新增的消息，`session.load` 按序拼回全量），
 > 没有 ready / finished / waiting /
 > rest / gate_id 等编排字段。编排由 `tree/runtime/reconcile.py`（actionable 谓词 + settle 结算，
@@ -128,7 +128,7 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `terminal/` | 218 | **终端会话**（介质与话轮）：入口的对话从这里走，控制面也落这里（`chat.py`），`-r` 的会话选择器在 `picker.py`，树的视图 `render_tree` 在 `view.py`（展示变因，不碰协议）。**读交给 `prompt_toolkit`**（回车发送 / 方向键改字 / 上下键历史 / 括号粘贴 / Alt-Enter 换行），**显示交给 `rich`** |
 | `tree/prompts/` | | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（三种节点类型的 preamble / process / input，每节一个函数）、`skills.py` 两个条件节（gate / compression）、`tools.py` + `rules.py` 从 `tool_specs.NODE_TOOLS` 推导（工具语义唯一来源 = schema，`docs/PROMPTS.md`） |
 | `tree/prompts/__init__.py` | 140 | **节组装器**：`build_system_sections`（Record<节名,内容>）+ `render_system`（每节包 `<节名>` 标签，节名正则校验）+ `render_turn`（**不走 @mcp.prompt**，直接返回 [system, 基础 user] 分开两条） |
-| `tree/prompts/messages.py` | 126 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `base_user`（线上字节稳定基础消息）/ `spec_line` / `child_result`（下层结论注入，带 id 标记）/ `result_ids`（从对话推导已投递的孩子） |
+| `tree/prompts/messages.py` | 126 | **节点消息拼接全在这**（class Node 不碰字符串）：`header` / `lineage` / `base_user`（线上字节稳定基础消息）/ `child_result`（下层结论注入，带 id 标记）/ `result_marks`（从对话推导已投递的孩子 id / 名字） |
 | `tree/runtime/intake.py` | 112 | **入口**：唯一顶层。通道与节点同构（说话 / `submit_root` 交形式），谈成任务就当场 `run()`，结论作为工具结果回填再接着谈。它就是一条永不自己停的消息循环（`runtime/loop.py`），事件走它自己的 Loop sink（`subscribe` 暴露） |
 | `tree/config.py` | 53 | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7） |
 | `tree/compression.py` | 81 | 叶子工具输出的线上压缩（headroom）：发送边界路由压缩 + `headroom_retrieve` 取回 |

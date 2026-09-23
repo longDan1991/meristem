@@ -1,44 +1,17 @@
 """提示词：命名分节结构 —— system = `Record<节名, 内容>`，每节一个同名 XML 标签。
 
-对齐 pi 的 `buildSystemPromptSections` / `renderSystem`（`system-prompt.ts`，
-成熟宿主范式，见 `docs/PROMPTS.md`）：
+system 是分节的数据结构而不是拼好的字符串：每节渲染成 `<节名>\n内容\n</节名>`，
+preamble 无标签放最前；节名必须匹配 `[a-z][a-z0-9_-]*`，违反当场报错。
 
-  · system 不是拼好的字符串，是**命名分节的数据结构**。每节渲染成
-    `<节名>\n内容\n</节名>`；`preamble` 无标签、放在最前。
-  · 节名机器校验：必须匹配 `[a-z][a-z0-9_-]*`，违反当场报错（AGENTS §2 不掩盖）。
-    设计文档表里的 `skill:gate` / `skill:compression` 带冒号通不过校验，
-    条件节用下划线：`skill_gate` / `skill_compression`。
-  · 节组成 = f(节点出生时静态属性)：恒在的 preamble / process / tools / rules / input
-    + 条件节 `skill_gate`（`node.gate`）/ `skill_compression`（`cfg.COMPRESS` 且叶子）。
-    节点生命周期内不变 → system 字节稳定 → provider KV 缓存按节命中。
-  · 节内容**直接写在代码里**（没有 .md 文件）：散文节在 `prose.py`、条件节在
-    `skills.py`、tools / rules 两节从 `tool_specs.NODE_TOOLS` 的工具清单推导
-    （工具清单变，操作纪律跟着变，docs/PROMPTS.md §4.2）。
+节组成 = f(节点出生时静态属性)：恒在的 preamble / process / tools / rules / input，
+加条件节 `skill_gate`（node.gate）/ `skill_compression`（cfg.COMPRESS 且叶子）——
+生命周期内不变 ⇒ system 字节稳定 ⇒ provider KV 缓存按节命中。内容写在代码里，
+散文在 `prose.py`、条件节在 `skills.py`、tools / rules 从 `tool_specs.NODE_TOOLS` 推导。
 
-**system 不走 @mcp.prompt，也不和任务消息混装**：`render_turn` 只返回 [system]；
-节点的任务（`base_user`）在它自己的平铺对话 `msgs[0]`，之后 assistant / tool / user
-逐条累积。发模型前由 `runtime/loop._build_wire` 把 system 与配对规范化后的对话拼成
-wire（没回话的 tool_call 补占位回话）。
+`render_turn` 只返回 system；节点的任务（`base_user`）在平铺对话 msgs[0] 里，
+发模型前由 `runtime/loop._build_wire` 拼成 wire（没回话的 tool_call 补占位）。
 
-本文件只做三件事：按在场规则组装节（`build_system_sections`）、把节渲染成
-system 文本（`render_system`）、产出线上 wire（`render_turn`）。节点消息的
-拼接在 `messages.py`（class Node 不碰字符串）。
-
-每条硬性要求都对应 `core/protocol/gate.py` 里的一处代码检查 —— 改一边就得看另一边：
-
-    "除 notes 外全部必填"        →  clean_spec：缺一个当场拒
-    "必须携带父的可测物理量"      →  inherits + 根锚点，当场拒绝
-    "最多一个门槛"                →  门槛先做，不成立则分支作废
-    "判定满足必须指得出证据"      →  指不出来就降级为未满足
-    kind                          →  clean_spec：只能是 dispatch / leaf，不给兜底
-    外部需求四类                  →  EXTERNAL_CLASSES（core/protocol/fields.py）
-    字段的"本质"                  →  tool_specs.py 的 schema description（provider 原样喂模型）
-
-入口（`prompts/prose.py` 的 intake 三节）是同一个协议的第一环：它交出来的
-`root` 要过 `clean_spec` 加"验收标准必须有可测物理量"，所以它不可能塞进树
-检查不了的东西。
-
-设计与不变量的完整版在 `docs/PROMPTS.md`；进度与交接在 `docs/HANDOVER.md`。
+每条硬性要求都对应 `gate.py` 里的一处代码检查，改一边就得看另一边（对照见 `gate.py` 文件头）。
 """
 
 import re
@@ -53,18 +26,15 @@ from .tools import tools_section
 
 __all__ = ["render_turn", "build_system_sections", "render_system", "feedback"]
 
-# 节名机器校验（pi 的 SYSTEM_PROMPT_SECTION_NAME，见 docs/PROMPTS.md §3.3）。
+# 节名机器校验（pi 的 SYSTEM_PROMPT_SECTION_NAME）
 SECTION_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def build_system_sections(which, node=None):
-    """返回 Record<节名, 内容>（pi 的 SystemPromptSections）。
+    """返回 Record<节名, 内容>；`which` = alloc / leaf / intake，`node` = 该节点（intake 没有）。
 
-    `which` = alloc / leaf / intake；`node` = 该节点（intake 没有）。节组成
-    只看节点出生时已知的静态属性（kind / gate / cfg.COMPRESS），生命周期内不变。
-    返回的 dict 按固定顺序插入（docs/PROMPTS.md §3.1 表自上而下：preamble /
-    process / tools / rules / input / skill_gate / skill_compression），
-    render_system 照 dict 顺序渲染，KV 缓存按节命中稳定。
+    节组成只看出生时已知的静态属性（kind / gate / cfg.COMPRESS），dict 按固定顺序插入，
+    render_system 照顺序渲染，KV 缓存按节命中稳定。
     """
     if which not in NODE_TOOLS:
         raise ValueError("未知节点类型: %r（可用：%s）"
@@ -82,11 +52,7 @@ def build_system_sections(which, node=None):
 
 
 def render_system(sections):
-    """Record<节名, 内容> → system 文本：每节包 `<节名>` 标签，preamble 无标签最前。
-
-    节名违反 `[a-z][a-z0-9_-]*` 当场报错（不掩盖）。顺序按 dict 插入顺序
-    （build_system_sections 已按固定顺序排好）。
-    """
+    """Record<节名, 内容> → system 文本：每节包 `<节名>` 标签，preamble 无标签最前；节名不合法当场报错。"""
     out = []
     for name, content in sections.items():
         text = str(content).strip()
@@ -100,11 +66,6 @@ def render_system(sections):
 
 
 def render_turn(which, node=None):
-    """一个节点发给模型的 system 消息（dict 列表，直接喂 litellm）。
-
-    **只给 system**：节点的任务消息和累积历史都在它自己的平铺对话（`msgs`）里 ——
-    子节点出生时任务（`base_user(node)`）就被拼进 msgs[0]，之后 assistant/tool/user
-    逐条累积。这里不重复拼任务，也不注册 FastMCP prompt。
-    """
+    """一个节点发给模型的 system 消息，只给 system；任务消息与历史都在它自己的平铺对话里。"""
     return [{"role": "system",
              "content": render_system(build_system_sections(which, node))}]

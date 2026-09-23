@@ -1,15 +1,10 @@
 """一个节点的平铺对话账本，以及线上 wire 的配对规范化。
 
-对话是节点的全部历史：**首个 user 消息就是它收到的任务**（子节点出生时把
-`base_user(node)` 拼进 msgs，入口节点的首条是用户说的话），之后 assistant /
-tool / user 消息逐条累积。没有单独的"任务字段"，任务就在对话里。
+对话是节点的全部历史：首个 user 消息就是任务（子节点出生时拼 `base_user`，入口首条是用户的话），
+之后 assistant / tool / user 逐条累积；没有单独的"任务字段"，写一律走方法。
 
-`pair(msgs)` 是发射边界的规范化，不进账本：provider 要求每个 tool_call 都有
-配对回话，而结构类工具（create_children / conclude / submit_root）**不产出
-tool 回话** —— 它们的"结果"是随后到达的子节点结论（以 user 消息注入）。
-所以发送前给没回话的 tool_call 补一条占位回话。
-
-写一律走方法，不许从外面 `.msgs.append`。
+`pair(msgs)` 是发射边界的规范化、不进账本：provider 要求每个 tool_call 都有配对回话，
+而结构类工具不产出 tool 回话，发送前补一条占位。
 """
 
 import json
@@ -18,7 +13,7 @@ from ..prompts.feedback import pair_placeholder
 
 
 class Dialogue:
-    """平铺消息账本。`msgs` 就是模型看到的历史（不含 system / 任务首条由创建者拼）。"""
+    """平铺消息账本；`msgs` 就是模型看到的历史（不含 system，任务首条由创建者拼）。"""
 
     def __init__(self, msgs=None):
         self.msgs = msgs if msgs is not None else []
@@ -27,7 +22,7 @@ class Dialogue:
         return self.msgs
 
     def assistant(self, text, tool_calls):
-        """assistant 入账；返回落账的 tool_call id 列表（缺 id 时按回合数算）。"""
+        """assistant 入账，返回落账的 tool_call id 列表（缺 id 时按回合数算）。"""
         offset = sum(1 for m in self.msgs if m.get("role") in ("assistant", "tool"))
         ids = [tc.id or "call_%d" % (offset + i) for i, tc in enumerate(tool_calls)]
         wire = [
@@ -54,8 +49,7 @@ class Dialogue:
         self.msgs.append({"role": "user", "content": text})
 
     def feedback(self, text):
-        """把一条打回理由写回对话：上一条是带工具调用的 assistant 就配成 tool
-        回话（每个 id 一条），否则写 user 消息（对话不能断在两个 assistant 之间）。"""
+        """把打回理由写回对话：上一条是带工具调用的 assistant 就配成 tool 回话，否则写 user 消息。"""
         last = self.msgs[-1] if self.msgs else None
         if last and last.get("role") == "assistant" and last.get("tool_calls"):
             for w in last["tool_calls"]:
@@ -65,11 +59,7 @@ class Dialogue:
 
 
 def pair(msgs):
-    """线上 wire 的配对规范化：给没有回话的 tool_call 补一条占位 tool 回话。
-
-    结构类工具（create_children / conclude / submit_root）没有 tool 回话，
-    但 provider 要求配对；占位回话说明"结果随后到达"，账本一个字不改。
-    """
+    """线上 wire 的配对规范化：给没有回话的 tool_call 补一条占位 tool 回话（账本一个字不改）。"""
     answered = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
     out = []
     for m in msgs:

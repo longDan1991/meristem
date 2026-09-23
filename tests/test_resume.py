@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""会话可续跑的定向测试。零成本、确定性（脚本化模型 + 真 Loop + 真落盘）。
+"""会话可续跑的定向测试（零成本、确定性：脚本化模型 + 真 Loop + 真落盘）。
 
-核心不变量：**一场会话 = 一棵树**，入口节点（kind="intake"）是根，谈成的任务
-都是它的孩子。`state` 检查点只有两样：Node 全字段 + 平铺对话（msgs）—— 没有
-任何编排字段。退出（哪怕崩溃）后 `Store.load` 读回这**一棵树**，直接丢给
-`runtime.loop.run` 接着跑：
+核心不变量：一场会话 = 一棵树，入口节点是根；state 检查点只有 Node 全字段 + 平铺对话，
+崩溃后 `Store.load` 读回这棵树直接丢给 `runtime.loop.run`，该不该跑由 `plan.actionable` 从数据推导。
 
-  · 该不该跑由 `plan.actionable` 从数据推导（msgs 非空 + 最后一条不是 assistant）。
-
-  A. Node 序列化往返：to_dict → from_dict 不丢任何字段
+  A. Node 序列化往返：node_to_dict → node_from_dict 不丢字段
   B. load 返回一棵树；没根 / 多根当场报错
-  C. 续跑：一棵树跑到一半"崩溃" → load → resume → 跑完
+  C. 续跑：跑到一半"崩溃" → load → resume → 跑完
   D. 入口对话 = 根节点的 msgs（种子进根对话）
-  E. 整场会话（入口 + 任务）崩溃 → load 一棵树 → resume → 全完工
+  E. 整场会话崩溃 → load 一棵树 → resume → 全完工
   F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果
   G. 一场会话多个任务 = 一棵树多个孩子，只有没跑完的被接着跑
-  H. 增量检查点：每节点第一笔全量、之后只带新增消息，load 按序拼回全量
+  H. 增量检查点：第一笔全量、之后只带新增，load 按序拼回全量
   I. Store.label：当前格式认入口的孩子，档案（无入口）认根本身
 """
 
@@ -29,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 from core.llm import Message, ToolCall                        # noqa: E402
-from core.protocol.fields import Node                         # noqa: E402
+from core.protocol.fields import Node, node_from_dict, node_to_dict  # noqa: E402
 from core.runtime import store as store_mod                   # noqa: E402
 from core.runtime.loop import run                             # noqa: E402
 from core.runtime.store import Store                          # noqa: E402
@@ -50,11 +46,11 @@ def kid(name, accept="2026-12-31 收盘 >= 1", kind="leaf", gate=False):
 
 def state_rec(node, msgs):
     """检查点：Node 全字段 + 平铺对话，没有编排字段。"""
-    return {"node": node.to_dict(), "msgs": msgs}
+    return {"node": node_to_dict(node), "msgs": msgs}
 
 
 def write_recs(path, recs):
-    """测试夹具：按磁盘格式手工写一份记录（测的是 load 的读路径）。"""
+    """夹具：按磁盘格式手工写一份记录（测的是 load 的读路径）。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         for nid, kind, payload in recs:
@@ -95,12 +91,13 @@ class ScriptLLM:
 
 async def main():
     print("=" * 80)
-    print("A. Node 序列化往返：to_dict → from_dict 不丢任何字段")
+    print("A. Node 序列化往返：node_to_dict → node_from_dict 不丢任何字段")
     n = Node(name="任务", detail="详情", notes="注意", accept="2026-12-31 收盘 >= 1",
              kind="leaf", gate=True, conc_range=[1, 2],
              lineage=[["根", "根的详情"]])
-    n.close("满足", "做完了", ["证据"], ["外部需求"])
-    n2 = Node.from_dict(n.to_dict())
+    n.verdict, n.conclusion = "满足", "做完了"
+    n.evidence, n.external = ["证据"], ["外部需求"]
+    n2 = node_from_dict(node_to_dict(n))
     line("字段原样回来", n2.name == n.name and n2.accept == n.accept
          and n2.kind == n.kind and n2.gate == n.gate)
     line("结构/结局都在", n2.lineage == n.lineage
@@ -129,7 +126,7 @@ async def main():
     d0 = tempfile.mkdtemp()
     store_mod.init(d0)
     write_recs(os.path.join(d0, "runs", "t", "trace.jsonl"),
-               [(None, "open", {"name": "只有 open、没有 state"})])
+               [(None, "tool", {"obs": "只有非 state 记录、没有检查点"})])
     try:
         Store.load("no-such-session")
         line("空记录报错（没有 state 检查点）", False)
@@ -326,7 +323,7 @@ async def main():
     d_i = tempfile.mkdtemp()
     it_i = Node(name="会话", kind="intake")
     leaf_i = Node(name="子A", accept="x", kind="leaf", parent=it_i.id, depth=1)
-    leaf_i.close("满足", "done", ["e"])
+    leaf_i.verdict, leaf_i.conclusion, leaf_i.evidence = "满足", "done", ["e"]
     it_i.children = [leaf_i.id]
     p_i = load_tree(d_i, it_i, [(it_i.id, "state", state_rec(it_i, [])),
                                 (leaf_i.id, "state", state_rec(leaf_i, []))]).path
@@ -334,7 +331,7 @@ async def main():
     line("当前格式：任务 = 入口的孩子", "子A" in lbl and "[满足]" in lbl)
     d_j = tempfile.mkdtemp()
     root_j = Node(name="老任务", accept="x", kind="dispatch")
-    root_j.close("阻塞", "做不了", [])
+    root_j.verdict, root_j.conclusion = "阻塞", "做不了"
     p_j = load_tree(d_j, root_j, [(root_j.id, "state", state_rec(root_j, []))]).path
     lbl2 = Store.label(p_j)
     line("档案：没有入口，根本身就是任务", "老任务" in lbl2 and "[阻塞]" in lbl2)
@@ -353,11 +350,11 @@ def _delta_and_legacy_mix_loads():
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps({"kind": "state", "node": n.id,
-                            "payload": {"node": n.to_dict(), "msgs": [],
+                            "payload": {"node": node_to_dict(n), "msgs": [],
                                         "delta": True, "base": 0}},
                            ensure_ascii=False) + "\n")
         f.write(json.dumps({"kind": "state", "node": n.id,
-                            "payload": {"node": n.to_dict(), "msgs": [
+                            "payload": {"node": node_to_dict(n), "msgs": [
                                 {"role": "user", "content": "全量覆盖"}]}},
                            ensure_ascii=False) + "\n")
     t = Store.load(n.id)

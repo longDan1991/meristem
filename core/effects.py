@@ -1,14 +1,8 @@
-"""从动作里机械抽 effects：bash 和 write 是同一件事的两个壳。
+"""从动作里机械抽 effects：bash 和 write 是同一件事的两个壳，一套抽取同时服务两者。
 
-`echo hi > a.txt` 就是 write("a.txt","hi") —— 所以这里一套抽取同时服务两者：
-复用者只关心"碰了什么"，不关心命令长什么样。
+`前置条件` 和 effects 一样重要 —— 复用失败最常见的原因不是配方错，而是前提不成立。
 
-`前置条件` 和 effects 一样重要：复用失败最常见的原因不是配方错，
-而是前提不成立（没网、包没装、不在那个目录）。没有这一项，
-一次冤枉的失败会把一条好配方记成"烂了"。
-
-effects 只进 trace 事件（给人看的过程记录），不落任何节点状态 ——
-历史只活在一处（节点的平铺对话）。
+effects 只进 trace 事件，不落任何节点状态（历史只活在一处）。
 """
 
 import os
@@ -26,20 +20,24 @@ NOHUP_RE = re.compile(r"\bnohup\b")
 TAILBG_RE = re.compile(r"&\s*$")
 
 
-def _abs(p, cwd):
-    if not p or p.startswith("/dev/") or p.startswith("&"):
+def abs_path(p, cwd=None):
+    """相对当前目录的路径 → 绝对路径；已绝对 / 没给 cwd 就原样返回。"""
+    if not p:
         return None
     if p.startswith("/") or not cwd:
         return p
     return os.path.normpath(os.path.join(cwd, p))
 
 
-def effects_of(tool, args, cwd=None, existed_before=None):
-    """返回 (effects, 前置条件)。
+def _abs(p, cwd):
+    # shell 文本里的 /dev/null 与 "&" 不是产物，不记
+    if not p or p.startswith("/dev/") or p.startswith("&"):
+        return None
+    return abs_path(p, cwd)
 
-    existed_before：write 必须传。effects_of 是在动作**之后**跑的，
-    那时文件已经存在了，不传的话 create 永远会被记成 modify。
-    """
+
+def effects_of(tool, args, cwd=None, existed_before=None):
+    """返回 (effects, 前置条件)；write 必须传 existed_before —— 本函数在动作之后跑，不传 create 会被记成 modify。"""
     fs = {"create": [], "modify": [], "delete": []}
     pkg, proc, net, data = [], [], [], []
 

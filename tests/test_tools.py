@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""工具层的纪律测试。
+"""工具层的纪律测试（修"叶子把同一文件读了 25 次"的 bug 换来的）。
 
-这个文件是修一个真 bug 换来的：一个叶子把同一个文件读了 25 次。
-原因不是模型傻，而是 read 静默截断 —— 模型以为读全了，其实没有。
-
-教训落成两条：
-  · read 是**翻页不是截断**：报出总量、本段区间、怎么取下一段（A/B）
-  · bash 输出**不截断**：跑出多少就是多少（C）—— 压缩在发送边界处理它，
-    截断会毁掉压缩救不回来的数据。
+  · read 是翻页不是截断：报出总量、本段区间、怎么取下一段（A/B）
+  · bash 输出不截断：跑出多少就是多少（C）
   · bash 必须带超时，超时是可见的事实（D）
 """
 
@@ -22,7 +17,7 @@ from core.tools import read                  # noqa: E402
 
 
 def bash(*a, **k):
-    """bash 现在是真异步（P4），测试里用同步壳调它。"""
+    """bash 是真异步，测试里用同步壳调它。"""
     return asyncio.run(T.bash(*a, **k))
 
 OK = []
@@ -68,7 +63,7 @@ def main():
     line("已经产生的输出被带回来了", "先打一行" in out)
     line("说了上限和怎么跑更久", "上限" in out and "nohup" in out)
 
-    # 留不留孤儿：子进程 3 秒后去碰一个文件，若没被一起杀就会看到它
+    # 留不留孤儿：子进程 3 秒后去碰一个文件，没被一起杀就会看到它
     orphan = "/tmp/_t_orphan_%d" % os.getpid()
     if os.path.exists(orphan):
         os.remove(orphan)
@@ -77,7 +72,7 @@ def main():
     time.sleep(4)
     line("超时把子进程也一起杀了（没留孤儿）", not os.path.exists(orphan))
 
-    # 夹上限：把上限改小，否则要等一小时才能验这一条
+    # 把上限改小，否则要等一小时才能验这一条
     _saved = (T.BASH_TIMEOUT, T.BASH_TIMEOUT_MAX)
     T.BASH_TIMEOUT, T.BASH_TIMEOUT_MAX = 1, 2
     try:

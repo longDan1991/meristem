@@ -1,12 +1,11 @@
-"""tools 节：从工具清单（`tool_specs.NODE_TOOLS`）生成，一行一个工具 + 何时用哪个。
+"""tools 节：从 `tool_specs.NODE_TOOLS` 生成，一行一个工具 + 何时用哪个。
 
-不重复工具描述 —— 签名 / 超时 / 语义住各自工具的 schema description
-（唯一来源，docs/PROMPTS.md §4.1）。工具清单变 → 这一节跟着变。
+不重复工具描述 —— 签名 / 超时 / 语义住各自工具的 schema description；工具清单变这节跟着变。
 """
 
 from ..protocol.tool_specs import NODE_TOOLS
 
-# 每个工具的一行决策指导（"何时用哪个"），不是工具描述。
+# 每个工具的一行决策指导（"何时用哪个"），不是工具描述
 _TOOL_GUIDE = {
     "create_children": "再拆一层：把任务拆成更小的子任务交给下层节点",
     "conclude": "出结论：判定这件事做没做完",

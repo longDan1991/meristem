@@ -1,9 +1,4 @@
-"""条件节：`node.gate` / `cfg.COMPRESS` 为真时在场的 skill 全文。
-
-触发条件是宿主已知的静态事实（docs/PROMPTS.md §4.3），各自只有一处定义：
-gate 看 `Node.gate`，压缩看 `cfg.COMPRESS`。组装器按节在场性注入，
-模型不需要"按需读文件"。
-"""
+"""条件节：`node.gate` / `cfg.COMPRESS` 为真时在场的 skill 全文，触发条件各只有一处定义。"""
 
 
 def skill_gate():

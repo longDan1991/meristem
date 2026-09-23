@@ -1,15 +1,10 @@
 """工具：模型与程序之间唯一的通道，实现就是 `@mcp.tool` 函数（schema 与实现一体）。
 
-  · alloc    create_children / conclude
-  · leaf     bash / read / write / conclude
-  · intake   submit_root
+工具按节点类型分（alloc: create_children / conclude，leaf: bash / read / write / conclude，
+intake: submit_root）。每次调用由 Loop 用 `run_tool` 驱动，`(loop, nid)` 经 ContextVar
+注入，各 asyncio task 独立所以并行调用不串。
 
-每次调用由 Loop 用 `run_tool` 驱动：先把 `(loop, nid)` 写进 ContextVar，工具函数
-经 `Depends(get_binding)` 拿到自己的运行时现场（store / 节点 / 手）。每个 asyncio
-task 的 contextvars 独立，所以并行调用的工具各拿各的现场，不串（AGENTS §9 无锁）。
-
-工具返回 `{"text": <给模型看的回话>}`：`None` = 结构类工具成功、不写 tool 回话
-（等待由数据表达）；字符串 = 观测 / 拒绝理由，写成一条 tool 回话。
+返回 `{"text": ...}`：None = 结构类工具成功、不写 tool 回话；字符串 = 观测 / 拒绝理由。
 """
 
 import contextvars
@@ -20,12 +15,12 @@ from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ValidationError as ToolValidationError
 
 from ..compression import RETRIEVE_NAME, retrieve_original
-from ..effects import effects_of
+from ..effects import abs_path, effects_of
+from ..protocol.fields import EXTERNAL_CLASSES, SATISFIED, VERDICTS
 from ..protocol.gate import anchors, clean_conclusion, clean_spec, inherits, validate_root
 from ..protocol.tool_specs import ChildSpec, mcp
 from ..prompts import feedback
-from ..prompts.feedback import gate_failed
-from ..prompts.messages import base_user, child_result, result_ids
+from ..prompts.messages import base_user, child_result, result_marks
 from ..tools import bash as _bash, read as _read, write as _write
 from .plan import make_child
 
@@ -66,10 +61,8 @@ def _action_result(store, nid, tool, args, obs):
 
 
 # ---------------------------------------------------------------- 结论的语义
-# conclude 工具自己在 Store 上做的事：落 verdict → 门槛续跑/作废 →
-# 扫父节点：孩子都出结论了就把结果逐条拼回父节点对话（不需要任何额外结构）。
 def _deferred(store, parent):
-    """父节点上还没启动的孩子：对话为空（任务还没拼进来）、又没有结论。"""
+    """父节点上还没启动的孩子：没结论、对话也为空。"""
     out = []
     for cid in parent.children:
         c = store.registry.get(cid)
@@ -89,41 +82,40 @@ def _resolve_gate(store, nid):
     deferred = [c for c in _deferred(store, parent) if c.id != nid]
     if not deferred:
         return
-    if node.verdict == "满足":
+    if node.verdict == SATISFIED:
         for c in deferred:
             store.append_user(c.id, base_user(c))
         store.record(parent.id, "gate_passed",
                      {"gate": node.name, "started": [c.name for c in deferred]})
     else:
         for c in deferred:
-            store.set_verdict(c.id, "未启动", gate_failed(node.conclusion), [], [])
+            store.set_verdict(c.id, "未启动", feedback.gate_failed(node.conclusion), [], [])
         store.record(parent.id, "gate_failed",
                      {"gate": node.name, "reason": node.conclusion,
                       "skipped": [c.name for c in deferred]})
 
 
 def _push_results(store, pid):
-    """父节点的孩子都出结论了 → 逐条拼回父节点对话（幂等）。"""
+    """父节点的孩子都出结论了就把结果逐条拼回父对话（幂等）。"""
     parent = store.registry.get(pid)
     if parent is None or not parent.children:
         return
     kids = [store.registry.get(c) for c in parent.children]
     if any(k is None or not k.verdict for k in kids):
-        return                                     # 还有孩子没结论 → 等
-    seen = result_ids(store.dialogue(pid).to_list())
+        return
+    seen, _ = result_marks(store.dialogue(pid).to_list())
     for k in kids:
         if k.id not in seen:
-            store.append_user(pid, child_result(k.record()))
+            store.append_user(pid, child_result(k))
 
 
 # ---------------------------------------------------------------- 结构类工具
 @mcp.tool
 async def create_children(children: list[ChildSpec],
                           _b=Depends(get_binding)) -> dict:
-    """把任务拆成更小的子任务交给下层节点。调它 = 再拆一层。
+    """把任务拆成更小的子任务交给下层节点（调它 = 再拆一层）。
 
-    有门槛时只有门槛孩子拿到任务（其余对话为空 = 暂缓）；门槛通过时它们才被
-    拼上任务。成功不写 tool 回话（父节点停在 assistant，等孩子结论回来）。
+    有门槛时只有门槛孩子拿到任务，其余对话为空 = 暂缓；成功不写 tool 回话。
     """
     _loop, store, nid, node = _current(_b)
     specs, reject = [], None
@@ -160,12 +152,11 @@ async def create_children(children: list[ChildSpec],
 
 @mcp.tool
 async def conclude(
-        verdict: Annotated[str, "满足 | 未满足 | 阻塞"],
+        verdict: Annotated[str, " | ".join(VERDICTS)],
         text: Annotated[str, "结论正文，落在上层给的 conc_range 区间里。"],
         evidence: Annotated[list[str] | None,
                             "判定「满足」时必填：第几次观测 / 产物路径 / 子任务 name。"] = None,
-        external: Annotated[str, "判定「阻塞」时：需要人到场 / 需要真实账户 / "
-                                 "需要真实资金 / 需要现实设备。"] = "",
+        external: Annotated[str, "判定「阻塞」时：" + " / ".join(EXTERNAL_CLASSES) + "。"] = "",
         _b=Depends(get_binding)) -> dict:
     """出结论：判定这件事做没做完。判定「满足」必须指得出真证据。"""
     _loop, store, nid, node = _current(_b)
@@ -258,12 +249,12 @@ async def write(path: Annotated[str, "要写的文件路径（相对工作区）
     """写一个文件。产出会记进账本，conclude 时必须逐个交代。"""
     _loop, store, nid, _node = _current(_b)
     cwd = os.getcwd()
-    ap = path if path.startswith("/") else os.path.normpath(os.path.join(cwd, path))
-    existed = os.path.exists(ap)
+    ap = abs_path(path, cwd)
+    existed = bool(ap) and os.path.exists(ap)
     obs = str(_write(path, content))
     eff, pre = effects_of("write", {"path": path}, cwd=cwd, existed_before=existed)
-    created = [ap] if (not existed and os.path.exists(ap)) else []
-    modified = [ap] if (existed and os.path.exists(ap)) else []
+    created = [ap] if (ap and not existed and os.path.exists(ap)) else []
+    modified = [ap] if (ap and existed and os.path.exists(ap)) else []
     _record_effects(store, nid, "write", {"path": path}, eff, pre, created, modified)
     return {"text": _action_result(store, nid, "write",
                                    {"path": path, "content": content}, obs)}
@@ -276,7 +267,7 @@ _TOOLS = {}
 async def run_tool(loop, nid, name, args):
     """Loop 驱动一次工具调用：绑定现场 → 跑 → 返回要写回对话的文本（None = 不写）。
 
-    headroom_retrieve 不是 mcp.tool（它是压缩库的取回入口），在这里特判。
+    headroom_retrieve 不是 mcp.tool，在这里特判。
     """
     if name == RETRIEVE_NAME:
         return retrieve_original(args)

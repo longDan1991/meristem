@@ -1,26 +1,12 @@
 """一场会话的存储：一棵树 + 一份 append-only 记录，写入即账。
 
-会话 = 一棵树（入口节点为根，谈成的任务都是它的孩子）。存储把这场会话的全部
-数据收在一个对象里，并且是**树与记录的唯一写者** —— 工具、Loop 都只经它改树。
+会话 = 一棵树（入口节点为根，谈成的任务都是它的孩子）；存储是树与记录的唯一写者，
+工具、Loop 都只经它改树。写入方法是树的所有变更入口（`append_*` / `set_verdict` / `put`）。
 
-接口：
-  · `Store.roots()`          加载树根列表（-r：会话 id + 一行摘要）
-  · `Store.load(session)`    加载一棵树（session = roots() 给的会话 id）
-  · `Store.new(root, seed)`  建一棵只含入口根的新树
-  · `store.node(nid)`        按 id 取一个节点
-  · `store.dialogue(nid)`    某节点的平铺对话
-  · `store.put(nodes, on_id)` 新增 / 更新一组节点（自动落盘 + 标脏）
-  · 那一组写入方法（append_* / set_verdict / put）是树的所有变更入口
+落盘：先写内存缓冲、`pydash.throttle` 懒写磁盘；检查点 = Node 全字段 + 平铺对话，
+对话增量落盘（第一笔全量，之后只写新增），恢复端按序拼回全量。
 
-结论的完整语义（扫父节点、回填结果、门槛续跑/作废）是 `conclude` 工具的职责，
-Store 只提供它用的基本写入口。
-
-落盘：写入先进内存缓冲，`pydash.throttle` 按节奏懒写磁盘；读记录前和进程退出时
-自动补齐。检查点就是全部状态：Node 全字段 + 平铺对话；对话**增量落盘**（第一笔
-全量，之后只写自上次以来新增的消息），恢复端按序拼回全量。
-
-`dirty` 是 Loop 的活跃集来源：任何写都标脏，Loop 每轮 `take_dirty()` 取走 ——
-它是易失的调度状态，不进检查点。
+`dirty` 是 Loop 的活跃集来源，是易失的调度状态，不进检查点。
 """
 
 import atexit
@@ -34,22 +20,20 @@ import pydash
 
 from core import config as cfg
 
-from ..protocol.fields import Node
+from ..protocol.fields import node_from_dict, node_to_dict
 from ..prompts.messages import base_user
 from .dialogue import Dialogue
 
-# 新会话目录的任务名恒为 intake（入口会话），哈希是常量。
 _INTAKE_SLUG = hashlib.sha1(b"intake").hexdigest()[:6]
 
-# 记录根：所有会话的记录都落它下面。程序开始时 init() 定（默认取配置里的工作区）。
 _ROOT = cfg.WORKSPACE
 
-# 懒写节奏：记录最多每这么久落一次盘（毫秒）。
+# 懒写节奏：记录最多每这么久落一次盘（毫秒）
 _THROTTLE_MS = 200
 
 
 def init(root=None):
-    """程序开始时的初始化：记录根定在这（默认配置里的工作区）。"""
+    """记录根改到这（默认配置里的工作区）；测试用它把记录根指到临时目录。"""
     global _ROOT
     _ROOT = root or cfg.WORKSPACE
 
@@ -64,7 +48,7 @@ def _new_path():
     return os.path.join(_runs_dir(), slug, "trace.jsonl")
 
 
-# 还开着的记录文件：读记录前 / 进程退出时统一把缓冲落盘。
+# 读记录前 / 进程退出时统一把缓冲落盘
 _LIVE = []
 
 
@@ -121,10 +105,7 @@ class Store:
     # ─────────────────────────────────────────── 2. 加载 / 新建
     @classmethod
     def load(cls, session):
-        """加载一棵树：`session` 是 `Store.roots()` 给的会话 id（根节点 id）。
-
-        没有该会话、没有 state 检查点、或根不唯一 → 当场报错，不静默给半成品树。
-        """
+        """加载一棵树；找不到 / 没有 state 检查点 / 根不唯一都当场报错，不给半成品树。"""
         _flush_live()
         for path in cls._paths():
             states = cls._read(path)
@@ -136,11 +117,7 @@ class Store:
 
     @classmethod
     def new(cls, root, seed=None):
-        """建一棵只含入口根的新树。
-
-        入口根的首条是 `seed`（用户说的话）；一个直接建的任务根（非 intake）
-        首条是它的任务（`base_user`）—— 任务就在对话里，创建即拼进来。
-        """
+        """建一棵只含入口根的新树；入口根首条是 `seed`，非 intake 根首条是它的任务（`base_user`）。"""
         store = cls(_new_path(), root=root)
         store.put([root])
         if seed is not None:
@@ -175,11 +152,7 @@ class Store:
 
     # ─────────────────────────────────────────── 4. 写（树的所有变更入口）
     def put(self, nodes, on_id=None):
-        """新增 / 更新一组完整 Node：登记、标脏、自动落盘。
-
-        新增（id 没登记过）：建空对话、进登记册、发 open 事件。
-        on_id 给了且在本会话里 → 它一起落（它的 children 刚变过）。
-        """
+        """新增 / 更新一组完整 Node：登记、标脏、自动落盘；on_id 给了就一起落（它的 children 刚变过）。"""
         for node in nodes:
             if node.id not in self.state:
                 self._register(node)
@@ -210,8 +183,12 @@ class Store:
         self._after(nid)
 
     def set_verdict(self, nid, verdict, text, evidence, external=None):
-        """落 verdict。结论的完整含义（扫父节点 / 回填结果 / 门槛）在 conclude 工具里。"""
-        self.registry[nid].close(verdict, text, evidence, external)
+        """落 verdict；结论的完整含义（扫父节点 / 回填 / 门槛）在 conclude 工具里。"""
+        node = self.registry[nid]
+        node.verdict = verdict
+        node.conclusion = text
+        node.evidence = evidence or []
+        node.external = external or []
         self._after(nid)
 
     def _after(self, nid):
@@ -221,10 +198,9 @@ class Store:
     # ─────────────────────────────────────────── 读记录的辅助
     @staticmethod
     def iter_lines(path, kinds=None):
-        """逐行**流式**读一份记录。最后一行若是被截断的半笔，跳过 —— 一次崩溃
-        不该把整棵树的成果埋掉；其它位置坏行照样炸（那是真损坏）。
+        """逐行流式读一份记录：跳过被截断的最后一行（崩溃不埋成果），其它位置坏行照样炸。
 
-        流式读不知道 EOF 在哪：用「后一行到达才解析前一行」的 lookahead。
+        流式读不知 EOF 在哪，用「后一行到达才解析前一行」的 lookahead。
         """
         _flush_live()
         want = tuple('"kind": "%s"' % k for k in kinds) if kinds else ()
@@ -273,7 +249,7 @@ class Store:
 
     @staticmethod
     def _registry_of(states):
-        return {nid: Node.from_dict(st["node"]) for nid, st in states.items()}
+        return {nid: node_from_dict(st["node"]) for nid, st in states.items()}
 
     @staticmethod
     def _root(registry):
@@ -317,26 +293,21 @@ class Store:
         return {"dialogue": Dialogue(msgs if msgs is not None else [])}
 
     def _register(self, node):
+        # 节点出生与首笔 state 检查点同一次 put 完成，出生事件不另立记录（state 已含全字段）。
         self.state[node.id] = self._state_for(node)
         self.registry[node.id] = node
-        self.record(node.id, "open", {
-            "name": node.name, "detail": node.detail, "notes": node.notes,
-            "accept": node.accept, "kind": node.kind, "gate": node.gate,
-            "depth": node.depth, "parent": node.parent,
-            "conc_range": node.conc_range,
-            "workspace": os.path.abspath(os.getcwd())})
 
     def _checkpoint(self, nid):
-        """把节点状态写进会话记录（对话增量，§11）。"""
+        """把节点状态写进会话记录（对话增量）。"""
         msgs = self.state[nid]["dialogue"].to_list()
         base = self._base.get(nid, 0)
         if base == 0 or len(msgs) < base:
             # 第一笔 / 恢复重开：全量
             self._base[nid] = len(msgs)
             self.record(nid, "state",
-                        {"node": self.registry[nid].to_dict(), "msgs": msgs})
+                        {"node": node_to_dict(self.registry[nid]), "msgs": msgs})
             return
         delta = msgs[base:]
         self._base[nid] = base + len(delta)
-        self.record(nid, "state", {"node": self.registry[nid].to_dict(),
+        self.record(nid, "state", {"node": node_to_dict(self.registry[nid]),
                                     "msgs": delta, "delta": True, "base": base})

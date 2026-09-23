@@ -1,34 +1,23 @@
 #!/usr/bin/env python3
-"""终端会话的定向测试。零成本、确定性（脚本化模型 + 脚本化终端 + 真调度器）。
+"""终端会话的定向测试（零成本、确定性：脚本化模型 + 脚本化终端 + 真调度器）。
 
-这一层只管"介质与话轮"：把用户敲的字交回去、把入口说的话显示出来、
-思考画成灰的、Ctrl-D/Ctrl-C 干净收手。判断 / 打回 / 跑树 / 收手都是
-`tree/runtime/scheduler.py` 的事 —— 终端只把整场会话（入口为根的树）丢给
-`run`，模型换成脚本（`FakeLLM` 同时服务入口和任务两类节点）。
+这一层只管介质与话轮，判断 / 打回 / 跑树 / 收手都在运行时层，终端只把整场会话丢给 `run`。
 
-入口不退场：谈成一个任务就挂到树上跑一次、结论回填，再接着谈。所以
-`converse` 到最后总是**由用户中止**才返回 `None`。
-
-**读不替身**：测试往**真的** prompt_toolkit 会话里塞一条管道
-（`create_pipe_input`），键位与历史走的是生产用的同一套 —— 于是
-"回车发送 / 翻历史 / 粘贴多行 / Alt-Enter / Ctrl-D"全都能断言，
-而不用自己写一个假的 read。**显示**把 stdout 换成假终端，rich 的判断
-（上不上色、走不走 Live）照旧生效。
+读不替身：往真的 prompt_toolkit 会话塞管道（`create_pipe_input`），键位走生产同一套；
+显示把 stdout 换成假终端，rich 的判断照旧生效。
 
   A. 谈定：问 → 答 → 交出的任务被跑掉；问题和建议只显示一遍
-  C. 读：回车发送（CR / LF 都算）、上下键翻历史、Alt-Enter 换行、粘贴多行当一条、
-     Ctrl-D 收手
-  B. 吐字：一小口一小口吐（不等整段回来）、吐完才轮到读
-  D. 思考（reasoning_content）整段按流式吐出来，而且是灰的（真终端才上色）
-  E. 旁白（打回理由、接到任务）显示到终端；交形式不吐
-  F. 边界守门：terminal 不碰树的决策层；tree 不 import terminal；
-     main.py 不再自己读输入；terminal 不再自己实现输入
+  B. 吐字：一小口一小口吐、吐完才轮到读
+  C. 读：回车发送、上下键翻历史、Alt-Enter 换行、粘贴多行、Ctrl-D 收手
+  D. 思考整段流式吐出，而且是灰的（真终端才上色）
+  E. 旁白显示到终端；交形式不吐
+  F. 边界守门：terminal 不碰决策层；tree 不 import terminal
   G. 不是真终端（管道 / 重定向）→ 树逐帧追加
-  H. 真终端：任务树用 rich Live 原地重画，跑完那帧留在屏幕上
-  I. 用户没交底：入口开口之前，先让他把话说完（不是先调模型）
-  J. 节点级吐字：每个节点正在想/正在说的话，画进树里它的节点下（真终端）
+  H. 真终端：任务树用 rich Live 原地重画，跑完那帧留屏
+  I. 用户没交底：入口开口前先让他把话说完
+  J. 节点级吐字：每个节点正在想/说的话画进它的节点下（真终端）
   K. 跑任务时输入不冻结：敲的字进 Live 帧，跑完按顺序交出去
-  L. 每节点一行铺开：整棵树所有节点正在吐的字都看得见（真终端）
+  L. 每节点一行铺开：所有节点正在吐的字都看得见（真终端）
 """
 
 import asyncio
@@ -61,11 +50,7 @@ def line(tag, cond, detail=""):
 
 
 class Screen(io.StringIO):
-    """假终端：整段文本留在自己身上，每次 write 的碎片也留着。
-
-    `pieces` 是"吐字是不是一小口一小口""思考上没上灰"的证据 ——
-    一次吐字一次 write。
-    """
+    """假终端：整段文本与每次 write 的碎片都留着（一次吐字一次 write）。"""
 
     def __init__(self, tty=False):
         super().__init__()
@@ -92,12 +77,9 @@ def _env(seed=None):
 
 
 class FakeLLM:
-    """按脚本回话，同时服务两类节点。
+    """按脚本回话，同时服务入口（字符串 = 说话、带 root 的 dict = submit_root）与任务节点。
 
-    入口节点（system 里有「把用户的意图」）：replies 脚本 —— 字符串 = 说话、
-    带 root 的 dict = 调 submit_root。
-    任务节点：动手一次就出满足的结论 —— 叶子 bash，分配节点拆孩子（`kids` 个）
-    等它们回来。`slow` 时思考/说话一小口一小口慢吐，给终端画树、跑阶段输入留时间。
+    任务节点动手一次就出满足结论；`slow` 时慢吐，给终端画树、跑阶段输入留时间。
     """
 
     def __init__(self, replies, reasoning="", screen=None, slow=False, kids=1):
@@ -118,7 +100,6 @@ class FakeLLM:
     async def _task_chat(self, messages, on_delta, on_reasoning):
         sysmsg = messages[0]["content"]
         if "你是一个叶子" in sysmsg:
-            # 叶子：先动手（bash），再出满足的结论（证据指得到"第1次观测"）
             done = any(m.get("role") == "tool" for m in messages)
             if not done:
                 think = ("先看看用户到底要什么，再决定怎么拆。然后想清楚第一步做什么。" * 4)
@@ -132,7 +113,6 @@ class FakeLLM:
             return Message(text="", tool_calls=[ToolCall(
                 name="conclude", arguments={"verdict": "满足", "text": "跑完了",
                                             "evidence": ["第1次观测"]})])
-        # 分配节点：拆 `kids` 个孩子，等它们全回来再出结论
         kids_names = ["子任务%s" % c for c in "ABC"][:self.kids]
         have_result = any("下层结论" in str(m.get("content", ""))
                           for m in messages)
@@ -177,11 +157,7 @@ class FakeLLM:
 
 
 async def _typed(inp, keys, pause=0.1):
-    """一条一条敲进去。
-
-    一次全灌进去会丢掉方向键（实测：上箭头拿不回历史）—— 人是一下一下敲的，
-    这里也一下一下来。
-    """
+    """一条一条敲：一次全灌进去会丢掉方向键（上箭头拿不回历史）。"""
     for k in keys:
         await asyncio.sleep(pause)
         inp.send_text(k)

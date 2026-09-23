@@ -1,12 +1,7 @@
-"""纯规则：这个节点现在该不该跑。调度与恢复共用这一份。
+"""纯规则：这个节点现在该不该跑；调度与恢复共用这一份。
 
-节点没有编排字段。它是一个带对话的 Node，`actionable` 只看两样已经发生的事实：
-  · 它出结论了吗（verdict 非空 → 不再跑）；
-  · 对话的最后一条是不是 assistant（是 → 自己在等回话；不是 → 轮到它说）。
-"孩子都在跑"不需要单独判断 —— 分配节点的那条 assistant 消息之后要等所有孩子
-的结论被 push 成 user 消息，最后一条才会变，所以"等孩子"就是"最后一条是 assistant"。
-
-孩子怎么结算、门槛怎么续跑/作废，是 `Store.conclude` 的副作用，不是这里的事。
+节点没有编排字段，`actionable` 只看两样已发生的事实：有没有出结论，最后一条是不是 assistant
+（"等孩子"就是"最后一条是 assistant"）。孩子怎么结算、门槛怎么续跑/作废是 conclude 的副作用。
 """
 
 from ..protocol.fields import Node
@@ -26,10 +21,9 @@ def actionable(store, nid):
 
 
 def make_child(parent, spec):
-    """一份子任务规格 → 孩子节点（挂进 parent.children）。任务消息由调用方拼。
+    """一份子任务规格 → 孩子节点（挂进 parent.children），任务消息由调用方拼。
 
-    任务根的 lineage 是空的（入口不是"上层意图"）；普通子节点继承父的意图链。
-    父的 detail 出生后只读，所以出生时物化，不在渲染时反查。
+    任务根 lineage 为空（入口不是上层意图），普通子节点在出生时物化父的意图链（父 detail 只读）。
     """
     lineage = [] if parent.kind == "intake" else \
         parent.lineage + [[parent.name, parent.detail]]

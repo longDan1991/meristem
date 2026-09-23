@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""入口的定向测试。零成本、确定性（脚本化模型 + 脚本化用户 + 真调度器）。
+"""入口的定向测试（零成本、确定性：脚本化模型 + 脚本化用户 + 真调度器）。
 
-入口就是会话的**根节点**（kind="intake"）：谈成一个能过闸门的任务，就
-`submit_root` 把它挂成孩子，调度器真的把它跑掉，结论以 child_result 消息回到
-根节点的对话里，再接着调模型 —— 直到用户中止。
-
-**通道与节点同构**：模型要么说话（content，流式送出去），要么调 `submit_root`
-交形式。代码不认"话里的 JSON"，所以不再有"从文本里猜形式"的识别规则。
+入口就是会话的根节点（kind="intake"）：谈成能过闸门的任务就 `submit_root` 挂成孩子，
+调度器真跑掉、结论以 child_result 回到根对话。代码不认"话里的 JSON"，形式只从工具调用来。
 
   A. 谈定 → 打回 → 交出合规的任务 → 跑掉、结论回填
   B. 形式不合规 → 当场打回并说清为什么
-  C. 只认工具调用：不带 root 的话、甚至不是 root 的 JSON，都当话送出去
-  D. 没有回合数 / 重复次数的限制（计数器删了就不许回来）
-  E. 闸门：缺字段 / 没有可测物理量，都当场说不，并给得出理由
-  F. 吐字：话一路出去，交形式（工具调用）一路不吐
+  C. 只认工具调用：其余一律当话
+  D. 没有回合数 / 重复次数的限制
+  E. 闸门：缺字段 / 没有可测物理量，都当场说不
+  F. 吐字：话一路出去，交形式一路不吐
 """
 
 import asyncio
@@ -43,12 +39,7 @@ def line(tag, cond, detail=""):
 
 
 class FakeLLM:
-    """按脚本回话的模型。
-
-    入口节点（system 里有「把用户的意图」）：字符串 = 说话，带 root 的 dict =
-    调 submit_root。任务节点（不是入口）：跑一次 bash 就 conclude 满足 ——
-    让"合规的任务被拿去跑掉、结论回填"是真的走通，不是替身。
-    """
+    """按脚本回话的模型：入口说字符串 / 交带 root 的 dict，任务节点跑一次 bash 就 conclude。"""
 
     def __init__(self, replies):
         self.replies, self.last_usage, self.said = list(replies), {}, []
@@ -58,7 +49,6 @@ class FakeLLM:
         self.said.append(messages[-1]["content"])
         sysmsg = messages[0]["content"]
         if "把用户的意图" not in sysmsg:
-            # 任务节点：先动手（bash）再出结论（证据指得到"第1次观测"）
             done = any(m.get("role") == "tool" for m in messages)
             if not done:
                 return Message(text="", tool_calls=[ToolCall(

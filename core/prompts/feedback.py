@@ -1,16 +1,14 @@
-"""模型会读到的反馈文本 —— **唯一来源**。
+"""模型会读到的反馈文本 —— 唯一来源。
 
-runtime / protocol 只决定"发生了什么"（参数不合形状、门槛不成立…），
-不自己拼给模型看的话。凡是会写回对话、被模型读到的句子，都在这里注册。
-
-（工具定义里的字段 description 是另一回事：那是工具清单的单一事实，住
-`protocol/tool_specs.py`，见 docs/PROMPTS.md §4；它不属于"反馈"。）
+runtime / protocol 只决定"发生了什么"，不自己拼给模型看的话；会写回对话的句子都在这里注册。
+（工具字段 description 是另一回事，住 `protocol/tool_specs.py`。）
 """
+
+from ..protocol.fields import VERDICTS
 
 
 def pair_placeholder():
-    """结构类工具（create_children / conclude / submit_root）没有 tool 回话，
-    发模型前补的占位回话。"""
+    """结构类工具（create_children / conclude / submit_root）没有 tool 回话，发模型前补的占位回话。"""
     return "（已交给下层，结论随后以消息到达。）"
 
 
@@ -58,7 +56,7 @@ def bad_conc_range():
 
 
 def bad_verdict():
-    return "判定必须是 满足|未满足|阻塞"
+    return "判定必须是 " + "|".join(VERDICTS)
 
 
 def downgraded_suffix():

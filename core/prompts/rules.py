@@ -1,11 +1,13 @@
 """rules 节：操作纪律（从工具清单推导）+ 协议规则（手写）。
 
-推导部分随工具清单变：有 create_children → 分配纪律；有 conclude → 结论纪律；
-有 bash / read / write → 三只手的纪律。手写部分是协议级不变量，对应
-`gate.py` 的机械校验（改一边就得看另一边，对照见 `gate.py` 文件头）。
+推导部分随工具清单变；手写部分是协议级不变量，对应 `gate.py` 的机械校验。
 """
 
-from ..protocol.tool_specs import NODE_TOOLS
+from ..protocol.fields import EXTERNAL_CLASSES
+from ..protocol.tool_specs import ACTION_TOOLS, NODE_TOOLS
+
+# `外部需求` 四类的提示文本，从 fields 的词表拼出（改词表这里跟着变）。
+_EXTERNAL_HINT = " / ".join(EXTERNAL_CLASSES)
 
 
 def rules_section(which):
@@ -27,11 +29,11 @@ def rules_section(which):
     if "conclude" in tools:
         lines.append("判定「满足」必须指得出具体证据，指不出来会被降级为「未满足」。")
         lines.append("conclude 的 text 落在上层给的 conc_range 区间里。")
-        if "bash" not in tools:                 # 分配节点（自己没有观测）
+        if not tools & set(ACTION_TOOLS):        # 分配节点（自己没有观测）
             lines.append("分配节点自己没有观测：证据只能是子任务的 name（原样照抄一个）"
                          "或磁盘上真存在的产物路径。写「第几次观测」是无效的 —— "
                          "观测只属于叶子。")
-    if tools & {"bash", "read", "write"}:
+    if tools & set(ACTION_TOOLS):
         lines.append("文件与命令操作一律走 bash / read / write —— 签名、超时、"
                      "翻页语义在各自的工具描述里（provider 原样喂给你），这里不重复。")
     if "submit_root" in tools:
@@ -47,8 +49,8 @@ def rules_section(which):
     if which != "intake":
         lines.append("反复失败、或需要的动作不在工具里（比如开户/入金/留痕需要人到场），"
                      "就用「阻塞」，把原因写清楚，并指明 external 是哪一类"
-                     "（需要人到场 / 需要真实账户 / 需要真实资金 / 需要现实设备）。"
+                     "（%s）。"
                      "不要编一个你能做的假版本来代替做不到的事。"
                      "「阻塞」只是「这次的条件下没走通」，不是「这条路不行」："
-                     "把卡在哪个条件上写清楚，下一代才探测得动。")
+                     "把卡在哪个条件上写清楚，下一代才探测得动。" % _EXTERNAL_HINT)
     return "\n".join("· %s" % line for line in lines)
