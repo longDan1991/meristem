@@ -20,6 +20,8 @@
   L. 每节点一行铺开：所有节点正在吐的字都看得见（真终端）
   M. 树视图：非最后一个孩子画竖线、最后一个收尾（缩进只由 is_last 决定）
   N. 事件词汇：工具与用量事件到达终端（tool_start/tool_end/usage）
+  O. 折叠渲染：跑完的子树折一行带统计，活跃路径展开（render_folded）
+  P. 流渲染：选中节点的 msgs + 实时尾巴（render_stream）
 """
 
 import asyncio
@@ -33,7 +35,7 @@ import tempfile
 
 from harness import OK, line, ROOT
 import terminal.chat as chat
-from terminal.view import render_tree
+from terminal.view import render_folded, render_stream, render_tree
 from prompt_toolkit.input import create_pipe_input
 from core.llm import Message, ToolCall
 from core.protocol.fields import Node
@@ -537,6 +539,58 @@ def main():
          bool(usages) and all(p.get("prompt", 0) > 0 and p.get("completion", 0) > 0
                               and p.get("total", 0) > 0 for p in usages),
          "%d 次" % len(usages))
+
+    print("=" * 80)
+    print("O. 折叠渲染：跑完的子树折一行带统计，活跃路径展开")
+    top = Node(name="会话", kind="intake")
+    a = Node(name="甲", kind="dispatch", parent=top.id, depth=1,
+             accept="A 2026-12-31", verdict="满足")
+    b = Node(name="乙", kind="leaf", parent=top.id, depth=1,
+             accept="B 2026-12-31")
+    a1 = Node(name="甲1", kind="leaf", parent=a.id, depth=2,
+              accept="A1 2026-12-31", verdict="满足")
+    a2 = Node(name="甲2", kind="leaf", parent=a.id, depth=2,
+              accept="A2 2026-12-31", verdict="未满足")
+    top.children = [a.id, b.id]
+    a.children = [a1.id, a2.id]
+    reg = {n.id: n for n in (top, a, b, a1, a2)}
+    rows = render_folded(top, reg)
+    texts = [t for _, t in rows]
+    line("跑完的子树折成一行带节点数",
+         any("[分配] 甲 (2 节点)" in t for t in texts), str(texts))
+    line("运行中的节点展开可见", any("· [叶子] 乙" in t for t in texts), str(texts))
+    line("入口根不折、孩子不画进来", any("[入口] 会话" in t for t in texts)
+         and not any("甲1" in t for t in texts), str(texts))
+    rows2 = render_folded(top, reg, selected=a2.id)
+    texts2 = [t for _, t in rows2]
+    line("选中折叠子树里的节点 → 路径展开",
+         any("[叶子] 甲1" in t for t in texts2) and any("[叶子] 甲2" in t for t in texts2),
+         str(texts2))
+    line("展开后孩子行带竖线前缀", any("   ├─ " in t for t in texts2), str(texts2))
+    rows3 = render_folded(top, reg, expanded={a.id})
+    texts3 = [t for _, t in rows3]
+    line("显式展开压过自动折叠", any("[叶子] 甲1" in t for t in texts3), str(texts3))
+
+    print("=" * 80)
+    print("P. 流渲染：选中节点的 msgs + 实时尾巴")
+    msgs = [
+        {"role": "user", "content": "把数据处理干净"},
+        {"role": "assistant", "content": "我先看看。", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "data.csv"},
+        {"role": "assistant", "content": "跑完了"},
+    ]
+    rows = render_stream(msgs, intake=True)
+    line("user 消息带你: 前缀", any(k == "user" and t.startswith("你: ") for k, t in rows))
+    line("assistant 文本进说", any(k == "say" and t == "说: 我先看看。" for k, t in rows))
+    line("工具调用行单独标记", any(k == "tool" and "bash" in t for k, t in rows), str(rows))
+    line("工具输出全文进历史", any(k == "toolout" and "data.csv" in t for k, t in rows))
+    rows = render_stream(msgs, intake=False)
+    line("非入口节点的任务消息标任务: ",
+         any(k == "user" and t.startswith("任务: ") for k, t in rows))
+    rows = render_stream(msgs, {"thinking": "想…", "speaking": "说…"})
+    line("实时尾巴附加在底部", rows[-1] == ("speaking", "说: 说…"), str(rows[-1]))
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

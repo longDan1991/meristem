@@ -8,6 +8,103 @@ from core.protocol.fields import DISPATCH, LEAF, SATISFIED
 _KIND_TAG = {DISPATCH: "[分配]", LEAF: "[叶子]"}
 
 
+def _subtree_stats(root, registry):
+    """一次迭代后序：每个节点的（有无运行中后代, 后代总数）。O(n)。
+
+    折叠规则"跑完的子树折一行带统计"要的就是这两个数，一趟算齐，
+    不让每帧渲染退化成 O(n²)。
+    """
+    active, size = {}, {}
+    stack = [(root, False)]
+    while stack:
+        nd, visited = stack.pop()
+        kids = [registry[c] for c in nd.children if c in registry]
+        if visited:
+            active[nd.id] = (not nd.verdict) or any(active[k.id] for k in kids)
+            size[nd.id] = 1 + sum(size[k.id] for k in kids)
+        else:
+            stack.append((nd, True))
+            for k in kids:
+                stack.append((k, False))
+    return active, size
+
+
+def render_folded(root, registry, *, selected=None, expanded=frozenset()):
+    """折叠视图：跑完的子树折成一行带统计，活跃路径展开。返回 [(node_id, 行)]。
+
+    折叠规则（TERMINAL.md §5）：出了结论、下面没有在跑的后代、也不在选中路径上
+    → 折成一行带节点数；显式展开（`expanded`）压过自动折叠。渲染量只跟
+    "正在动的东西 + 选中路径"走，折叠的子树一行带统计。
+
+    返回 (node_id, 行) 而不是纯行：应用层要靠 node_id 高亮选中行、定位滚动。
+    """
+    active, size = _subtree_stats(root, registry)
+    sel_chain = set()
+    n = registry.get(selected) if selected is not None else None
+    while n is not None:
+        sel_chain.add(n.id)
+        n = registry.get(n.parent)
+    rows = []
+
+    def fold_of(node):
+        if node.id in expanded:
+            return False
+        if not node.verdict or active[node.id] or node.id in sel_chain:
+            return False
+        return True
+
+    def emit(node, prefix, is_last):
+        branch = "└─ " if is_last else "├─ "
+        child_prefix = prefix + ("   " if is_last else "│  ")
+        mark = "✓" if node.verdict == SATISFIED else ("✗" if node.verdict else "·")
+        tag = "%s%s" % (_KIND_TAG.get(node.kind, "[入口]"), " [门槛]" if node.gate else "")
+        if fold_of(node):
+            rows.append((node.id, "%s%s%s %s %s (%d 节点)" % (
+                prefix, branch, mark, tag, node.name, size[node.id] - 1)))
+            return
+        rows.append((node.id, "%s%s%s %s %s" % (prefix, branch, mark, tag, node.name)))
+        for i, cid in enumerate(node.children):
+            kid = registry.get(cid)
+            if kid is not None:
+                emit(kid, child_prefix, i == len(node.children) - 1)
+
+    emit(root, "", True)
+    return rows
+
+
+def render_stream(msgs, streams=None, *, intake=False):
+    """选中节点的消息流：历史 `msgs` 按序 + 实时尾巴。返回 [(kind, text)]。
+
+    kind 词表：user / say / tool / toolout / thinking / speaking —— 颜色由应用层
+    按 kind 定（思考灰、说话正文、工具青色）。工具输出全文进历史（TERMINAL.md §4，
+    不截断）；实时阶段只画调用行，耗时由 `tool_end` 事件补。
+
+    `msgs` 就是 `Dialogue.to_list()` 的平铺账本，渲染层不碰 store。
+    """
+    rows = []
+    who = "你" if intake else "任务"
+    for m in msgs:
+        role = m.get("role")
+        if role == "user":
+            rows.append(("user", "%s: %s" % (who, m.get("content") or "")))
+        elif role == "assistant":
+            content = m.get("content") or ""
+            if content:
+                rows.append(("say", "说: %s" % content))
+            for w in m.get("tool_calls") or []:
+                fn = w.get("function") or {}
+                rows.append(("tool", "工具: %s(%s)" % (
+                    fn.get("name", ""), fn.get("arguments", ""))))
+        elif role == "tool":
+            rows.append(("toolout", "输出: %s" % (m.get("content") or "")))
+    if streams:
+        for key, label in (("thinking", "思考: "), ("speaking", "说: ")):
+            tail = streams.get(key)
+            if tail:
+                rows.append((key, label + tail))
+    return rows
+
+
 def render_tree(root, registry, prefix="", is_last=True, lines=None, streams=None,
                 compact=False):
     """整棵树的视图：每层的拆分 / 判定 / 结论，画成一串带树形标记的行。
