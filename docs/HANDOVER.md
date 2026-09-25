@@ -35,7 +35,15 @@
 
 ## 0. 现在到哪一步了
 
-**跑得动、省得下、下次能捡回来，而且开工前会先把预期谈清楚。**
+**跑得动、省得下、下次能捡回来，而且开工前会先把预期谈清楚。终端是能看的全屏布局了。**
+
+**2026-09-25 TUI 全屏布局落地**（设计在 `docs/TERMINAL.md`）：终端从"滚动对话 + Live 接管"
+换成 **prompt_toolkit 全屏五区**（左树 / 右流 / 状态条 / 输入行拉通）。树是频道选择器：
+选中谁，右流就切到谁的完整消息（对话 / 思考 / 说话 / 工具调用 / 判定）；跑完的子树折成
+一行带统计、活跃路径自动展开；输入一个 buffer 一条队列，跑任务时照样能敲、按顺序交给
+入口；非真终端降级为逐帧打印折叠树。为此 `loop.py` 补了三个事件
+（`tool_start` / `tool_end` / `usage`，TERMINAL.md §6）——工具过程与 token 账对终端不再
+是黑盒。
 
 铁证（同一个量化任务，加索引前 vs 后）：
 
@@ -167,8 +175,8 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tools/bash.py` | **bash 工具独立成文件**：schema 与给模型的描述照抄 oh-my-pi 的 BashTool（`command` / `timeout` / `cwd`，`timeout=0` 禁用 deadline，`cwd` 代替 `cd`）；执行走 llmbash 进程内 shell（不压缩输出）—— 持久 shell 池按 cwd 复用 + 并发重叠降级 one-shot 真并行 + 坏会话弃用重建 |
 | `tools/skills.py` | **通用 skill 加载**：import 时扫描 `cfg.SKILLS_DIRS` 下 `*/SKILL.md` 挂成 fastmcp `SkillsDirectoryProvider` + `read_skill` 工具（leaf 动作，读 `skill://<名字>/...` 资源）+ `discovered()`（name+description 清单，喂 `<skills>` 节）—— 对齐 oh-my-pi，机制对具体 skill 一无所知 |
 | `tools/context.py` | 工具共享现场：`(loop, nid)` ContextVar 注入（`get_binding` / `_current`）+ `_action_result` 记 tool 观测进 trace |
-| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时 `Store.load(id)` 读回整棵树；`converse` 是终端话轮（ask / say / 事件路由 / rich Live 树视图） |
-| `terminal/view.py` | 树的视图：`render_tree`（每节点一行，运行中 ·、出结论 ✓/✗；compact 实时视图带吐字尾巴） |
+| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时 `Store.load(id)` 读回整棵树；`converse` 是终端话轮。真终端 = **全屏五区**（左树 / 右流 / 状态条 / 输入行拉通，布局见 `docs/TERMINAL.md`）：`SessionApp` 管事件路由（loop_start / loop_end / message_update / tool_* / usage）与一条输入队列（谈与跑共用，回车提交、Alt-Enter 换行、Ctrl-D 收手）；非真终端降级为逐帧打印折叠树 |
+| `terminal/view.py` | 树的视图：`render_folded`（地图：折叠渲染，跑完的子树折一行带统计、活跃路径展开，返回 `[(node_id, 行)]`）+ `render_stream`（选中节点的消息流：历史 msgs + 实时尾巴 + 判定行，返回 `[(kind, text)]`，颜色由应用层定） |
 | `terminal/picker.py` | `-r` 的会话选择器（prompt_toolkit 自绘列表） |
 | `docs/PROMPTS.md` | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | 本文档：怎么跑、资产在哪、剩余工作 |
@@ -248,6 +256,9 @@ bash 走 `asyncio` 子进程），都不占线程。无锁：树的变更一律�
   （人怎么插话、怎么看见树），不是树的规矩 —— 它的变因和 `terminal/chat.py`
   完全相同，所以共享同一个包，不另开模块。装配那天在 `cli.py` 加子命令即可。
   动作不要直接改内存里的 `Node` —— 写 trace 事件，再由调度器在下一个决策点读进去。
+- **"指着某一层说话"的选点已经在了**：全屏布局的树窗格（`Tab` 切焦点、↑↓ 选中，
+  选中即切流）就是控制面的瞄准具 —— 五个动作都挂在"当前选中节点"上，输入行
+  打给选中的节点（入口根 = 对话，其它节点 = 外部观测）。
 - **不要做"有树在跑就拒绝"这类锁**：正在跑的叶子看不见字段变更，
   正确做法是走**对话（外部观测消息）**通道 —— 人的话变成一条外部观测，下一个决策点就可见。
 - **不要先做 LLM 视图**：先做一个筛选（阻塞 > 被拒 > 门槛不过 > 其余折叠），
@@ -306,7 +317,7 @@ bash 走 `asyncio` 子进程），都不占线程。无锁：树的变更一律�
 | `tests/test_tools.py` | 18 | 截断/限制必须可见：read 报区间+可翻页、bash 输出不截断、bash 超时可见/可调/连子进程一起杀、**bash 输出不压缩逐字到达 + rm 真删文件**、**timeout=0 不限时**、**并发 bash 降级 one-shot 真并行** |
 | `tests/test_intake.py` | 23 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**、**给根标 gate**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
 | `tests/test_cli.py` | 14 | `cli.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
-| `tests/test_tty.py` | 53 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**开场白先收齐**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**任务树实时画出来（非终端逐帧追加、真终端 rich Live 原地重画）**、**节点级吐字画进树的节点下（思考/说，真终端）**、**跑任务时输入不冻结：敲的字进 Live 帧、跑完按顺序交出去**、**每节点一行铺开：整棵树所有节点正在吐的字都看得见**；**边界守门**：terminal 不碰树的决策层、core 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()`。颜色断言自己摆好环境（`_tty_env`，不受 `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR` / `TTY_COMPATIBLE` 影响）；**树视图缩进：非最后一个孩子画 ├─ 与续行竖线、最后一个收尾** |
+| `tests/test_tty.py` | 68 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**开场白先收齐**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**全屏五区（左树/右流/状态/输入，进备用屏、干净收手）**、**折叠渲染：跑完的子树折一行带统计、活跃路径展开、选中路径强制展开、显式展开压过自动折叠**、**流渲染：你:/入口:/任务:/说: 标签、工具调用行、输出全文进历史、判定行（判定+验收+结论）、实时尾巴去重**、**树选中即切流（Tab 切焦点、↑↓ 选中）**、**跑任务时输入不冻结：敲的行排队、按顺序以「你:」交出去**、**并行：三个孩子同时挂在树上**、**事件词汇：tool_start/tool_end/usage（名/耗时/字段/先后序）**、**非真终端逐帧打印折叠树不上全屏**；**边界守门**：terminal 不碰树的决策层、core 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()`。颜色断言自己摆好环境（`_tty_env`，不受 `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR` / `TTY_COMPATIBLE` 影响） |
 | `tests/test_resume.py` | 32 | 会话续跑：从 {node, msgs} 检查点重建、崩溃窗口补投递、门槛续跑/作废、in_flight 树接着跑、结论回填、末行截断容错、增量检查点拼回全量、**会话摘要认最新谈成的任务**、**记录读路径认解析后的 kind（嵌入同形键的非 state 记录不算、紧凑分隔符的 state 照样认）**、**同一秒里连开两场会话不撞进同一条记录** |
 | `tests/test_llm.py` | 12 | `llm._stream` 流式解析：文本/思考/工具参数两段碎片拼回完整 Message、usage 随 Message 走、坏参数 JSON 当场炸、自定义型 tool-call 跳过、多个工具按 index 排序 |
 

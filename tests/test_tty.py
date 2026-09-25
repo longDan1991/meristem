@@ -16,9 +16,9 @@
   H. 真终端：任务树用 rich Live 原地重画，跑完那帧留屏
   I. 用户没交底：入口开口前先让他把话说完
   J. 节点级吐字：每个节点正在想/说的话画进它的节点下（真终端）
-  K. 跑任务时输入不冻结：敲的字进 Live 帧，跑完按顺序交出去
-  L. 每节点一行铺开：所有节点正在吐的字都看得见（真终端）
-  M. 树视图：非最后一个孩子画竖线、最后一个收尾（缩进只由 is_last 决定）
+  K. 跑任务时输入不冻结：敲的行排队，按顺序交给入口
+  L. 并行：跑任务的三个孩子同时挂在树上（并行地图）
+  M. 折叠渲染的缩进：非最后一个孩子画竖线、最后一个收尾（is_last 决定）
   N. 事件词汇：工具与用量事件到达终端（tool_start/tool_end/usage）
   O. 折叠渲染：跑完的子树折一行带统计，活跃路径展开（render_folded）
   P. 流渲染：选中节点的 msgs + 实时尾巴（render_stream）
@@ -35,7 +35,7 @@ import tempfile
 
 from harness import OK, line, ROOT
 import terminal.chat as chat
-from terminal.view import render_folded, render_stream, render_tree
+from terminal.view import render_folded, render_stream
 from prompt_toolkit.input import create_pipe_input
 from core.llm import Message, ToolCall
 from core.protocol.fields import Node
@@ -503,7 +503,7 @@ def main():
     line("根出了结论，判定以 ✓ 留在树上", "✓ [分配]" in plain)
 
     print("=" * 80)
-    print("M. 树视图：非最后一个孩子画竖线、最后一个收尾（缩进只由 is_last 决定）")
+    print("M. 折叠渲染的缩进：非最后一个孩子画 ├─、最后一个收尾（is_last 决定）")
     top = Node(name="会话", kind="intake")
     kid_a = Node(name="甲", kind="dispatch", parent=top.id, depth=1,
                  accept="A 2026-12-31", verdict="满足")
@@ -511,12 +511,10 @@ def main():
                  accept="B 2026-12-31")
     top.children = [kid_a.id, kid_b.id]
     reg = {n.id: n for n in (top, kid_a, kid_b)}
-    rows = render_tree(top, reg)
-    line("根在最前、没有前缀", rows[0].startswith("└─ "), rows[0])
-    line("非最后一个孩子画 ├─，它的续行画 │",
-         rows[2].startswith("   ├─ ") and rows[3].startswith("   │ "), rows[3])
-    line("最后一个孩子画 └─，它的续行留空",
-         rows[4].startswith("   └─ ") and rows[5].startswith("     "), rows[5])
+    texts = [t for _, t in render_folded(top, reg)]
+    line("根在最前、没有前缀", texts[0].startswith("└─ "), texts[0])
+    line("非最后一个孩子画 ├─", texts[1].startswith("   ├─ "), texts[1])
+    line("最后一个孩子画 └─", texts[2].startswith("   └─ "), texts[2])
 
     print("=" * 80)
     print("N. 事件词汇：工具与用量事件到达终端（tool_start/tool_end/usage）")
