@@ -21,8 +21,12 @@ class Dialogue:
     def to_list(self):
         return self.msgs
 
-    def assistant(self, text, tool_calls):
-        """assistant 入账，返回落账的 tool_call id 列表（缺 id 时按回合数算）。"""
+    def assistant(self, text, tool_calls, reasoning=""):
+        """assistant 入账，返回落账的 tool_call id 列表（缺 id 时按回合数算）。
+
+        `reasoning` 是思考原文（`reasoning_content`），随消息进历史 ——
+        终端把思考画成历史里的一行（TERMINAL.md §4），会话续跑也在。
+        """
         offset = sum(1 for m in self.msgs if m.get("role") in ("assistant", "tool"))
         ids = [tc.id or "call_%d" % (offset + i) for i, tc in enumerate(tool_calls)]
         wire = [
@@ -37,6 +41,8 @@ class Dialogue:
             for i, tc in zip(ids, tool_calls)
         ]
         msg = {"role": "assistant", "content": text or None}
+        if reasoning:
+            msg["reasoning"] = reasoning
         if wire:
             msg["tool_calls"] = wire
         self.msgs.append(msg)

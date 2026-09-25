@@ -12,6 +12,7 @@ Ctrl-D 都是它的事）；分几行写按 Alt-Enter，不绑 `c-j`。
 """
 
 import asyncio
+import io
 import os
 import sys
 import time
@@ -19,6 +20,7 @@ import time
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
@@ -38,10 +40,12 @@ from core.runtime.store import Store
 
 PROMPT = "› "
 TREE_WIDTH = 40            # 树窗格宽度（TERMINAL.md §1）
-REFRESH_MS = 0.1           # 流式重画节流：≈旧 rich Live 的 10fps
+REFRESH_MS = 0.03          # 流式合帧间隔：≈30fps（快模型也看得出在流）
 
-# kind → prompt_toolkit 样式：思考灰、工具青色，其余默认（TERMINAL.md §4）
-_STREAM_STYLE = {"thinking": "dim", "tool": "cyan"}
+
+def _stream_console(file, width):
+    """流的 rich 渲染器：color_system 钉死 standard（prompt_toolkit ANSI 桥只认标准 SGR）。"""
+    return Console(file=file, color_system="standard", width=width)
 
 
 class _Quit(Exception):
@@ -141,6 +145,7 @@ class SessionApp:
         ]))
         self.app = Application(layout=layout, key_bindings=self._bindings(),
                                full_screen=True, mouse_support=True,
+                               min_redraw_interval=0.03,
                                input=session.app.input,
                                output=create_output())
         self.app.layout.focus(input_window)
@@ -270,7 +275,7 @@ class SessionApp:
         self.app.invalidate()
 
     def _update_texts(self):
-        """只重算控件文本，不重画（message_update 一 token 一发，文本便宜、重画贵）。"""
+        """只重算控件文本，不重画。流经 rich 渲成 ANSI 再转 prompt_toolkit 片段。"""
         rows, cols = self._size()
         pane_h = max(1, rows - 2)               # 状态条 + 输入行各占一行
         tree_rows = render_folded(self.root, self.registry, selected=self.selected[0],
@@ -280,12 +285,24 @@ class SessionApp:
         view = _view_window(tree_rows, sel, pane_h)
         self.tree_ctl.text = [("reverse" if nid == self.selected[0] else "", t + "\n")
                               for nid, t in view]
-        self.stream_ctl.text = [(_STREAM_STYLE.get(s, ""), t + "\n") for s, t in
-                                _tail_window(self._stream_rows(), pane_h, self.scroll)]
+        # 流：rich 渲染（markdown / Panel / 彩色）→ ANSI 行 → 尾窗 → 片段。
+        # color_system 显式钉死 standard：prompt_toolkit 的 ANSI 桥只认标准 SGR，
+        # 且不受 NO_COLOR / TERM 环境影响。
+        stream_width = max(20, cols - TREE_WIDTH - 1)
+        buf = io.StringIO()
+        console = _stream_console(file=buf, width=stream_width)
+        for r in self._stream_rows():
+            console.print(r)
+        lines = buf.getvalue().split("\n")
+        while lines and lines[-1] == "":
+            lines.pop()
+        tail = _tail_window(lines, pane_h, self.scroll)
+        self.stream_ctl.text = to_formatted_text(ANSI("\n".join(tail)))
         self.status_ctl.text = self._status()
 
-    def _request_invalidate(self):
-        """重画节流：流式更新合帧到 ≈10fps；文本已即时更新，漏一帧也不丢内容。"""
+    def _request_update(self):
+        """流式合帧 ≈30fps：message_update 一 token 一发，rich 渲染不能每 token 跑。
+        文本在下一帧整块更新——快模型也看得出在流（10fps 时是"几坨字"，30fps 是流）。"""
         if self._render_pending:
             return
         self._render_pending = True
@@ -294,6 +311,7 @@ class SessionApp:
     async def _throttled(self):
         await asyncio.sleep(REFRESH_MS)
         self._render_pending = False
+        self._update_texts()
         self.app.invalidate()
 
     # ── 事件路由：一个函数收全部事实，按 scope 分路去画（事件只报事实）──
@@ -305,8 +323,7 @@ class SessionApp:
             key = "thinking" if payload.get("kind") == "reasoning" else "speaking"
             self.streams.setdefault(payload.get("scope"),
                                     {"thinking": "", "speaking": ""})[key] += delta
-            self._update_texts()
-            self._request_invalidate()
+            self._request_update()
             return
         if type == "usage":
             self.tokens += payload.get("total", 0)
@@ -314,8 +331,10 @@ class SessionApp:
 
     # ── 入口读通道：唯一一条；跑的时候敲的行先排队，按顺序交出去 ──
     async def _ask(self, _question):
+        # 入口整段话此时已提交进对话（append_assistant 先于 ask），思考/说话都进了
+        # 历史、尾巴去重后自然消失，不需要手动清 —— 这里先画一帧让 markdown 生效。
+        self._render()
         got = await self.lines.get()
-        self.streams.pop(self.intake_id, None)   # 入口整段话已提交进对话，尾巴不再画
         self._defer_render()                     # 等 loop 把 user 消息 append 进对话再画
         return got
 

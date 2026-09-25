@@ -21,7 +21,7 @@
   M. 折叠渲染的缩进：非最后一个孩子画竖线、最后一个收尾（is_last 决定）
   N. 事件词汇：工具与用量事件到达终端（tool_start/tool_end/usage）
   O. 折叠渲染：跑完的子树折一行带统计，活跃路径展开（render_folded）
-  P. 流渲染：选中节点的 msgs + 实时尾巴（render_stream）
+  P. 流渲染：rich renderable —— markdown / Panel 框 / 彩色（render_stream）
 """
 
 import asyncio
@@ -34,6 +34,9 @@ import sys
 import tempfile
 
 from harness import OK, line, ROOT
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 import terminal.chat as chat
 from terminal.view import render_folded, render_stream
 from prompt_toolkit.input import create_pipe_input
@@ -175,7 +178,7 @@ class FakeLLM:
                     self.snapshots.append(self.screen.plain())
         if self.screen is not None:
             self.at_return.append(self.screen.plain())
-        return Message(text=reply, tool_calls=calls)
+        return Message(text=reply, tool_calls=calls, reasoning=self.reasoning)
 
 
 async def _typed(inp, keys, pause=0.1):
@@ -379,14 +382,15 @@ def main():
          llm.at_return and Q2 + "\n" + S2 in llm.at_return[0])
 
     print("=" * 80)
-    print("D. 思考（reasoning_content）在流的思考行里，整段可见、灰色")
+    print("D. 思考（reasoning_content）在流的思考行里，整段可见、蓝斜体")
     think = "先看看用户到底想要什么，再决定要不要开一个任务"
     scr, llm, _ = run_session(["\x04"], [talk("好，我想清楚了。")],
                               reasoning=think, tty=True)
     plain = scr.plain().replace("\r\n", "").replace("\r", "")  # 窄窗格换行不截断
     line("思考的原文整段都显示了（换行只因窗格宽度）", think in plain)
-    line("用的是灰色（dim）", ";2m" in scr.getvalue())
-    line("思考与回答分行显示", "思考:" in scr.plain() and "入口: 好，我想清楚了。" in plain)
+    line("思考行带了样式（蓝斜体经 ANSI 上屏）", "思考:" in scr.plain()
+         and "\x1b[" in scr.getvalue()[scr.getvalue().find("思考:"):][:40])
+    line("回答经 markdown 渲染（无说: 前缀）", "好，我想清楚了。" in plain)
 
     scr, _, _ = run_session(["\x04"], [talk("好。")], reasoning=think, tty=False)
     line("不是真终端 → 思考只留原文、不上色",
@@ -475,7 +479,7 @@ def main():
     plain = scr.plain().replace("\r\n", "").replace("\r", "")
     line("叶子被选中：流的思考行出现", "思考:" in plain)
     line("思考的尾巴跟着长（不是只有头一个字）", "再决定怎么" in plain)
-    line("说话也进流（任务节点的说:）", "说: 我要拆成三个子任务" in plain)
+    line("回答经 markdown 渲染进流", "我要拆成三个子任务" in plain)
     line("树照样跑完、判定以 ✓ 留在树上",
          "✓ [叶子] 做一个能赚钱的量化系统" in plain)
 
@@ -570,31 +574,38 @@ def main():
     line("显式展开压过自动折叠", any("[叶子] 甲1" in t for t in texts3), str(texts3))
 
     print("=" * 80)
-    print("P. 流渲染：选中节点的 msgs + 实时尾巴")
+    print("P. 流渲染：rich renderable —— markdown / Panel 框 / 彩色")
     msgs = [
         {"role": "user", "content": "把数据处理干净"},
-        {"role": "assistant", "content": "我先看看。", "tool_calls": [
+        {"role": "assistant", "content": "**先**看看。", "tool_calls": [
             {"id": "c1", "type": "function",
              "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]},
         {"role": "tool", "tool_call_id": "c1", "content": "data.csv"},
         {"role": "assistant", "content": "跑完了"},
     ]
     rows = render_stream(msgs, intake=True)
-    line("user 消息带你: 前缀", any(k == "user" and t.startswith("你: ") for k, t in rows))
-    line("入口的 assistant 文本标入口:",
-         any(k == "say" and t == "入口: 我先看看。" for k, t in rows))
-    line("工具调用行单独标记", any(k == "tool" and "bash" in t for k, t in rows), str(rows))
-    line("工具输出全文进历史", any(k == "toolout" and "data.csv" in t for k, t in rows))
-    rows = render_stream(msgs, intake=False)
-    line("非入口节点的任务消息标任务: ",
-         any(k == "user" and t.startswith("任务: ") for k, t in rows))
+    line("user 消息 = 加粗文本",
+         isinstance(rows[0], Text) and rows[0].plain == "你: 把数据处理干净"
+         and "bold" in str(rows[0].style), str(rows[0]))
+    line("assistant 内容 = Markdown（**加粗** 被解析）",
+         any(isinstance(r, Markdown) and "先" in r.markup for r in rows))
+    line("工具调用 = 青色文本行",
+         any(isinstance(r, Text) and r.plain.startswith("工具: bash") for r in rows))
+    line("工具输出 = Panel 框（title=工具名）",
+         any(isinstance(r, Panel) and r.title == "bash" for r in rows))
     rows = render_stream(msgs, {"thinking": "想…", "speaking": "说…"})
-    line("实时尾巴附加在底部", rows[-1] == ("speaking", "说: 说…"), str(rows[-1]))
+    line("思考尾巴 = 蓝斜体",
+         any(isinstance(r, Text) and r.plain.startswith("思考: ") and "blue" in str(r.style)
+             for r in rows))
+    line("说话尾巴 = 纯文本", any(isinstance(r, Text) and r.plain == "说…" for r in rows))
+    rows = render_stream([{"role": "assistant", "content": "好", "reasoning": "想想"}])
+    line("已提交的思考画成历史行（随消息，不只在尾巴）",
+         any(isinstance(r, Text) and r.plain == "思考: 想想" for r in rows))
     rows = render_stream(msgs, intake=True, verdict="满足", accept="产出 clean.csv",
                          conclusion="全部完成")
-    line("出结论补判定行（判定 + 验收 + 结论）",
-         any(k == "verdict" and t == "[满足] 产出 clean.csv" for k, t in rows)
-         and any(k == "verdict" and t == "→ 全部完成" for k, t in rows), str(rows))
+    line("判定行 = 绿字（满足）",
+         any(isinstance(r, Text) and r.plain == "[满足] 产出 clean.csv"
+             and "green" in str(r.style) for r in rows))
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

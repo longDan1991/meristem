@@ -164,8 +164,8 @@ class Store:
             self.dirty.add(on_id)
         return nodes
 
-    def append_assistant(self, nid, text, tool_calls):
-        ids = self.dialogue(nid).assistant(text, tool_calls)
+    def append_assistant(self, nid, text, tool_calls, reasoning=""):
+        ids = self.dialogue(nid).assistant(text, tool_calls, reasoning)
         self._after(nid)
         return ids
 

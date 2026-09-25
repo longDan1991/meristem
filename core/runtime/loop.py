@@ -115,7 +115,8 @@ class Loop:
             ),
         )
         _log_usage(self, nid, which, assistant.usage)
-        ids = store.append_assistant(nid, assistant.text, assistant.tool_calls)
+        ids = store.append_assistant(nid, assistant.text, assistant.tool_calls,
+                                     assistant.reasoning)
 
         if which == INTAKE and not assistant.tool_calls:
             self._fire(nid, self._ask(nid, assistant.text))

@@ -161,22 +161,22 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `main.py` | **初始化 + 入口函数**：`init()` 检查 API key、确保工作区存在并 chdir 进去；`main(args)` 把参数派发给 `terminal.chat.run_session`。唯一初始化点 |
 | `core/__init__.py` | 包初始化：`import litellm` 前钉死本地模型成本表（`LITELLM_LOCAL_MODEL_COST_MAP`），离线可跑 |
 | `core/config.py` | `.env` + 路径规则。**唯一能定义路径的地方**（AGENTS §7）：`WORKSPACE` / `WORKERS` |
-| `core/llm.py` | LLM（OpenAI 兼容；`acompletion` 真异步流式 + 思考；`Message` = 文本 + 工具调用 + `usage`）；`ChatPool` = `llm.chat` 的并发上限（消息传递、无锁） |
+| `core/llm.py` | LLM（OpenAI 兼容；`acompletion` 真异步流式 + 思考；`Message` = 文本 + 思考（`reasoning`，留底进历史）+ 工具调用 + `usage`）；`ChatPool` = `llm.chat` 的并发上限（消息传递、无锁） |
 | `core/events.py` | 事件出口 `EventSink`：同步 fan-out（`subscribe` / `emit`）。机制半边，不认事件词汇 |
 | `core/protocol/fields.py` | **协议层**：`Node` 形式字段（无 attempts/observations/status —— 历史在对话里）+ `node_to_dict` / `node_from_dict` / `task_root` / `is_task_root` + 词表（`VERDICTS` / `EXTERNAL_CLASSES` / `FORM_FIELDS` / `ANCHOR_RE` + `ANCHOR_HINT`） |
 | `core/protocol/gate.py` | **协议层**：闸门（必填项 / 锚点 / 证据降级 / 根校验；证据从对话推导观测轮数与子任务名） |
 | `core/runtime/plan.py` | 纯规则：`which_of`（节点类型 → 提示词/工具类型）/ `actionable`（该不该调 LLM：没出结论 + 最后一条不是 assistant）/ `make_child` |
-| `core/runtime/dialogue.py` | 一个节点的平铺对话账本（assistant / tool / user / feedback 写方法）+ `pair` 线上配对规范化（补占位 tool 回话，不改账本） |
+| `core/runtime/dialogue.py` | 一个节点的平铺对话账本（assistant / tool / user / feedback 写方法，assistant 带 `reasoning`）+ `pair` 线上配对规范化（补占位 tool 回话，不改账本） |
 | `core/runtime/store.py` | **一场会话的存储 —— 一个 `Store` 对象**：树 + 记录落盘（内存缓冲 + `pydash.throttle` 节流懒写）；接口 `Store.roots()` / `Store.load(session)` / `Store.new(root, seed)` / `put` / `append_*` / `set_verdict`；检查点 = Node 全字段 + 对话增量。`Store.iter_lines` 读记录 |
-| `core/runtime/loop.py` | **唯一的控制流**：扫活跃节点 → 调 LLM / 异步跑工具 → 折回；事件只发 `loop_start` / `loop_end` / `message_update`（带 scope）。`run(store, llm, ...)` 是入口 |
+| `core/runtime/loop.py` | **唯一的控制流**：扫活跃节点 → 调 LLM / 异步跑工具 → 折回；事件只发 `loop_start` / `loop_end` / `message_update` / `tool_start` / `tool_end` / `usage`（都带 scope）。`run(store, llm, ...)` 是入口 |
 | `core/prompts/` | **命名分节（内容直接写在代码里，没有 .md）**：`prose.py` 散文节（preamble / process / input，每节一个函数）、`skills.py` 条件节（gate）、`tools.py` + `rules.py` 从 `tools.scope_names` 派生、`messages.py` 节点消息拼接（header / lineage / base_user / child_result / result_marks）、`feedback.py` 模型会读到的反馈文本与词表提示。`__init__.py` 是节组装器（`build_system_sections` + `render_system` + `render_turn`） |
 | `tools/specs.py` | **工具注册表 + schema 适配**：`mcp` 实例（工具的 tags 声明作用域）+ `load` / `scope_names` / `action_names`（作用域视图，走 fastmcp 的可见性过滤：挂只读视图 + `enable(only=True)` + `list_tools`，供提示词与校验用）+ `ChildSpec`（形式字段形状）+ `openai_tools`（转 litellm 要的 OpenAI 格式） |
 | `tools/defs.py` | 工具实现（bash 之外）：`@mcp.tool` 函数（`create_children` / `conclude` / `submit_root` / `read` / `write`，作用域 = tags，schema 与实现一体）+ `run_tool` 驱动（ContextVar 注入 `(loop, nid)`）+ 结算（`_push_results` / `_resolve_gate`）。`from tools import bash` 即把 bash 工具注册进 mcp |
 | `tools/bash.py` | **bash 工具独立成文件**：schema 与给模型的描述照抄 oh-my-pi 的 BashTool（`command` / `timeout` / `cwd`，`timeout=0` 禁用 deadline，`cwd` 代替 `cd`）；执行走 llmbash 进程内 shell（不压缩输出）—— 持久 shell 池按 cwd 复用 + 并发重叠降级 one-shot 真并行 + 坏会话弃用重建 |
 | `tools/skills.py` | **通用 skill 加载**：import 时扫描 `cfg.SKILLS_DIRS` 下 `*/SKILL.md` 挂成 fastmcp `SkillsDirectoryProvider` + `read_skill` 工具（leaf 动作，读 `skill://<名字>/...` 资源）+ `discovered()`（name+description 清单，喂 `<skills>` 节）—— 对齐 oh-my-pi，机制对具体 skill 一无所知 |
 | `tools/context.py` | 工具共享现场：`(loop, nid)` ContextVar 注入（`get_binding` / `_current`）+ `_action_result` 记 tool 观测进 trace |
-| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时 `Store.load(id)` 读回整棵树；`converse` 是终端话轮。真终端 = **全屏五区**（左树 / 右流 / 状态条 / 输入行拉通，布局见 `docs/TERMINAL.md`）：`SessionApp` 管事件路由（loop_start / loop_end / message_update / tool_* / usage）与一条输入队列（谈与跑共用，回车提交、Alt-Enter 换行、Ctrl-D 收手）；非真终端降级为逐帧打印折叠树 |
-| `terminal/view.py` | 树的视图：`render_folded`（地图：折叠渲染，跑完的子树折一行带统计、活跃路径展开，返回 `[(node_id, 行)]`）+ `render_stream`（选中节点的消息流：历史 msgs + 实时尾巴 + 判定行，返回 `[(kind, text)]`，颜色由应用层定） |
+| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时 `Store.load(id)` 读回整棵树；`converse` 是终端话轮。真终端 = **全屏五区**（左树 / 右流 / 状态条 / 输入行拉通，布局见 `docs/TERMINAL.md`）：`SessionApp` 管事件路由（loop_start / loop_end / message_update / tool_* / usage）与一条输入队列（谈与跑共用，回车提交、Alt-Enter 换行、Ctrl-D 收手）；流 = rich 渲成 ANSI 经 `formatted_text.ANSI` 上屏，流式合帧 ≈30fps；非真终端降级为逐帧打印折叠树 |
+| `terminal/view.py` | 树的视图：`render_folded`（地图：折叠渲染，跑完的子树折一行带统计、活跃路径展开，返回 `[(node_id, 行)]`）+ `render_stream`（选中节点的消息流，返回 **[rich renderable]**：assistant 内容 = Markdown、工具输出 = Panel 框、思考 = 蓝斜体、判定绿/红） |
 | `terminal/picker.py` | `-r` 的会话选择器（prompt_toolkit 自绘列表） |
 | `docs/PROMPTS.md` | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | 本文档：怎么跑、资产在哪、剩余工作 |

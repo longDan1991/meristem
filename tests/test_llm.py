@@ -59,6 +59,8 @@ def test_full():
     line("文本碎片拼回整段", msg.text == "你好。", repr(msg.text))
     line("on_delta 逐块收到", deltas == ["你", "好。"], repr(deltas))
     line("on_reasoning 收到思考", think == ["想一下"], repr(think))
+    line("思考留底进 Message（终端渲染历史用）", msg.reasoning == "想一下",
+         repr(msg.reasoning))
     line("工具参数两段拼回 dict", (len(msg.tool_calls) == 1
                                    and msg.tool_calls[0].arguments == {"cmd": "ls -la"}),
          repr(msg.tool_calls))

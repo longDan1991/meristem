@@ -41,11 +41,13 @@ class ToolCall:
 class Message:
     """模型一次回复：要么有文本、要么有工具调用（或两者）。
 
-    `usage` 是这次调用的 token 用量（dict 或 None），和消息同生共死 ——
-    并发下不会串到别的节点头上。
+    `reasoning` 是这次调用的思考原文（与 content 分开收，终端画成思考行）；
+    `usage` 是这次调用的 token 用量（dict 或 None）。并发下都随消息走，
+    不经过任何共享槽。
     """
     text: str = ""
     tool_calls: list = field(default_factory=list)
+    reasoning: str = ""
     usage: dict = None
 
 
@@ -97,7 +99,7 @@ class LLM:
         部分 provider 把 usage 带在最后一个有内容的块上而不是独立收尾块，
         所以每块都试着收一次，最后一次写到的就是整段调用的账。
         """
-        parts, calls = [], []
+        parts, calls, reasoning_parts = [], [], []
         tool_deltas = {}                     # index -> {"id", "name", "arguments": [片段]}
         usage = None
         async for chunk in resp:
@@ -111,8 +113,10 @@ class LLM:
             delta = chunk.choices[0].delta
             # 无思考时字段不存在（OpenAI 规范），只能 getattr
             reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning and on_reasoning is not None:
-                on_reasoning(reasoning)
+            if reasoning:
+                reasoning_parts.append(reasoning)   # 思考留底：随 Message 进历史，终端渲染
+                if on_reasoning is not None:
+                    on_reasoning(reasoning)
             piece = delta.content
             if piece:
                 parts.append(piece)
@@ -138,7 +142,8 @@ class LLM:
                 raise ValueError("工具「%s」的参数不是合法 JSON：%r（%s）"
                                  % (slot["name"], raw, e))
             calls.append(ToolCall(id=slot["id"], name=slot["name"], arguments=args))
-        return Message(text="".join(parts), tool_calls=calls, usage=usage)
+        return Message(text="".join(parts), tool_calls=calls, usage=usage,
+                       reasoning="".join(reasoning_parts))
 
 
 class ChatPool:

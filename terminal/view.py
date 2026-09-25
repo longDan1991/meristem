@@ -2,14 +2,24 @@
 
 两个渲染：`render_folded` 是地图（折叠 + 状态标记，返回 [(node_id, 行)]，
 应用层靠 node_id 高亮/定位）；`render_stream` 是选中节点的消息流
-（历史 msgs + 实时尾巴 + 判定行，返回 [(kind, text)]，颜色由应用层定）。
+（历史 msgs + 实时尾巴 + 判定行，返回 [rich Renderable] —— Markdown / Panel /
+带样式 Text，颜色在 renderable 里，应用层经 rich Console 渲成 ANSI 上屏）。
 
 树长什么样是展示的变因，所以住终端层、不碰协议字段序列化：字段形状变了这里只是少画/多画一行。
 """
 
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
+
 from core.protocol.fields import DISPATCH, LEAF, SATISFIED
 
 _KIND_TAG = {DISPATCH: "[分配]", LEAF: "[叶子]"}
+
+# 行样式：思考蓝斜体（区别于说话正文与工具青）、工具青、判定绿/红（TERMINAL.md §4）
+THINK_STYLE = "blue italic"
+_TOOL_STYLE = "cyan"
+_USER_STYLE = "bold"
 
 
 def _subtree_stats(root, registry):
@@ -77,50 +87,71 @@ def render_folded(root, registry, *, selected=None, expanded=frozenset()):
 
 
 def render_stream(msgs, streams=None, *, intake=False, verdict="", accept="", conclusion=""):
-    """选中节点的消息流：历史 `msgs` 按序 + 实时尾巴。返回 [(kind, text)]。
+    """选中节点的消息流：历史 `msgs` 按序 + 实时尾巴。返回 [rich Renderable]。
 
-    kind 词表：user / say / tool / toolout / verdict / thinking / speaking ——
-    颜色由应用层按 kind 定（思考灰、说话正文、工具青色）。工具输出全文进历史
-    （TERMINAL.md §4，不截断）；实时阶段只画调用行，耗时由 `tool_end` 事件补。
+    user / 任务消息 = 加粗文本行；assistant 内容 = **Markdown**（代码块/列表/加粗，
+    TERMINAL.md §4）；工具调用 = 青色一行；工具输出 = **Panel 框**（title=工具名，
+    与聊天内容分开）；思考尾巴 = 蓝斜体一行；说话尾巴 = 纯文本（未提交，提交后变
+    Markdown）；判定 = 绿（满足）/ 红（其它）。
 
     `msgs` 就是 `Dialogue.to_list()` 的平铺账本，渲染层不碰 store。说话尾巴与
     对话去重：已提交进对话的整段话不重复显示（尾巴里只露超出最后一条已提交
     说话的部分）；思考不进对话（`dialogue.assistant` 只存 content），永远实时。
     """
     rows = []
-    who, say = ("你", "入口") if intake else ("任务", "说")
+    who = "你" if intake else "任务"
+    # tool_call_id -> 工具名：面板标题只有 assistant 的 tool_calls 才知道
+    tool_names = {}
+    for m in msgs:
+        if m.get("role") == "assistant":
+            for w in m.get("tool_calls") or []:
+                tool_names[w.get("id")] = (w.get("function") or {}).get("name", "")
     last_say = ""
+    last_reason = ""
     for m in reversed(msgs):
-        if m.get("role") == "assistant" and m.get("content"):
-            last_say = m["content"]
-            break
+        if m.get("role") == "assistant":
+            if m.get("content") and not last_say:
+                last_say = m["content"]
+            if m.get("reasoning") and not last_reason:
+                last_reason = m["reasoning"]
+            if last_say and last_reason:
+                break
     for m in msgs:
         role = m.get("role")
         if role == "user":
-            rows.append(("user", "%s: %s" % (who, m.get("content") or "")))
+            rows.append(Text("%s: %s" % (who, m.get("content") or ""), style=_USER_STYLE))
         elif role == "assistant":
+            if m.get("reasoning"):
+                rows.append(Text("思考: %s" % m["reasoning"], style=THINK_STYLE))
             content = m.get("content") or ""
             if content:
-                rows.append(("say", "%s: %s" % (say, content)))
+                rows.append(Markdown(content))
             for w in m.get("tool_calls") or []:
                 fn = w.get("function") or {}
-                rows.append(("tool", "工具: %s(%s)" % (
-                    fn.get("name", ""), fn.get("arguments", ""))))
+                rows.append(Text("工具: %s(%s)" % (fn.get("name", ""), fn.get("arguments", "")),
+                                 style=_TOOL_STYLE))
         elif role == "tool":
-            rows.append(("toolout", "输出: %s" % (m.get("content") or "")))
+            rows.append(Panel(m.get("content") or "", title=tool_names.get(m.get("tool_call_id")) or "工具",
+                              border_style=_TOOL_STYLE))
     if verdict:
-        rows.append(("verdict", "[%s] %s" % (verdict, accept or "")))
+        rows.append(Text("[%s] %s" % (verdict, accept or ""),
+                         style="bold green" if verdict == SATISFIED else "bold red"))
         if conclusion:
-            rows.append(("verdict", "→ %s" % conclusion))
+            rows.append(Text("→ %s" % conclusion, style="dim"))
     if streams:
+        # 思考 / 说话尾巴都只露超出最后一条已提交的部分（提交后历史里有整段）
         think = streams.get("thinking") or ""
-        if think:
-            rows.append(("thinking", "思考: %s" % think))
+        if think and not (last_reason and think.startswith(last_reason)):
+            rows.append(Text("思考: %s" % think, style=THINK_STYLE))
+        elif think and last_reason and think.startswith(last_reason):
+            shown = think[len(last_reason):]
+            if shown:
+                rows.append(Text("思考: %s" % shown, style=THINK_STYLE))
         tail = streams.get("speaking") or ""
         if tail and not (last_say and tail.startswith(last_say)):
-            rows.append(("speaking", "%s: %s" % (say, tail)))
+            rows.append(Text(tail))
         elif tail and last_say and tail.startswith(last_say):
             shown = tail[len(last_say):]
             if shown:
-                rows.append(("speaking", "%s: %s" % (say, shown)))
+                rows.append(Text(shown))
     return rows
