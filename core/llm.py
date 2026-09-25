@@ -16,7 +16,17 @@ from dataclasses import dataclass, field
 
 import litellm
 
-from .runtime import deliver
+
+def _deliver(fut, task):
+    """把一次异步任务的结果 / 异常原样搬到调用方的 future 上；不吞，也不让消费者 task 死掉。"""
+    if fut.done():
+        return
+    if task.cancelled():
+        fut.cancel()
+    elif task.exception() is not None:
+        fut.set_exception(task.exception())
+    else:
+        fut.set_result(task.result())
 
 
 @dataclass
@@ -147,7 +157,7 @@ class ChatPool:
         while True:
             fut, kwargs = await self._q.get()
             task = asyncio.ensure_future(self._call(kwargs))
-            task.add_done_callback(lambda t, f=fut: deliver(f, t))
+            task.add_done_callback(lambda t, f=fut: _deliver(f, t))
             await asyncio.wait([task])      # 占住名额，但不取异常（交给回调）
 
     async def _call(self, kwargs):

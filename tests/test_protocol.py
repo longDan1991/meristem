@@ -9,25 +9,27 @@
   F. 必填项缺一个 → 当场被拒；长字段原样通过
   G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
   I. 同构：收到的行首 == 自己要写的键
+  M. 工具作用域：声明只在 tags 一处、清单 == 库的可见性过滤、指导齐全
 """
 
 import asyncio
 import os
 import re
-import subprocess
 import sys
 import tempfile
 
-from harness import line
+from harness import ROOT, line
 from core.llm import Message, ToolCall
-from core.protocol.fields import Node
+from core.protocol.fields import FORM_FIELDS, Node
 from core.prompts import (build_system_sections, render_system,
                           render_turn)
-from core.prompts.messages import base_user, header, lineage
+from core.protocol.messages import base_user, header, lineage
+from core.prompts.tools import TOOL_GUIDE
 from core.runtime.loop import run as run_loop
 from core.runtime import store as store_mod
 from core.runtime.store import Store
-from core import config as cfg
+from tools import ACTION_TAG, action_names, load, scope_names, scope_tag, scopes
+from tools.specs import ChildSpec, mcp
 
 C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
@@ -40,7 +42,7 @@ def kid(name, accept, kind="leaf", gate=False, rng=None,
 
 
 def bash_call(cmd):
-    return Message(tool_calls=[ToolCall(name="bash", arguments={"cmd": cmd})])
+    return Message(tool_calls=[ToolCall(name="bash", arguments={"command": cmd})])
 
 
 def create(children):
@@ -226,6 +228,7 @@ def n_calls(recs, nid, tool):
 
 def main():
     ok = True
+    asyncio.run(load())      # 提示词是同步拼的：先把作用域视图从注册表读出来
 
     print("=" * 80)
     print("A. 门槛不成立 → 兄弟永不启动")
@@ -320,7 +323,10 @@ def main():
 
     print("=" * 80)
     print("I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
-    KEYS = ("name", "detail", "notes", "accept", "kind", "gate", "conc_range")
+    KEYS = FORM_FIELDS
+    ok &= line("工具 schema 的键 == 协议的形式字段（同一份、同一顺序）",
+               tuple(ChildSpec.model_fields) == KEYS,
+               "%s" % (tuple(ChildSpec.model_fields),))
     # 文档承诺给模型看的**静态**段落 vs 线上真正发出去的基础消息（base_user）。
     # 在这里**双向**核对：文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
     # 「本层已有尝试 / 观测历史 / 手上的东西」不在这 —— 它们是线上对话机制与
@@ -361,11 +367,20 @@ def main():
                                            "MID: 摸清数据这条线")))
     ok &= line("alloc 的两个出口 = create_children / conclude",
                all(s in sys_text("alloc") for s in ("create_children", "conclude")))
-    ok &= line("leaf 的出口 = bash / read / write / conclude",
-               all(s in sys_text("leaf") for s in ("bash", "read", "write", "conclude")))
+    ok &= line("leaf 的出口 = bash / read / write / read_skill / conclude",
+               all(s in sys_text("leaf") for s in ("bash", "read", "write", "read_skill", "conclude")))
     # 双向核对换成**节名集合**（docs/PROMPTS.md §5.6）：文档点名的节 == 真渲染的节。
-    # 恒在节按 §3.2；条件节按出生时静态属性（gate / COMPRESS）。
-    DOC_SECTIONS = {"preamble", "process", "tools", "rules", "input"}
+    # 恒在节按 §3.2；条件节按出生时静态属性（gate）。
+    DOC_SECTIONS = {"preamble", "process", "tools", "rules", "skills", "input"}
+    # 文档真的被读进来核对，别只在这硬编码一份集合（那样文档漂了测试照样绿）。
+    # 要求的是**节表里的那一行**，不是"文档里出现过这个词"（散文里的反引号会放水）。
+    with open(os.path.join(ROOT, "docs", "PROMPTS.md"), encoding="utf-8") as f:
+        doc_md = f.read()
+    ok &= line("每个节都在设计文档的节表里单独占一行",
+               all(("| `%s` |" % n) in doc_md
+                   for n in DOC_SECTIONS | {"skill_gate"}),
+               str([n for n in DOC_SECTIONS | {"skill_gate"}
+                    if ("| `%s` |" % n) not in doc_md]))
 
     def section_names(sys_t):
         names = set(re.findall(r"<([a-z][a-z0-9_-]*)>", sys_t))
@@ -376,21 +391,18 @@ def main():
     for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
         nS = filled(kind_, [])
         got = section_names(render_turn(which, nS)[0]["content"])
-        expect = set(DOC_SECTIONS)
-        if which == "leaf" and cfg.COMPRESS:
-            expect.add("skill_compression")
         ok &= line("%s: 文档点名的节 == 真渲染的节" % which,
-                   got == expect, "%s" % sorted(got))
+                   got == set(DOC_SECTIONS), "%s" % sorted(got))
     ok &= line("intake: 文档点名的节 == 真渲染的节（无条件节）",
                section_names(render_turn("intake")[0]["content"])
                == set(DOC_SECTIONS))
     ok &= line("根没有上层 → 不渲染意图链", lineage(filled("dispatch", [])) == "")
     _, regI, recsI, _ = go("deep")
-    lin = [r["payload"] for r in recsI if r["kind"] == "leaf_in"
-           and regI[r["node"]].name == "LEAF"]
-    ok &= line("叶子的提示词里带着从根到它上层的整条意图链",
-               bool(lin) and "上层意图链" in lin[0] and "ROOT" in lin[0]
-               and "MID" in lin[0])
+    leafI = [n for n in regI.values() if n.name == "LEAF"][0]
+    lin = last_msgs(recsI, leafI.id)
+    ok &= line("叶子的任务消息里带着从根到它上层的整条意图链",
+               bool(lin) and "上层意图链" in lin[0]["content"]
+               and "ROOT" in lin[0]["content"] and "MID" in lin[0]["content"])
 
     def _raises(fn):
         try:
@@ -398,9 +410,6 @@ def main():
         except ValueError:
             return True
         return False
-
-    async def _mcp_prompt_names():
-        return set()
 
     print("=" * 80)
     print("K. 命名分节 wire：system 只有一条、intake 同样、参数校验")
@@ -440,10 +449,13 @@ def main():
                and n_plain.index("<tools>") < n_plain.index("<rules>")
                < n_plain.index("<input>"))
     ok &= line("gate=False → 无 <skill_gate> 节", "<skill_gate>" not in n_plain)
+    ok &= line("<skills> 恒在（三种节点都有），gate 不影响它",
+               "<skills>" in n_plain and "<skills>" in sec_sys("dispatch", True)
+               and "<skills>" in render_turn("intake")[0]["content"])
     ok &= line("gate=True → 有 <skill_gate> 节", "<skill_gate>" in n_gate
                and "<skill_gate>" in n_alloc)
-    ok &= line("COMPRESS 默认开 → 叶子有 <skill_compression>、分配节点没有",
-               cfg.COMPRESS and "<skill_compression>" in n_plain
+    ok &= line("压缩已去掉 → 叶子也没有 <skill_compression> 节",
+               "<skill_compression>" not in n_plain
                and "<skill_compression>" not in n_alloc)
     n_leaf = filled("leaf", [])
     ok &= line("同一节点两次组装字节一致",
@@ -454,24 +466,6 @@ def main():
         ok &= line("节名违反 [a-z][a-z0-9_-]* 当场报错", False)
     except ValueError:
         ok &= line("节名违反 [a-z][a-z0-9_-]* 当场报错", True)
-    # COMPRESS 关：config 在 import 时固化，用子进程验（TREE_COMPRESS=0）
-    script = (
-        "import os; os.environ['TREE_COMPRESS'] = '0'; "
-        "from core.protocol.fields import Node; "
-        "from core.prompts import build_system_sections, render_system; "
-        "n = Node(name='N', accept='A 2026-12-31', kind='leaf'); "
-        "s = render_system(build_system_sections('leaf', n)); "
-        "assert '<skill_gate>' not in s and '<skill_compression>' not in s, s; "
-        "n2 = Node(name='N', accept='A 2026-12-31', kind='leaf', gate=True); "
-        "s2 = render_system(build_system_sections('leaf', n2)); "
-        "assert '<skill_gate>' in s2 and '<skill_compression>' not in s2; "
-        "print('ok')")
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                       text=True, cwd=os.path.dirname(os.path.dirname(
-                           os.path.abspath(__file__))))
-    ok &= line("COMPRESS 关 → 叶子无 <skill_compression>，gate=True 有 <skill_gate>",
-               r.returncode == 0 and r.stdout.strip() == "ok",
-               r.stderr.strip()[-160:])
 
     print("=" * 80)
     print("L. 并行工具调用：一次回复多个工具 → 全部执行，全部完成再继续")
@@ -482,8 +476,8 @@ def main():
             done = sum(1 for m in messages if m.get("role") == "tool")
             if done == 0:
                 return Message(tool_calls=[
-                    ToolCall(name="bash", arguments={"cmd": "echo a"}),
-                    ToolCall(name="bash", arguments={"cmd": "echo b"})])
+                    ToolCall(name="bash", arguments={"command": "echo a"}),
+                    ToolCall(name="bash", arguments={"command": "echo b"})])
             return Message(tool_calls=[ToolCall(
                 name="conclude", arguments={"verdict": "满足", "text": "ok",
                                             "evidence": ["第1次观测"]})])
@@ -504,6 +498,33 @@ def main():
     ok &= line("两条 tool 回话都配上了",
                sum(1 for m in msgs_m if m.get("role") == "tool") >= 2)
     ok &= line("全部完成后继续，最终出结论", root_m.verdict == "满足")
+
+    print("=" * 80)
+    print("M. 工具作用域：声明只有一处（tags）、清单由库的可见性算出来、指导齐全")
+
+    # 指导表是手写的提示词、清单是从注册表算出来的：两边的覆盖要**对等** ——
+    # 少一行 tools 节会当场报错（runtime 那道），多一行就是没人用的死文案。
+    expected = {n for w in scopes() for n in scope_names(w)}
+    ok &= line("决策指导表与注册表里的工具一一对应",
+               set(TOOL_GUIDE) == expected,
+               str(sorted(set(TOOL_GUIDE) ^ expected)))
+
+    registered = {t.name: set(t.tags) for t in asyncio.run(mcp.list_tools())}
+    untagged = {n: sorted(t) for n, t in registered.items()
+                if not any(x.startswith("scope:") for x in t)}
+    ok &= line("每个注册的工具都声明了作用域标签（没声明的谁都调不到）",
+               not untagged, str(untagged))
+    ok &= line("清单 == 注册表里带 scope:<层> 标签的工具（库的可见性过滤）",
+               all(set(scope_names(w))
+                   == {n for n, t in registered.items() if scope_tag(w) in t}
+                   for w in scopes()),
+               str({w: scope_names(w) for w in scopes()}))
+    ok &= line("动手工具 = 注册表里带 action 标签的那些（证据审计只认它们）",
+               set(action_names()) == {n for n, t in registered.items()
+                                       if ACTION_TAG in t},
+               str(action_names()))
+    ok &= line("作用域 = 节点类型（alloc / leaf / intake）",
+               set(scopes()) == {"alloc", "leaf", "intake"}, str(scopes()))
 
     print("=" * 80)
     print("全部通过" if ok else "有失败项")

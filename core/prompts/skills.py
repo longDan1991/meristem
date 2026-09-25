@@ -1,4 +1,10 @@
-"""条件节：`node.gate` / `cfg.COMPRESS` 为真时在场的 skill 全文，触发条件各只有一处定义。"""
+"""条件节：`node.gate` 在场时的 skill 全文。
+
+在场与否只在 `__init__.py` 的 `build_system_sections` 里判一次（看 Node 字段）。
+`<skills>` 清单节恒在：内容来自 tools.skills.discovered()（扫描结果）。
+"""
+
+from tools import skills as _tskills
 
 
 def skill_gate():
@@ -10,12 +16,17 @@ def skill_gate():
     return "\n".join(lines)
 
 
-def skill_compression():
-    """<skill_compression>：工具结果可能被压、带取回标记（cfg.COMPRESS 且叶子时在场）。"""
+def skills_section():
+    """<skills>：已注册技能的清单（恒在）。
+
+    对齐 oh-my-pi：清单只放 name + description（检索面），正文按需经 read_skill 读
+    `skill://<名字>/...` —— 不整节注入正文（skill 会随版本换代漂移，注入 = 每个节点
+    白背无关内容）。清单来自 tools.skills.discovered()（扫描结果，非手写）。
+    """
+    items = _tskills.discovered()
     lines = []
-    lines.append("你收到的工具结果**可能被压缩过**：压缩文本里带取回标记")
-    lines.append("（如 `[N lines compressed to M. Retrieve more: hash=...]`）。")
-    lines.append("当你要用的细节不在压缩结果里时，调 headroom_retrieve "
-                 "取回完整原文（参数就是标记里的 hash）。")
-    lines.append("没看到标记就别调它 —— 那说明内容没被压，全都还在。")
+    if not items:
+        lines.append("暂无已注册技能。")
+    for name, desc in items:
+        lines.append("  · %s —— %s" % (name, desc))
     return "\n".join(lines)

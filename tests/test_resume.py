@@ -12,7 +12,10 @@
   F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果
   G. 一场会话多个任务 = 一棵树多个孩子，只有没跑完的被接着跑
   H. 增量检查点：第一笔全量、之后只带新增，load 按序拼回全量
-  I. Store.label：当前格式认入口的孩子，档案（无入口）认根本身
+  I. 会话摘要（Store.roots）：当前格式认入口的孩子，档案（无入口）认根本身
+  J. 一场会话多个任务：摘要认最新谈成的那个任务
+  K. 记录读路径的病态输入：嵌入同形键的非 state 记录、紧凑分隔符写的 state
+  L. 同一秒里连开两场会话不撞进同一条记录
 """
 
 import asyncio
@@ -20,6 +23,7 @@ import json
 import os
 import sys
 import tempfile
+import time as _time
 
 from harness import OK, line
 from core.llm import Message, ToolCall
@@ -143,7 +147,7 @@ async def main():
     try:
         await run(Store.new(root2), ScriptLLM([
             ("create_children", {"children": [kid("子A")]}),
-            ("bash", {"cmd": "echo hi"}),
+            ("bash", {"command": "echo hi"}),
             RuntimeError("模拟崩溃")]))
     except RuntimeError:
         pass
@@ -210,7 +214,7 @@ async def main():
     task = [n for n in t.registry.values() if n.parent == t.root.id]
     line("任务挂成入口的孩子", len(task) == 1 and task[0].kind == "leaf")
     llm5 = ScriptLLM([
-        ("bash", {"cmd": "echo hi"}),
+        ("bash", {"command": "echo hi"}),
         ("conclude", {"verdict": "满足", "text": "任务X做完了",
                       "evidence": ["第1次观测"]}),
         "跑完了。"])
@@ -261,7 +265,7 @@ async def main():
     line("跑完的任务一有判定，任务二没有",
          t1.verdict == "满足" and not t2.verdict)
     llm7 = ScriptLLM([
-        ("bash", {"cmd": "echo 2"}),
+        ("bash", {"command": "echo 2"}),
         ("conclude", {"verdict": "满足", "text": "任务二完成",
                       "evidence": ["第1次观测"]}),
         "都跑完了。"])
@@ -283,7 +287,7 @@ async def main():
     root_h = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
     llm_h = ScriptLLM([
         ("create_children", {"children": [kid("子A")]}),
-        ("bash", {"cmd": "echo hi"}),
+        ("bash", {"command": "echo hi"}),
         ("conclude", {"verdict": "满足", "text": "子A做完了", "evidence": ["第1次观测"]}),
         ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["子A"]})])
     st_h = await run(Store.new(root_h), llm_h)
@@ -309,26 +313,107 @@ async def main():
          _delta_and_legacy_mix_loads())
 
     print("=" * 80)
-    print("I. Store.label：当前格式认入口的孩子，档案（无入口）认根本身")
+    print("I. 会话摘要（Store.roots）：当前格式认入口的孩子，档案（无入口）认根本身")
     d_i = tempfile.mkdtemp()
     it_i = Node(name="会话", kind="intake")
     leaf_i = Node(name="子A", accept="x", kind="leaf", parent=it_i.id, depth=1)
     leaf_i.verdict, leaf_i.conclusion, leaf_i.evidence = "满足", "done", ["e"]
     it_i.children = [leaf_i.id]
-    p_i = load_tree(d_i, it_i, [(it_i.id, "state", state_rec(it_i, [])),
-                                (leaf_i.id, "state", state_rec(leaf_i, []))]).path
-    lbl = Store.label(p_i)
+    load_tree(d_i, it_i, [(it_i.id, "state", state_rec(it_i, [])),
+                          (leaf_i.id, "state", state_rec(leaf_i, []))])
+    lbl = _label_of(it_i.id)
     line("当前格式：任务 = 入口的孩子", "子A" in lbl and "[满足]" in lbl)
     d_j = tempfile.mkdtemp()
     root_j = Node(name="老任务", accept="x", kind="dispatch")
     root_j.verdict, root_j.conclusion = "阻塞", "做不了"
-    p_j = load_tree(d_j, root_j, [(root_j.id, "state", state_rec(root_j, []))]).path
-    lbl2 = Store.label(p_j)
+    load_tree(d_j, root_j, [(root_j.id, "state", state_rec(root_j, []))])
+    lbl2 = _label_of(root_j.id)
     line("档案：没有入口，根本身就是任务", "老任务" in lbl2 and "[阻塞]" in lbl2)
+
+    print("=" * 80)
+    print("J. 一场会话多个任务：摘要认最新谈成的那个任务")
+    d_m = tempfile.mkdtemp()
+    it_m = Node(name="会话", kind="intake")
+    first = Node(name="第一个任务", accept="x", kind="dispatch", parent=it_m.id, depth=1)
+    first.verdict, first.conclusion = "满足", "done"
+    second = Node(name="第二个任务", accept="x", kind="dispatch", parent=it_m.id, depth=1)
+    second.verdict = ""
+    it_m.children = [first.id, second.id]
+    load_tree(d_m, it_m, [(it_m.id, "state", state_rec(it_m, [])),
+                          (first.id, "state", state_rec(first, [])),
+                          (second.id, "state", state_rec(second, []))])
+    lbl_m = _label_of(it_m.id)
+    line("认最新那个（第二个），不是第一个", "第二个任务" in lbl_m
+         and "第一个任务" not in lbl_m and "共 2 个任务" in lbl_m, lbl_m)
+
+    print("=" * 80)
+    print("K. 记录读路径：非 state 记录里嵌了同形键、真 state 用紧凑分隔符 —— 该读到的还是它")
+    line("嵌入 kind 的非 state 记录不算 state；紧凑分隔符写的 state 照样认",
+         _lookalike_records_are_ignored())
+
+    print("=" * 80)
+    print("L. 同一秒里连开两场会话不撞进同一条记录")
+    line("目录名带随机、两场各自可读回来",
+         _two_sessions_in_one_second_stay_apart())
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")
     return 0 if all(OK) else 1
+
+
+class _FrozenSecond:
+    """把 `%m%d-%H%M%S` 冻住，其余照真 time —— 用来守"同一秒连开两场不撞同一条记录"。"""
+
+    @staticmethod
+    def strftime(fmt, *args):
+        return "0101-000000" if fmt == "%m%d-%H%M%S" else _time.strftime(fmt, *args)
+
+    def __getattr__(self, name):
+        return getattr(_time, name)
+
+
+def _label_of(sid):
+    """按会话 id 取摘要 —— 不靠 `roots()` 的顺序（它按 mtime 倒序，不是"被测的那场"）。"""
+    return next(t for sid_, t in Store.roots() if sid_ == sid)
+
+
+def _two_sessions_in_one_second_stay_apart():
+    """目录名若只由"时间"决定，同一秒连开两场会写进同一条记录：两个根 → 谁都读不回来。"""
+    d = tempfile.mkdtemp()
+    store_mod.init(d)
+    old = store_mod.time
+    store_mod.time = _FrozenSecond()
+    try:
+        a = Store.new(Node(name="会话", kind="intake"), seed="s")
+        b = Store.new(Node(name="会话", kind="intake"), seed="s")
+    finally:
+        store_mod.time = old
+    return a.path != b.path and len(Store.roots()) == 2
+
+
+def _lookalike_records_are_ignored():
+    """病态输入：`tool` 记录的 payload 里嵌了 `{"kind": "state"}`，真 state 用紧凑分隔符写。
+
+    按原始行做子串匹配的读法会选错：要么把 tool 记录当 state（它的 payload 里没有 node），
+    要么漏掉用紧凑分隔符写的真 state —— 两种都会让这场会话读不回来。
+    """
+    d = tempfile.mkdtemp()
+    store_mod.init(d)
+    n = Node(name="真任务", kind="dispatch", accept="x")
+    p = os.path.join(d, "runs", "t", "trace.jsonl")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"kind": "tool", "node": "别的节点",
+                            "payload": {"tool": "bash", "args": {"kind": "state"}}},
+                           ensure_ascii=False) + "\n")
+        f.write(json.dumps({"kind": "state", "node": n.id,
+                            "payload": {"node": node_to_dict(n), "msgs": []}},
+                           ensure_ascii=False, separators=(",", ":")) + "\n")
+    try:
+        st = Store.load(n.id)
+    except ValueError:
+        return False
+    return st.root.name == "真任务"
 
 
 def _delta_and_legacy_mix_loads():

@@ -43,7 +43,7 @@ class FakeLLM:
             done = any(m.get("role") == "tool" for m in messages)
             if not done:
                 return Message(text="", tool_calls=[ToolCall(
-                    name="bash", arguments={"cmd": "echo hi"})])
+                    name="bash", arguments={"command": "echo hi"})])
             return Message(text="", tool_calls=[ToolCall(
                 name="conclude", arguments={"verdict": "满足", "text": "跑完了",
                                             "evidence": ["第1次观测"]})])
@@ -159,17 +159,18 @@ def main():
          "说了 %d 次" % sum("平台" in a for a in asked))
 
     print("=" * 80)
-    print("E. 闸门：缺字段 / 没有可测物理量，都当场说不")
-    for spec, tag in (
-            (root(accept="系统做好了")["root"], "没有可测物理量"),
-            (root(conc_range=[500, 100])["root"], "conc_range 形状不对"),
-            (root(name="")["root"], "name 是空的"),
-            (root(kind="dispatch|leaf")["root"], "kind 写成示例里的两种之一"),
-            (root(kind="")["root"], "kind 没填"),
-            (root(accept="")["root"], "accept 是空的")):
+    print("E. 闸门：缺字段 / 没有可测物理量 / 给根标了门槛，都当场说不（且说清是哪一条）")
+    for spec, tag, want in (
+            (root(accept="系统做好了")["root"], "没有可测物理量", "可测物理量"),
+            (root(conc_range=[500, 100])["root"], "conc_range 形状不对", "conc_range"),
+            (root(name="")["root"], "name 是空的", "缺必填项"),
+            (root(kind="dispatch|leaf")["root"], "kind 写成示例里的两种之一", "kind"),
+            (root(kind="")["root"], "kind 没填", "kind"),
+            (root(gate=True)["root"], "根标了门槛（根没有兄弟）", "门槛"),
+            (root(accept="")["root"], "accept 是空的", "缺必填项")):
         out, why = validate_root(spec)
-        print("  %-16s → %s" % (tag, why))
-        line("拒绝: " + tag, out is None and bool(why))
+        print("  %-22s → %s" % (tag, why))
+        line("拒绝: " + tag, out is None and want in (why or ""), why)
     out, why = validate_root(root()["root"])
     line("合规的根能过", out is not None and why is None)
 
@@ -200,6 +201,15 @@ def main():
     line("话一路出去（碎片拼回来 = 原话）", streamed(text) == text)
     line("交形式不吐（纯工具调用，没有 content）",
          streamed(root()) == "")
+
+    print("=" * 80)
+    print("G. 空回车不算回答：不入账、不惊动模型、重新提问")
+    llm = FakeLLM(["确认一下：模拟盘还是实盘？", root()])
+    asked, _, _ = run_intake(llm, "帮我做视频赚钱", ["", "   ", "对"])
+    line("空回车/纯空白没被当成一轮（模型第二次收到的是真回答，不是空串）",
+         len(llm.said) >= 2 and llm.said[1] == "对", repr(llm.said[:2]))
+    line("空回车后同一句问题重新问，直到答上",
+         len(asked) >= 3 and asked[0] == asked[1] == asked[2], repr(asked))
 
 
 def any_accept_from(asked):

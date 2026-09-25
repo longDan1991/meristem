@@ -10,13 +10,12 @@ LLM 因此并发。
 import asyncio
 
 from .. import config as cfg
-from ..compression import compress_messages
 from ..events import EventSink
 from ..llm import ChatPool
-from ..prompts import feedback, render_turn
-from ..prompts.messages import base_user
-from ..protocol.fields import INTAKE, LEAF
-from tools import allowed_names, openai_tools
+from ..protocol import feedback
+from ..prompts import render_turn
+from ..protocol.fields import INTAKE
+from tools import openai_tools
 from tools.defs import run_tool
 from .dialogue import pair
 from .plan import actionable, which_of
@@ -32,7 +31,6 @@ class Loop:
         self.sink = EventSink()
         if subscribe is not None:
             self.sink.subscribe(subscribe)
-        self.tools = {}  # which -> OpenAI 工具声明（run 开始时建一次）
         self.active = set()  # 可能有下一个动作的节点
         self.pending = {}  # future -> nid（在飞的 LLM / 工具 / 入口等用户）
         self.busy = {}  # nid -> 在飞数（>0 就不再给这个节点发 LLM）
@@ -42,7 +40,10 @@ class Loop:
         self.sink.emit(type, {"scope": nid, **(payload or {})})
 
     async def run(self):
-        self.tools = await openai_tools()  # 建一次，避免并发首建
+        # 工具与清单（which -> OpenAI 声明 / 名字）在开跑时建一次，避免并发首建
+        self.tools = await openai_tools()
+        self.tool_names = {which: tuple(s["function"]["name"] for s in specs)
+                           for which, specs in self.tools.items()}
         self.active = set(self.store.registry)  # 自举：全节点入活跃集
         try:
             while True:
@@ -102,8 +103,7 @@ class Loop:
             self.started.add(nid)
             self.emit(nid, "loop_start", {"node": node})
 
-        wire = await _build_wire(self, node, which)
-        store.record(nid, "%s_in" % which, base_user(node))
+        wire = _build_wire(self, node, which)
         assistant = await self.pool.chat(
             wire,
             tools=self.tools[which],
@@ -113,16 +113,6 @@ class Loop:
             ),
         )
         _log_usage(self, nid, which, assistant.usage)
-        store.record(
-            nid,
-            "%s_out" % which,
-            {
-                "text": assistant.text,
-                "tool_calls": [
-                    {"name": tc.name, "arguments": tc.arguments} for tc in assistant.tool_calls
-                ],
-            },
-        )
         ids = store.append_assistant(nid, assistant.text, assistant.tool_calls)
 
         if which == INTAKE and not assistant.tool_calls:
@@ -132,8 +122,13 @@ class Loop:
             self._fire(nid, self._tools(nid, which, assistant.tool_calls, ids))
 
     async def _ask(self, nid, text):
-        reply = await self.ask(str(text or "").strip())
-        self.store.append_user(nid, str(reply))
+        """等入口回答；空/纯空白不算回答——不入账、不惊动模型，继续等同一句。"""
+        question = str(text or "").strip()
+        while True:
+            reply = await self.ask(question)
+            if str(reply or "").strip():
+                self.store.append_user(nid, str(reply))
+                return
 
     async def _tools(self, nid, which, tool_calls, ids):
         results = await asyncio.gather(
@@ -152,37 +147,21 @@ async def run(store, llm, *, workers=cfg.WORKERS, subscribe=None, ask=None, say=
 
 
 # ---------------------------------------------------------------- 内部
-async def _build_wire(loop, node, which):
-    """这次发给模型的消息：system + 配对规范化后的平铺对话（叶子再压缩）。"""
+def _build_wire(loop, node, which):
+    """这次发给模型的消息：system + 配对规范化后的平铺对话。"""
     store = loop.store
     nid = node.id
     msgs = store.dialogue(nid).to_list()
-    wire = render_turn(which, node) + pair(msgs)
-    if (
-        which == LEAF
-        and cfg.COMPRESS
-        and any(m.get("role") == "tool" for m in msgs)
-    ):
-        result = await compress_messages(wire, getattr(loop.llm, "model", ""))
-        wire = result.messages
-        if result.tokens_saved > 0:
-            store.record(
-                nid,
-                "wire_compressed",
-                {
-                    "before": result.tokens_before,
-                    "after": result.tokens_after,
-                    "saved": result.tokens_saved,
-                    "transforms": result.transforms_applied,
-                },
-            )
-    return wire
+    return render_turn(which, node) + pair(msgs)
 
 
 async def _one_tool(loop, nid, which, tc, call_id):
-    """驱动一次工具调用；被拒 / 出错写一条 tool 回话，结构类成功不写。"""
+    """驱动一次工具调用；被拒 / 出错写一条 tool 回话，结构类成功不写。
+
+    允许的名字就是这次发给模型的清单（同一份作用域事实），不是另抄的名单。
+    """
     store = loop.store
-    names = allowed_names(which)
+    names = loop.tool_names[which]
     if tc.name not in names:
         store.append_tool(nid, call_id, feedback.unknown_tool(tc.name, names))
         return

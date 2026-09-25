@@ -7,12 +7,16 @@
 （`runtime/plan.py` 的 `actionable`：没出结论 + 最后一条不是 assistant）。
 
 本文件只管格子的形状与序列化：合规校验在 `gate.py`，落盘 / 调度在 `runtime/`，
-渲成消息在 `core/prompts/messages.py` —— class Node 是纯定义，没有任何方法。
+渲成消息在 `core/protocol/messages.py` —— class Node 是纯定义，没有任何方法。
+
+词表与"可测物理量"的定义也住这里（`VERDICTS` / `EXTERNAL_CLASSES` / `ANCHOR_RE` + `ANCHOR_HINT`）：
+它比谁都底层，校验、提示词、schema 都 import 得到同一份，不许各自再抄一遍。
 
 树结构只读查询也住这里（`task_root` / `is_task_root`）：它只是 parent / kind 的纯函数，
 runtime 的 `store._label`、工具层的验收锚点、终端的任务起止路由都要它，住最底层谁都 import 得到。
 """
 
+import re
 import uuid
 from dataclasses import dataclass, field, fields
 
@@ -27,10 +31,11 @@ INTAKE = "intake"
 KINDS = (DISPATCH, LEAF)
 
 # 提示词 / 工具类型（which）：dispatch 归入分配节点 alloc，leaf / intake 同名。
-# 映射见 runtime/plan.which_of，工具清单见 tools/specs.NODE_TOOLS。
+# 映射见 runtime/plan.which_of；哪些工具住哪个作用域由工具声明处的 `tags` 说（`scope:<层>`）。
 ALLOC = "alloc"
 
-# `外部需求` 的词表：bash 做不到的事，由模型提议、人确认后才算事实。
+# `外部需求` 的词表：bash 做不到的事由模型提议、代码按这张表过滤。
+# "人确认后才算事实"是设计意图，控制面（见 HANDOVER §5①）还没实现 —— 现在过滤通过即算事实。
 EXTERNAL_CLASSES = ("需要人到场", "需要真实账户", "需要真实资金", "需要现实设备")
 
 # 判定词表：模型能给三种判定（gate 校验 / 渲染 / 证据审计共用）。
@@ -40,6 +45,19 @@ BLOCKED = "阻塞"
 VERDICTS = (SATISFIED, UNSATISFIED, BLOCKED)
 # 代码设置的终态：门槛不成立 → 暂缓兄弟被判「未启动」，不是模型能给的判定。
 NOT_STARTED = "未启动"
+
+# 可测物理量（锚点）：日期、≥2 位数字、标识符；单个数字不算。
+# 正则与给模型看的措辞必须同源：gate 拿它做继承/根校验，ChildSpec 与提示词拿它讲
+# "验收标准必须带什么"（词表只有这一份，改这里就够）。
+ANCHOR_RE = re.compile(
+    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{2,}|[A-Za-z_][A-Za-z0-9_.\-]+")
+ANCHOR_HINT = "日期 / 两位以上数字 / 标识符如 hello.txt"
+
+
+# 形式字段（上层下发、模型看到也写到）：节点出厂就带这几个键，任务消息的行首与
+# `ChildSpec`（模型写给孩子的形状）必须是同一串键、同一顺序 —— 键清单只有这一份，
+# 工具 schema 与它一致由测试守住。
+FORM_FIELDS = ("name", "detail", "notes", "accept", "kind", "gate", "conc_range")
 
 
 def norm(text):
@@ -82,7 +100,12 @@ def node_to_dict(node):
 
 
 def node_from_dict(d):
-    """dict → Node；只认当前字段（旧记录里多出来的键忽略）。"""
+    """dict → Node；只认当前字段。
+
+    旧档案（"入口并入根之前"那批）的节点上带着 keywords / attempts / observations /
+    status 等编排字段，一律不采信、直接丢 —— 这是有意的容忍：只有"当前格式的节点"
+    一种解释，多出来的键不进内存。缺的字段按默认值补齐。
+    """
     return Node(**{k: v for k, v in (d or {}).items() if k in _NODE_FIELDS})
 
 

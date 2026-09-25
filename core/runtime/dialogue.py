@@ -9,7 +9,7 @@
 
 import json
 
-from ..prompts.feedback import pair_placeholder
+from ..protocol.feedback import pair_placeholder
 
 
 class Dialogue:

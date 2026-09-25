@@ -22,6 +22,7 @@
 
 import asyncio
 import ast
+import contextlib
 import io
 import os
 import re
@@ -30,6 +31,7 @@ import tempfile
 
 from harness import OK, line, ROOT
 import terminal.chat as chat
+from terminal.view import render_tree
 from prompt_toolkit.input import create_pipe_input
 from core.llm import Message, ToolCall
 from core.protocol.fields import Node
@@ -38,7 +40,30 @@ from core.runtime.store import Store
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TIMEOUT = 30
-RAN = []
+
+
+@contextlib.contextmanager
+def _tty_env():
+    """把颜色相关的环境摆成"真终端"。
+
+    rich 按 TERM / NO_COLOR / FORCE_COLOR / TTY_COMPATIBLE 决定上不上色
+    （`converse` 里 `console.color_system is not None` 就是照它的判断走），
+    环境里带着 NO_COLOR=1 或 TERM=dumb 时上色被关掉、带着 FORCE_COLOR 时又被硬开，
+    不改环境的话断言就变成在考环境而不是考代码。
+    """
+    keys = ("TERM", "NO_COLOR", "FORCE_COLOR", "TTY_COMPATIBLE")
+    old = {k: os.environ.get(k) for k in keys}
+    os.environ["TERM"] = "xterm-256color"
+    for k in keys[1:]:
+        os.environ.pop(k, None)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 class Screen(io.StringIO):
@@ -101,7 +126,7 @@ class FakeLLM:
                 if on_delta:
                     await self._drip(on_delta, reply)
                 return Message(text=reply, tool_calls=[ToolCall(
-                    name="bash", arguments={"cmd": "echo hi"})])
+                    name="bash", arguments={"command": "echo hi"})])
             return Message(text="", tool_calls=[ToolCall(
                 name="conclude", arguments={"verdict": "满足", "text": "跑完了",
                                             "evidence": ["第1次观测"]})])
@@ -172,7 +197,7 @@ def run_session(keys, replies, reasoning="", tty=False, seed="帮我赚大钱",
                 slow=False, kids=1, pause=0.1):
     """跑一次 converse：管道驱动的真会话 + 假 stdout。返回 (屏幕, 模型, 返回值)。"""
     screen = Screen(tty=tty)
-    with create_pipe_input() as inp:
+    with create_pipe_input() as inp, _tty_env():
         session = chat._session(inp)
         llm = FakeLLM(replies, reasoning=reasoning, screen=screen, slow=slow, kids=kids)
         old_llm, chat.LLM = chat.LLM, (lambda: llm)
@@ -195,7 +220,7 @@ def run_session(keys, replies, reasoning="", tty=False, seed="帮我赚大钱",
 def slow_session(replies, schedule, kids=1):
     """真终端 + 慢跑：返回屏幕上留下的内容（Live 原地画，最后那帧留下）。"""
     screen = Screen(tty=True)
-    with create_pipe_input() as inp:
+    with create_pipe_input() as inp, _tty_env():
         session = chat._session(inp)
         llm = FakeLLM(replies, screen=screen, slow=True, kids=kids)
         old_llm, chat.LLM = chat.LLM, (lambda: llm)
@@ -341,7 +366,7 @@ def main():
     main_src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
     line("终端读取只在一个地方（main.py 不再自己读输入）",
          "input(" not in main_src)
-    line("main.py 只按参数分派（不碰终端 / 不碰运行现场）",
+    line("main 只做初始化 + 派发（不碰话轮内部 / 不建 LLM / 不碰树）",
          "opening()" not in main_src and "converse(" not in main_src
          and "LLM(" not in main_src and "Trace(" not in main_src)
     line("开场白那条路是 await 的（装配层，不把 coroutine 当任务名送进去）",
@@ -417,6 +442,22 @@ def main():
          scr.plain().count("▸ 思考") >= 2)
     line("根出了结论，判定留在屏幕上",
          "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
+
+    print("=" * 80)
+    print("M. 树视图：非最后一个孩子画竖线、最后一个收尾（缩进只由 is_last 决定）")
+    top = Node(name="会话", kind="intake")
+    kid_a = Node(name="甲", kind="dispatch", parent=top.id, depth=1,
+                 accept="A 2026-12-31", verdict="满足")
+    kid_b = Node(name="乙", kind="leaf", parent=top.id, depth=1,
+                 accept="B 2026-12-31")
+    top.children = [kid_a.id, kid_b.id]
+    reg = {n.id: n for n in (top, kid_a, kid_b)}
+    rows = render_tree(top, reg)
+    line("根在最前、没有前缀", rows[0].startswith("└─ "), rows[0])
+    line("非最后一个孩子画 ├─，它的续行画 │",
+         rows[2].startswith("   ├─ ") and rows[3].startswith("   │ "), rows[3])
+    line("最后一个孩子画 └─，它的续行留空",
+         rows[4].startswith("   └─ ") and rows[5].startswith("     "), rows[5])
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

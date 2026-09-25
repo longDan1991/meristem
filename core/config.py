@@ -33,9 +33,12 @@ def _required(name):
 
 WORKSPACE = _abs(_required("TREE_WORKSPACE"))
 
-# 叶子工具输出的线上压缩：0/false/no/off = 关（保险阀，关掉后取回工具也不挂）
-COMPRESS = os.environ.get("TREE_COMPRESS", "1").strip().lower() not in \
-    ("0", "false", "no", "off")
-
 # 同时在飞的模型调用数（ChatPool）：限的是最贵的资源，不是节点数
 WORKERS = int(os.environ.get("TREE_WORKERS", "6"))
+
+# 通用 skill 根目录（逗号分隔；`*/SKILL.md` 非递归扫描，同名 first-wins）。
+# 默认含 agent-reach skill install 的标准落点；env 覆盖或追加。§7：显式绝对路径。
+SKILLS_DIRS = [s.strip() for s in
+               (os.environ.get("SKILLS_DIRS") or "~/.agents/skills").split(",")
+               if s.strip()]
+SKILLS_DIRS = [_abs(s) for s in SKILLS_DIRS]

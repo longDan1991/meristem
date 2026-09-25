@@ -10,15 +10,12 @@ dispatch / leaf）；② 子任务验收标准必须携带父/根的可测物理
 import os
 import re
 
-from ..prompts import feedback
-from ..prompts.messages import result_marks
-from .fields import (EXTERNAL_CLASSES, KINDS, SATISFIED, UNSATISFIED, VERDICTS,
-                     norm)
-from tools import ACTION_TOOLS
+from . import feedback
+from .messages import result_marks
+from .fields import (ANCHOR_RE, EXTERNAL_CLASSES, KINDS, SATISFIED, UNSATISFIED,
+                     VERDICTS, norm)
 
-# "可测物理量"：日期、≥2 位数字、标识符；单个数字不算
-ANCHOR_RE = re.compile(
-    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{2,}|[A-Za-z_][A-Za-z0-9_.\-]+")
+# "可测物理量"的定义（正则 + 措辞）住 `fields`，这里只做查询，不另抄一份。
 
 
 def anchors(text):
@@ -72,20 +69,21 @@ def clean_spec(spec):
 
 
 # 结论审计里的"观测"只指叶子亲手做的动作（bash/read/write）；分配节点的 tool 回话不算观测。
-def _obs_rounds(msgs):
+# 哪些工具算动作由工具层声明（`tools.specs.action_names()`），调用方传进来 —— 协议层不认识工具层。
+def _obs_rounds(msgs, action_tools):
     """一份对话里叶子动手过的轮数（观测序号从 1 数）。"""
     n = 0
     for m in msgs:
         if m.get("role") != "assistant":
             continue
         for tc in m.get("tool_calls") or []:
-            if (tc.get("function") or {}).get("name") in ACTION_TOOLS:
+            if (tc.get("function") or {}).get("name") in action_tools:
                 n += 1
                 break
     return n
 
 
-def evidence_ok(ev, msgs):
+def evidence_ok(ev, msgs, action_tools):
     """证据必须指得到真实存在的东西：某次观测、某个子节点、或磁盘上真有的产物。
 
     这是代码替上层做的第一道复核（不加它，编一句"子任务A 的结论"就能过）。证据可能是
@@ -94,7 +92,7 @@ def evidence_ok(ev, msgs):
     观测序号 = 对话里叶子动手过的轮数；子任务名 = 注入过的下层结论；都从 msgs 推导。
     """
     valid, bad = [], []
-    obs_idx = set(range(1, _obs_rounds(msgs) + 1))
+    obs_idx = set(range(1, _obs_rounds(msgs, action_tools) + 1))
     _, kids = result_marks(msgs)
     for x in ev:
         s = str(x).strip()
@@ -117,10 +115,11 @@ def evidence_ok(ev, msgs):
     return valid, bad
 
 
-def clean_conclusion(concl, store, node, msgs=None):
+def clean_conclusion(concl, store, node, msgs, action_tools):
     """判定必须是 满足|未满足|阻塞，判定"满足"得指得出真证据（观测 / 子任务 / 磁盘产物）。
 
-    返回 (结论, None) 或 (None, 打回理由)；msgs 是平铺对话，证据校验从这里推导。
+    返回 (结论, None) 或 (None, 打回理由)；msgs 是平铺对话，证据校验从这里推导；
+    `action_tools` 是算作"观测"的工具名（调用方从工具层拿，不许省 —— 省了观测就全不算数）。
     """
     verdict = norm(concl.get("verdict", ""))
     content = norm(concl.get("text", ""))
@@ -136,7 +135,7 @@ def clean_conclusion(concl, store, node, msgs=None):
         return None, feedback.bad_verdict()
 
     if verdict == SATISFIED:
-        valid, bad = evidence_ok(ev, msgs or [])
+        valid, bad = evidence_ok(ev, msgs or [], action_tools)
         if not valid:
             store.record(node.id, "verdict_downgraded",
                       {"was": SATISFIED, "reason": "证据指不到任何真实存在的东西",
@@ -152,10 +151,12 @@ def clean_conclusion(concl, store, node, msgs=None):
 
 
 def validate_root(spec):
-    """根节点的闸门 = 分配节点的校验，加一条：验收标准必须有一个可测物理量，否则这棵树判不了做没做完。"""
+    """根节点的闸门 = 分配节点的校验，加两条：gate 无意义（根没有兄弟）、accept 必须带可测物理量。"""
     out, why = clean_spec(spec or {})
     if why:
         return None, why
+    if out["gate"]:
+        return None, feedback.root_has_gate()
     if not anchors(out["accept"]):
         return None, feedback.root_needs_anchor()
     return out, None

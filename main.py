@@ -1,12 +1,15 @@
-"""程序入口：初始化（工作区 / API key / 记录根）后交给 `cli`；这里是唯一初始化点。
+"""入口函数：初始化（工作区 / API key / 记录根）后把参数派发给终端会话。
+
+`cli` 是唯一可执行入口，它只 import 这里；本模块只做初始化与真正的启动。
 """
 
+import asyncio
 import os
 import sys
 
 from core import config as cfg
 
-import cli
+from terminal.chat import run_session
 
 
 def init():
@@ -20,6 +23,6 @@ def init():
     os.chdir(ws)
 
 
-if __name__ == "__main__":
-    init()
-    sys.exit(cli.main())
+def main(args):
+    """入口函数：asyncio 事件循环里把已解析的参数派发给终端会话。"""
+    return asyncio.run(run_session(args))

@@ -3,11 +3,10 @@
 
   A. 入口默认就是 intake，而且要真模型：没有 API key，新会话和 -r 都当场报错
   B. -r 没有可加载的老会话 → 当场说清并退出
-  C. 守门：伪造的「用户的话」不许回来；老路已删；main.py 只剩 -r 一个参数
+  C. 守门：伪造的「用户的话」不许回来；老路已删；CLI 只剩 -r 一个参数
 """
 
 import argparse
-import asyncio
 import contextlib
 import io
 import os
@@ -32,7 +31,7 @@ def run_session(resume, api_key="", traces=None):
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             main_mod.init()                      # 初始化（含 API key 检查）在 main
-            code = asyncio.run(chat.run_session(a))
+            code = main_mod.main(a)              # 入口函数：参数 → run_session
         return code, out.getvalue()
     except SystemExit as e:
         return e.code, out.getvalue()
@@ -60,21 +59,28 @@ def main():
     src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
     cli_src = open(os.path.join(ROOT, "cli.py"), encoding="utf-8").read()
     chat_src = open(os.path.join(ROOT, "terminal", "chat.py"), encoding="utf-8").read()
+    msg_src = open(os.path.join(ROOT, "core", "protocol", "messages.py"), encoding="utf-8").read()
     line("cli.py 只剩 -r 一个参数", '"-r"' in cli_src and "--resume" in cli_src
          and "--workers" not in cli_src and "--criteria" not in cli_src
          and "--max-nodes" not in cli_src and "--max-tokens" not in cli_src
          and "--max-hours" not in cli_src and "--trace" not in cli_src
          and "--progress" not in cli_src and '"task"' not in cli_src)
-    line("main.py 只做初始化（不碰终端 / 不碰运行现场）",
-         "init" in src and "from terminal.chat import" not in src
-         and "Trace(" not in src and "converse(" not in src
-         and "opening()" not in src and "LLM(" not in src)
+    line("cli 是唯一入口，只 import main（不碰终端 / 派发）",
+         'if __name__ == "__main__"' in cli_src
+         and "import main" in cli_src
+         and "from terminal" not in cli_src
+         and "run_session" not in cli_src)
+    line("main 只做初始化 + 入口函数（入口块 / 参数解析都不在 main）",
+         "def init()" in src and "run_session" in src
+         and 'if __name__ == "__main__"' not in src
+         and "parse_args" not in src)
     a = cli.parse_args(["-r"])
     line("-r 真的解析成一个参数", a.resume is True
          and cli.parse_args([]).resume is False)
     line("没有默认任务", "给我一个能赚大钱的A股量化系统" not in src + cli_src + chat_src)
     line("没有默认验收标准", "期末账户权益" not in src + cli_src + chat_src)
-    line("种子只写用户真说了什么", "用户没给" in chat_src)
+    line("种子只写用户真说了什么（文案唯一来源在 core/protocol/messages.py）",
+         "用户没给" in msg_src and "用户没给" not in chat_src)
     line("--intake 老路已删（入口默认就是 intake）", "--intake" not in src + cli_src)
     line("MockLLM 已删（不再有假模型去聊天的路）",
          "MockLLM" not in open(os.path.join(ROOT, "core", "llm.py"),

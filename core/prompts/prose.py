@@ -4,12 +4,12 @@
 `prose(which, name)` 是唯一出口，组装逻辑在 `prompts/__init__.py`。
 """
 
-from ..protocol.fields import ALLOC, INTAKE, LEAF
-from tools import ChildSpec
+from ..protocol.fields import ALLOC, FORM_FIELDS, INTAKE, LEAF
 
-# 形式字段清单的唯一源 = ChildSpec 的字段定义；intake 不给 gate（根没有兄弟）。
-_FIELDS = " / ".join(ChildSpec.model_fields)
-_FIELDS_INTAKE = " / ".join(k for k in ChildSpec.model_fields if k != "gate")
+# 形式字段清单的唯一源 = 协议层的 FORM_FIELDS；intake 不给 gate（根没有兄弟 —— 
+# `validate_root` 也会拒它）。
+_FIELDS = " / ".join(FORM_FIELDS)
+_FIELDS_INTAKE = " / ".join(k for k in FORM_FIELDS if k != "gate")
 # alloc / leaf 的 input 段只有第一句不同，字段说明从这句起逐字相同。
 _FIELDS_WHAT = "下面这些字段名，值就是上层填的、或程序查出来的："
 
@@ -59,7 +59,7 @@ def _leaf_preamble():
 def _leaf_process():
     lines = []
     lines.append("为了达成使命，你要做的事有两个步骤：")
-    lines.append("  . 动手做：用 bash / read / write 亲手把这件事做完"
+    lines.append("  . 动手做：用 bash / read / write / read_skill 亲手把这件事做完"
                  "（可以一次调多个、并行执行，次数不限）。")
     lines.append("  . 看世界真实的回话，判断下一步做什么，还是已经可以出结论。")
     return "\n".join(lines)
@@ -71,9 +71,8 @@ def _leaf_input():
     lines.append("行首就是" + _FIELDS_WHAT)
     lines.extend(_fields_tail())
     lines.append("  观测历史: 你每一次工具调用之后，世界真实的回话会以**工具结果**的形式回到")
-    lines.append("    对话里 —— 它就是你的观测历史。早的观测可能被压缩（文本里带取回标记），")
-    lines.append("    压缩掉的细节用 headroom_retrieve 取回来。")
-    lines.append("  手上的东西: bash / read / write 永远都在。"
+    lines.append("    对话里 —— 它就是你的观测历史，一字不动。")
+    lines.append("  手上的东西: bash / read / write / read_skill 永远都在。"
                  "签名、超时、翻页语义在各自的工具描述里。")
     return "\n".join(lines)
 

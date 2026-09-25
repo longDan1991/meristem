@@ -10,8 +10,8 @@ dependencies = [
     "fastmcp>=4.0.5",  # 工具定义（@mcp.tool：schema + 实现一体）
     "pydantic",       # 工具参数与形式字段的形状
     "prompt-toolkit>=3.0.53",
-    "headroom-ai",
     "pydash>=8.1.0",
+    "llmbash>=0.1.0",  # bash 工具引擎：进程内 shell（分发名 llmbash，import 仍是 llm_sh）
 ]
 
 [dependency-groups]

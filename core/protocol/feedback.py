@@ -1,10 +1,17 @@
 """模型会读到的反馈文本 —— 唯一来源。
 
-runtime / protocol 只决定"发生了什么"，不自己拼给模型看的话；会写回对话的句子都在这里注册。
-（工具字段 description 是另一回事，住 `tools/specs.py`。）
+runtime / protocol / tools 只决定"发生了什么"，不自己拼给模型看的话；会写回对话的句子
+都在这里注册。（工具字段 description 是另一回事，住 `tools/specs.py`。）
+
+物理上住 protocol：它的变因是协议规则（判定词表、锚点、外部需求）与模型措辞，被
+gate / runtime / tools 三层共同消费，是依赖图的底部词汇层 —— 谁都不许反向依赖它。
 """
 
-from ..protocol.fields import KINDS, VERDICTS
+from .fields import ANCHOR_HINT, EXTERNAL_CLASSES, KINDS, VERDICTS
+
+# 词表拼出的提示文本：schema description / rules 节 / 拒绝理由共用同一份，别各自 join 一遍。
+EXTERNAL_HINT = " / ".join(EXTERNAL_CLASSES)
+VERDICT_HINT = " | ".join(VERDICTS)
 
 
 def pair_placeholder():
@@ -24,8 +31,8 @@ def tool_error(err):
     return "工具出错: %r" % err
 
 
-def empty_cmd():
-    return "cmd 是空的：要么写一条命令，要么用 conclude 出结论"
+def empty_command():
+    return "command 是空的：要么写一条命令，要么用 conclude 出结论"
 
 
 def criterion_drift(missing):
@@ -60,13 +67,18 @@ def bad_conc_range():
 
 
 def bad_verdict():
-    return "判定必须是 " + "|".join(VERDICTS)
+    return "判定必须是 " + VERDICT_HINT
 
 
 def downgraded_suffix():
     return "（原判「满足」但证据指不到真实的东西，已降级）"
 
 
+def root_has_gate():
+    return ("根没有兄弟：gate（门槛）说的是「它不成立，其余全不用做」，"
+            "这对根没有意义 —— 去掉它再交。")
+
+
 def root_needs_anchor():
-    return ("验收标准里必须有一个可测物理量（日期 / 两位以上数字 / "
-            "标识符如 hello.txt），否则这棵树判不了自己做没做完")
+    return ("验收标准里必须有一个可测物理量（%s），否则这棵树判不了自己做没做完"
+            % ANCHOR_HINT)

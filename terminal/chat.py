@@ -34,6 +34,7 @@ from .view import render_tree
 from core import config as cfg
 from core.llm import LLM
 from core.protocol.fields import INTAKE, Node, is_task_root
+from core.protocol.messages import intake_seed
 from core.runtime.loop import run
 from core.runtime.store import Store
 
@@ -74,6 +75,78 @@ async def _listen(session):
         raise _Quit() from None
 
 
+class RunInput:
+    """跑阶段读输入通道：只读不画，敲下的行进队列，Ctrl-D / Ctrl-C 中止会话。
+
+    谈阶段用会话直接读（`_listen`），跑阶段用这一条只读不画的会话读；
+    两条读会话绝不同时挂 reader，换手一律 await（`settle`），否则输入会死。
+    敲下的行先进 `lines` 队列，入口下次提问按顺序取。
+    """
+
+    def __init__(self, session, *, live_get, get_frame, on_eof):
+        self.session = session
+        self._live_get = live_get        # () -> Live | None（跑阶段上屏才不空）
+        self._get_frame = get_frame      # () -> 当前帧 Text（Live 重画用）
+        self._on_eof = on_eof            # Ctrl-D / Ctrl-C：中止整场会话
+        self.lines = asyncio.Queue()
+        self.task = None                 # 读会话的任务（含正在收摊的）
+        self.reader = None               # 读会话本身（DummyOutput，不渲染）
+        self.typed = ""                  # 正在敲的字，画进 Live 帧最底一行
+        self.kick_pending = False
+
+    async def _loop(self):
+        try:
+            while True:
+                got = await self.reader.prompt_async()
+                await self.lines.put(got)
+        except (EOFError, KeyboardInterrupt):
+            # 运行中 Ctrl-D / Ctrl-C：和谈阶段一样就地收手
+            self._on_eof()
+        except asyncio.CancelledError:
+            return                     # 树跑完了，正常收摊
+
+    def kick(self):
+        """排一场 kick；上一场还挂着就不再排（两场并发会互相等，输入就死了）。"""
+        if self.kick_pending:
+            return
+        self.kick_pending = True
+        asyncio.ensure_future(self._kick())
+
+    async def _kick(self):
+        """开跑阶段的读会话，先等上一棵树的会话真正收摊再 attach 新的。"""
+        try:
+            await self.settle()
+            if not sys.stdout.isatty() or self._live_get() is None:
+                return
+            self.reader = _session_of("", self.session.history, self.session.app.input,
+                                      DummyOutput())
+
+            def _on_text_changed(_):
+                self.typed = self.reader.default_buffer.document.text
+                live = self._live_get()
+                if live is not None:
+                    live.update(self._get_frame(), refresh=True)
+
+            self.reader.default_buffer.on_text_changed += _on_text_changed
+            self.task = asyncio.ensure_future(self._loop())
+        finally:
+            self.kick_pending = False
+
+    def stop(self):
+        if self.task is not None:
+            self.task.cancel()
+
+    async def settle(self):
+        """收摊：等读会话真正退出（detach 完）再往下走；没挂着就什么都不做。"""
+        t, self.task = self.task, None
+        if t is None:
+            return
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+
 async def opening(session=None):
     """入口开口之前先让用户把要做的事说完，否则种子是空的、模型只会问一句"你要做什么"。"""
     session = session or _session()
@@ -96,13 +169,6 @@ def _fit(lines, max_h):
     if prev < len(lines) - 1:
         out.append("… %d 行折叠" % (len(lines) - 1 - prev))
     return out[:max_h]
-
-
-def _seed(task):
-    # 种子只写用户真的说了什么，验收标准永远要入口自己提（不许拿默认值充数）。
-    return ("用户的任务: %s\n"
-            "验收标准: 用户没给 —— 正常，真用户都不会给。"
-            "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。" % task)
 
 
 def _show_resumed(store):
@@ -140,7 +206,7 @@ async def run_session(a, session=None):
     else:
         task = await opening(session)
         env = {"store": Store.new(Node(name="会话", kind=INTAKE),
-                                  seed=_seed(task))}
+                                  seed=intake_seed(task))}
     print("[trace] %s\n" % os.path.abspath(env["store"].path), flush=True)
 
     # 落盘由 run 兜底
@@ -176,17 +242,21 @@ async def converse(env, session=None):
     line("       回车发送；想分几行写就按 Alt-Enter；跑任务时底下仍可输入。")
     line("       灰色的字是它在想。不想聊了按 Ctrl-D。\n")
 
+    # 这一轮的状态：spoke / thinking（吐没吐过话）、live_ref / root_ref / running /
+    # session_root / streams（跑阶段实时视图）、intake_task（整场会话的 run 任务）、
+    # run_input（跑阶段读输入通道，见 `RunInput`）。
     spoke = [False]                # 这一轮模型有没有往屏幕上吐过话
     thinking = [False]             # 这一轮刚吐过的是不是思考
-
-    # ── 输入通道 ──
-    # 谈阶段用会话直接读（`_listen`），跑阶段用另一条只读不画的会话读；
-    # 两条会话绝不同时挂 reader，换手一律 await（`_kick` / `_drain_run_input`）。
-    # 敲下的行先进队列，入口下次提问按顺序取。
-    lines = asyncio.Queue()
-    run_task = [None]                  # 跑阶段那条读会话的任务（含正在收摊的）
-    run_session = [None]               # 跑阶段那条会话本身（DummyOutput，不渲染）
-    input_line = [""]                  # 跑阶段正在敲的字，画进 Live 帧最底一行
+    live_ref = [None]
+    root_ref = [None]
+    running = [False]              # 有任务在跑才上屏 / 开运行输入
+    session_root = [None]          # 入口节点（会话根）
+    streams = {}                   # node_id -> {"thinking","speaking"} 尾巴
+    intake_task = [None]
+    run_input = RunInput(session=session,
+                         live_get=lambda: live_ref[0],
+                         get_frame=lambda: current_frame(),
+                         on_eof=lambda: intake_task[0].cancel())
 
     async def ask(question):
         # 话在吐字时已显示过；没吐过才补一遍，否则同一个问题显示两遍。
@@ -195,23 +265,23 @@ async def converse(env, session=None):
         else:
             line(question)
         spoke[0] = False
-        await _drain_run_input()
-        if not lines.empty():
-            got = lines.get_nowait()
-            line("  （运行中你输入了，按顺序交给你：%s）" % got)
-            return got
-        return await _listen(session)
+        await run_input.settle()
+        while True:
+            if not run_input.lines.empty():
+                got = run_input.lines.get_nowait()
+                if got.strip():
+                    line("  （运行中你输入了，按顺序交给你：%s）" % got)
+                    return got
+                continue
+            got = await _listen(session)
+            if got.strip():
+                return got
+            line("（回车发的是空行——Ctrl-D 结束，或重新输入）")
 
     # ── 任务树实时视图 ──
     # 调度器开 / 关节点发 loop_start / loop_end、吐字发 message_update；终端收到就重画整棵树。
     # 真终端用 rich Live 原地重画，非真终端逐帧追加；任务根出结论 = 这一轮跑完，留最后一帧。
-    live_ref = [None]
-    root_ref = [None]
-    running = [False]                  # 有任务在跑才上屏 / 开运行输入
-    session_root = [None]              # 入口节点（会话根）
-    streams = {}                       # node_id -> {"thinking","speaking"} 尾巴
-
-    # 会话 = 一棵树（入口为根），registry 是 run() 登记的运行态，终端靠它画树
+    # 会话 = 一棵树（入口为根），registry 是 run() 登记的运行态，终端靠它画树。
     store = env["store"]
     registry = store.registry
     session_root[0] = store.root
@@ -221,7 +291,7 @@ async def converse(env, session=None):
         compact = root_ref[0] is not None and not root_ref[0].verdict
         lines = render_tree(root_ref[0], registry, streams=streams, compact=compact)
         if live_ref[0] is not None and compact:
-            rows = _fit(lines, max(1, console.height - 1)) + [PROMPT + input_line[0]]
+            rows = _fit(lines, max(1, console.height - 1)) + [PROMPT + run_input.typed]
         else:
             rows = lines
         # no_wrap + crop：一换行 Live 区域高度就对不上、输入行会被挤掉
@@ -245,65 +315,6 @@ async def converse(env, session=None):
         buf[key] = buf[key] + text
         if live_ref[0] is not None:
             live_ref[0].update(current_frame())
-
-    intake_task = [None]
-    kick_pending = [False]             # 一棵树还没跑完又开一棵时，kick 不许并发
-
-    async def _run_input_loop():
-        """跑阶段读输入：只读不画，敲下的行进队列，Ctrl-D/Ctrl-C 中止整个会话。"""
-        try:
-            while True:
-                got = await run_session[0].prompt_async()
-                await lines.put(got)
-        except (EOFError, KeyboardInterrupt):
-            # 运行中 Ctrl-D / Ctrl-C：和谈阶段一样就地收手
-            intake_task[0].cancel()
-        except asyncio.CancelledError:
-            return                  # 树跑完了，正常收摊
-
-    def _kick():
-        """排一场 kick；上一场还挂着就不再排（两场并发会互相等，输入就死了）。"""
-        if kick_pending[0]:
-            return
-        kick_pending[0] = True
-        asyncio.ensure_future(_kick_run_input())
-
-    async def _kick_run_input():
-        """开跑阶段的读会话，先等上一棵树的会话真正收摊再 attach 新的。"""
-        try:
-            if run_task[0] is not None:
-                try:
-                    await run_task[0]
-                except asyncio.CancelledError:
-                    pass
-                run_task[0] = None
-            if not sys.stdout.isatty() or not live_ref[0]:
-                return
-            run_session[0] = _session_of("", session.history, session.app.input,
-                                         DummyOutput())
-
-            def _on_text_changed(_):
-                input_line[0] = run_session[0].default_buffer.document.text
-                if live_ref[0] is not None:
-                    live_ref[0].update(current_frame(), refresh=True)
-
-            run_session[0].default_buffer.on_text_changed += _on_text_changed
-            run_task[0] = asyncio.ensure_future(_run_input_loop())
-        finally:
-            kick_pending[0] = False
-
-    def _stop_run_input():
-        if run_task[0] is not None:
-            run_task[0].cancel()
-
-    async def _drain_run_input():
-        """跑阶段收摊：等读会话真正退出（detach 完）再往下走。"""
-        if run_task[0] is not None:
-            t, run_task[0] = run_task[0], None
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
 
     # ── 事件路由：一个函数收全部事实，按 scope 分路去画 ──
     # scope=入口节点 id 走对话通道，其余 scope 是节点 id；事件只报事实，怎么画是终端的事。
@@ -339,14 +350,14 @@ async def converse(env, session=None):
                     live_ref[0] = Live(console=console, vertical_overflow="crop",
                                        refresh_per_second=10)
                     live_ref[0].start()
-                    _kick()
+                    run_input.kick()
             redraw()
         elif type == "loop_end":
             streams.pop(scope, None)      # 出结论就不留实时尾巴
             redraw()
             if is_task_root(node, registry):
                 running[0] = False
-                _stop_run_input()
+                run_input.stop()
                 if live_ref[0] is not None:
                     live_ref[0].stop()
                     live_ref[0] = None
@@ -356,15 +367,13 @@ async def converse(env, session=None):
         run(store, llm, subscribe=on_sink, ask=ask, say=narrate))
     try:
         await intake_task[0]
-    except _Quit:
-        line("\n[入口] 你在终端上中止了。")
-        return None
-    except asyncio.CancelledError:
+    except (_Quit, asyncio.CancelledError):
+        # 谈阶段 Ctrl-D / 跑阶段 Ctrl-D|Ctrl-C：就地收手，不是错误
         line("\n[入口] 你在终端上中止了。")
         return None
     finally:
-        _stop_run_input()
-        await _drain_run_input()
+        run_input.stop()
+        await run_input.settle()
         if live_ref[0] is not None:   # 中止也可能发生在跑的过程中
             live_ref[0].stop()
             live_ref[0] = None

@@ -1,12 +1,12 @@
-"""命令行：解析参数 → 交给终端会话。
+"""命令行入口：解析参数 → 交给 `main` 的入口函数，是唯一可执行入口。
 
-`main.py` 只负责初始化（工作区 / API key / 记录根），参数与派发在这里。
+`main` 只做初始化与入口函数；这里只负责参数解析与启动调用，除 `main` 外不 import 任何项目模块。
 """
 
 import argparse
-import asyncio
+import sys
 
-from terminal.chat import run_session
+import main
 
 
 def parse_args(argv=None):
@@ -16,9 +16,7 @@ def parse_args(argv=None):
     return ap.parse_args(argv)
 
 
-async def run(argv=None):
-    return await run_session(parse_args(argv))
-
-
-def main(argv=None):
-    return asyncio.run(run(argv))
+if __name__ == "__main__":
+    args = parse_args()
+    main.init()
+    sys.exit(main.main(args))

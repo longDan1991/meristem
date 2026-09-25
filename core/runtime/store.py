@@ -10,10 +10,10 @@
 """
 
 import atexit
-import hashlib
 import json
 import os
 import time
+import uuid
 from glob import glob
 
 import pydash
@@ -21,10 +21,8 @@ import pydash
 from core import config as cfg
 
 from ..protocol.fields import INTAKE, is_task_root, node_from_dict, node_to_dict
-from ..prompts.messages import base_user
+from ..protocol.messages import base_user
 from .dialogue import Dialogue
-
-_INTAKE_SLUG = hashlib.sha1(INTAKE.encode()).hexdigest()[:6]
 
 _ROOT = cfg.WORKSPACE
 
@@ -46,8 +44,12 @@ def _runs_dir():
 
 
 def _new_path():
-    """新会话的记录路径：<记录根>/runs/<时间>-<任务哈希>/trace.jsonl。"""
-    slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"), _INTAKE_SLUG)
+    """新会话的记录路径：<记录根>/runs/<时间>-<随机>/trace.jsonl。
+
+    新会话时还没有任务名（谈成什么要入口谈完才知道），所以目录名只带时间 + 一小段随机：
+    同一秒里连开两场也不会撞进同一条记录。
+    """
+    slug = "%s-%s" % (time.strftime("%m%d-%H%M%S"), uuid.uuid4().hex[:6])
     return os.path.join(_runs_dir(), slug, "trace.jsonl")
 
 
@@ -130,21 +132,21 @@ class Store:
         self.path = path
         self.root = root
         self.registry = {}       # nid -> Node（就地）
-        self.state = {}          # nid -> {"dialogue"}
+        self.state = {}          # nid -> Dialogue（一个节点的全部历史）
         self.dirty = set()       # 易失：有变更、可能需要动作的节点
         self._file = _RecordFile(path)
         self._base = {}          # nid -> 上次检查点的消息起点（增量）
 
     # ─────────────────────────────────────────── 3. 读
     def dialogue(self, nid):
-        return self.state[nid]["dialogue"]
+        return self.state[nid]
 
     def take_dirty(self):
         got, self.dirty = self.dirty, set()
         return got
 
     def record(self, nid, kind, payload):
-        """往会话记录里追加一笔事实（运行事件：usage / tool / effects…）。"""
+        """往会话记录里追加一笔事实（运行事件：usage / tool…）。"""
         self._file.add(nid, kind, payload)
 
     # ─────────────────────────────────────────── 4. 写（树的所有变更入口）
@@ -198,22 +200,25 @@ class Store:
         """逐行流式读一份记录：跳过被截断的最后一行（崩溃不埋成果），其它位置坏行照样炸。
 
         流式读不知 EOF 在哪，用「后一行到达才解析前一行」的 lookahead。
+        `kinds` 按**解析出来**的 kind 过滤：不在原始行上做字符串匹配 —— 那既会跟 json 的
+        分隔符写法隐式耦合，也会把 payload 里恰好一样的键值当成记录类型。
         """
         _flush_live()
-        want = tuple('"kind": "%s"' % k for k in kinds) if kinds else ()
+        want = frozenset(kinds) if kinds else None
 
         def parse(raw, tolerate_truncated):
-            if want and not any(w in raw for w in want):
-                return None
             line = raw.strip()
             if not line:
                 return None
             try:
-                return json.loads(line)
+                rec = json.loads(line)
             except ValueError:
                 if tolerate_truncated:
                     return _TRUNCATED
                 raise
+            if want is not None and rec.get("kind") not in want:
+                return None
+            return rec
 
         with open(path, encoding="utf-8") as f:
             prev = None
@@ -227,11 +232,6 @@ class Store:
                 rec = parse(prev, True)
                 if rec is not _TRUNCATED and rec is not None:
                     yield rec
-
-    @staticmethod
-    def label(path):
-        _states, registry, _root_node = Store._open(path)
-        return Store._label(registry, path)
 
     @staticmethod
     def _open(path):
@@ -280,7 +280,7 @@ class Store:
         store = cls(path, root=root)
         store.registry = registry
         for nid, st in states.items():
-            store.state[nid] = store._state_for(store.registry[nid], st["msgs"])
+            store.state[nid] = Dialogue(st["msgs"])
         return store
 
     @staticmethod
@@ -292,24 +292,21 @@ class Store:
         tasks = [n for n in registry.values() if is_task_root(n, registry)]
         if not tasks:
             return "%s （还没跑过任务）" % stamp
-        latest = tasks[0]
-        name = latest.name or "(无任务名)"
-        verdict = latest.verdict or "运行中"
+        newest = tasks[-1]      # registry 按记录出现顺序 = 节点出生顺序，最后一个是最新谈成的任务
+        name = newest.name or "(无任务名)"
+        verdict = newest.verdict or "运行中"
         extra = "" if len(tasks) == 1 else "（共 %d 个任务）" % len(tasks)
         return "%s %s [%s]%s" % (stamp, name, verdict, extra)
 
     # ─────────────────────────────────────────── 内部：写
-    def _state_for(self, node, msgs=None):
-        return {"dialogue": Dialogue(msgs if msgs is not None else [])}
-
     def _register(self, node):
         # 节点出生与首笔 state 检查点同一次 put 完成，出生事件不另立记录（state 已含全字段）。
-        self.state[node.id] = self._state_for(node)
+        self.state[node.id] = Dialogue()
         self.registry[node.id] = node
 
     def _checkpoint(self, nid):
         """把节点状态写进会话记录（对话增量）。"""
-        msgs = self.state[nid]["dialogue"].to_list()
+        msgs = self.state[nid].to_list()
         base = self._base.get(nid, 0)
         if base == 0 or len(msgs) < base:
             # 第一笔 / 恢复重开：全量
