@@ -18,6 +18,8 @@
   J. 节点级吐字：每个节点正在想/说的话画进它的节点下（真终端）
   K. 跑任务时输入不冻结：敲的字进 Live 帧，跑完按顺序交出去
   L. 每节点一行铺开：所有节点正在吐的字都看得见（真终端）
+  M. 树视图：非最后一个孩子画竖线、最后一个收尾（缩进只由 is_last 决定）
+  N. 事件词汇：工具与用量事件到达终端（tool_start/tool_end/usage）
 """
 
 import asyncio
@@ -36,6 +38,7 @@ from prompt_toolkit.input import create_pipe_input
 from core.llm import Message, ToolCall
 from core.protocol.fields import Node
 from core.runtime import store as store_mod
+from core.runtime.loop import run
 from core.runtime.store import Store
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -273,6 +276,60 @@ def talk(text):
     return text
 
 
+class _StopEvents(Exception):
+    """脚本用完了：等价于用户在终端上中止（run 不拦，测试用它收手）。"""
+
+
+class _EventLLM:
+    """回话 + 每次调用都带 usage：工具与用量事件都能发出来。
+
+    入口按脚本说话 / 交 root（交完就说话 → 触发 ask → 测试收手）；
+    任务节点跑一次 bash 就 conclude。
+    """
+
+    def __init__(self, replies, usage):
+        self.replies, self.usage = list(replies), usage
+
+    async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
+                   tools=None):
+        if "把用户的意图" in messages[0]["content"]:
+            spec = self.replies.pop(0) if self.replies else ""
+            if isinstance(spec, dict) and "root" in spec:
+                return Message(text="", tool_calls=[ToolCall(
+                    name="submit_root", arguments={"root": spec["root"]})],
+                    usage=self.usage)
+            return Message(text=str(spec or ""), usage=self.usage)  # 说话 → 入口 ask
+        done = any(m.get("role") == "tool" for m in messages)
+        if not done:
+            return Message(text="", tool_calls=[ToolCall(
+                name="bash", arguments={"command": "echo hi"})], usage=self.usage)
+        return Message(text="", tool_calls=[ToolCall(
+            name="conclude", arguments={"verdict": "满足", "text": "跑完了",
+                                        "evidence": ["第1次观测"]})], usage=self.usage)
+
+
+def run_events(seed="帮我赚大钱"):
+    """直接驱动 run()：收集全部事件，入口再次提问时收手。返回 [(type, payload)]。"""
+    got = []
+    d = tempfile.mkdtemp()
+    store_mod.init(d)
+    llm = _EventLLM([root()], {"prompt_tokens": 12, "completion_tokens": 3,
+                               "total_tokens": 15})
+
+    async def ask(_):
+        raise _StopEvents()
+
+    async def go():
+        await run(Store.new(Node(name="会话", kind="intake"), seed=seed),
+                  llm, subscribe=lambda t, p: got.append((t, p)), ask=ask)
+        return got
+
+    try:
+        return asyncio.run(go())
+    except _StopEvents:
+        return got
+
+
 def main():
     print("=" * 80)
     print("A. 谈定：问 → 答 → 交出的任务被跑掉")
@@ -458,6 +515,28 @@ def main():
          rows[2].startswith("   ├─ ") and rows[3].startswith("   │ "), rows[3])
     line("最后一个孩子画 └─，它的续行留空",
          rows[4].startswith("   └─ ") and rows[5].startswith("     "), rows[5])
+
+    print("=" * 80)
+    print("N. 事件词汇：工具与用量事件到达终端（tool_start/tool_end/usage）")
+    evs = run_events()
+    starts = [(t, p.get("name")) for t, p in evs if t == "tool_start"]
+    ends = [(p.get("name"), p.get("secs")) for t, p in evs if t == "tool_end"]
+    usages = [p for t, p in evs if t == "usage"]
+    first_start = next((i for i, (t, p) in enumerate(evs)
+                        if t == "tool_start" and p.get("name") == "bash"), None)
+    first_end = next((i for i, (t, p) in enumerate(evs)
+                      if t == "tool_end" and p.get("name") == "bash"), None)
+    line("工具开始事件带着工具名", ("tool_start", "bash") in starts, str(starts))
+    line("工具结束事件带着名字和耗时",
+         any(n == "bash" and isinstance(s, float) and s >= 0 for n, s in ends),
+         str(ends))
+    line("同一工具先开始后结束",
+         first_start is not None and first_end is not None and first_start < first_end,
+         "%d < %d" % (first_start, first_end))
+    line("用量事件带着 prompt/completion/total",
+         bool(usages) and all(p.get("prompt", 0) > 0 and p.get("completion", 0) > 0
+                              and p.get("total", 0) > 0 for p in usages),
+         "%d 次" % len(usages))
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

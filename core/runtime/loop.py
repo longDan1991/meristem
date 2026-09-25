@@ -4,10 +4,12 @@
 入口等用户）；结果回来就拼进该节点 msgs 或并行发工具。没有 per-node 任务，多个节点的
 LLM 因此并发。
 
-事件只发消费者真正读的三个：`loop_start` / `loop_end` / `message_update`，都带 `scope=节点 id`。
+事件只发消费者真正读的六个：`loop_start` / `loop_end` / `message_update` /
+`tool_start` / `tool_end` / `usage`，都带 `scope=节点 id`。
 """
 
 import asyncio
+import time
 
 from .. import config as cfg
 from ..events import EventSink
@@ -159,30 +161,32 @@ async def _one_tool(loop, nid, which, tc, call_id):
     """驱动一次工具调用；被拒 / 出错写一条 tool 回话，结构类成功不写。
 
     允许的名字就是这次发给模型的清单（同一份作用域事实），不是另抄的名单。
+    工具开始 / 结束发事件（名字 + 耗时）——终端靠它画工具过程，这是唯一出口。
     """
     store = loop.store
     names = loop.tool_names[which]
     if tc.name not in names:
         store.append_tool(nid, call_id, feedback.unknown_tool(tc.name, names))
         return
+    loop.emit(nid, "tool_start", {"name": tc.name})
+    t0 = time.monotonic()
     text = await run_tool(loop, nid, tc.name, tc.arguments)
+    loop.emit(nid, "tool_end", {"name": tc.name, "secs": time.monotonic() - t0})
     if text is not None:  # None = 结构类成功，不写回话
         store.append_tool(nid, call_id, text)
 
 
 def _log_usage(loop, nid, phase, usage):
-    """把一次调用的 token 账记进 trace；`usage` 随 Message 回来，不经过共享状态。"""
+    """把一次调用的 token 账记进 trace，并作为 `usage` 事件发出去（终端状态条用）。"""
     if not usage:
         return
-    loop.store.record(
-        nid,
-        "usage",
-        {
-            "phase": phase,
-            "prompt": usage.get("prompt_tokens", 0),
-            "completion": usage.get("completion_tokens", 0),
-            "reasoning": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
-            "cached": (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
-            "total": usage.get("total_tokens", 0),
-        },
-    )
+    payload = {
+        "phase": phase,
+        "prompt": usage.get("prompt_tokens", 0),
+        "completion": usage.get("completion_tokens", 0),
+        "reasoning": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
+        "cached": (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+        "total": usage.get("total_tokens", 0),
+    }
+    loop.store.record(nid, "usage", payload)
+    loop.emit(nid, "usage", payload)
