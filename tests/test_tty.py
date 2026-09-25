@@ -344,8 +344,8 @@ def main():
     line("分行的话不被压成一行（content 原样）", (Q + "\n" + S) in scr.plain())
     line("同一个问题只显示一遍", scr.plain().count(Q) == 1)
     line("答的话进了下一轮上下文", any("2026-12-31 收盘" in s for s in llm.seen))
-    line("合规的任务被拿去跑、判定回终端",
-         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
+    line("合规的任务被拿去跑、判定以标记回终端（✓ 在树上）",
+         "✓ [叶子] 做一个能赚钱的量化系统" in scr.plain())
     line("旁白说清了接到任务", "接到任务" in scr.plain())
     line("树带标记，看得出跑过", "└─" in scr.plain() and "✓" in scr.plain())
     line("用户中止才返回（入口不退场）", r is None)
@@ -379,16 +379,14 @@ def main():
          llm.at_return and Q2 + "\n" + S2 in llm.at_return[0])
 
     print("=" * 80)
-    print("D. 思考（reasoning_content）整段按流式吐出来，而且是灰的")
+    print("D. 思考（reasoning_content）在流的思考行里，整段可见、灰色")
     think = "先看看用户到底想要什么，再决定要不要开一个任务"
     scr, llm, _ = run_session(["\x04"], [talk("好，我想清楚了。")],
                               reasoning=think, tty=True)
-    line("思考的原文整段都显示了", think in scr.plain())
-    line("思考是一小口一小口吐的（不是一次一坨）",
-         sum("\x1b[2m" in p for p in scr.pieces) > 1,
-         "%d 口" % sum("\x1b[2m" in p for p in scr.pieces))
-    line("用的是灰色（dim）", "\x1b[2m" in scr.getvalue())
-    line("回答和思考分开了（思考后换了行）", "\n好，我想清楚了。" in scr.plain())
+    plain = scr.plain().replace("\r\n", "").replace("\r", "")  # 窄窗格换行不截断
+    line("思考的原文整段都显示了（换行只因窗格宽度）", think in plain)
+    line("用的是灰色（dim）", ";2m" in scr.getvalue())
+    line("思考与回答分行显示", "思考:" in scr.plain() and "入口: 好，我想清楚了。" in plain)
 
     scr, _, _ = run_session(["\x04"], [talk("好。")], reasoning=think, tty=False)
     line("不是真终端 → 思考只留原文、不上色",
@@ -400,8 +398,8 @@ def main():
     print("  终端上显示的：\n%s" % "\n".join("    " + x for x in scr.plain().splitlines()))
     line("打回理由走了旁白通道", "可测物理量" in scr.plain())
     line("交形式的那一段不吐给用户（那是给闸门的）", "{" not in scr.plain())
-    line("打回后照样把改好的任务跑了",
-         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
+    line("打回后照样把改好的任务跑了（✓ 标记）",
+         "✓ [叶子] 做一个能赚钱的量化系统" in scr.plain())
 
     print("=" * 80)
     print("F. 边界：依赖单向（terminal→core，core 不认识 terminal）")
@@ -439,15 +437,16 @@ def main():
     line("非真终端不抢屏（不上 Live）", "\x1b[?25l" not in scr.getvalue())
 
     print("=" * 80)
-    print("H. 真终端：任务树用 rich Live 原地重画，跑完那帧留在屏幕上")
+    print("H. 真终端：全屏五区 —— 树/流/状态同屏，Ctrl-D 干净收手")
     scr, _, _ = run_session(["\x04"], [root()], tty=True)
     raw = scr.getvalue()
-    line("真终端：Live 接管（隐藏光标）", "\x1b[?25l" in raw)
-    line("真终端：跑完干净收手（光标恢复）", "\x1b[?25h" in raw)
-    line("树带判定留在屏幕上",
-         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
-    line("树不重复：真终端走 Live 原地画，不逐帧追加", scr.plain().count("└─") == 1,
-         "%d 帧" % scr.plain().count("└─"))
+    plain = scr.plain().replace("\r\n", "").replace("\r", "")
+    line("真终端：全屏接管（进备用屏）", "\x1b[?1049h" in raw)
+    line("真终端：跑完干净收手（退出备用屏）", "\x1b[?1049l" in raw)
+    line("树带判定（✓ 标记）留在屏幕上",
+         "✓ [叶子] 做一个能赚钱的量化系统" in plain)
+    line("入口的对话在流里", "你: 帮我赚大钱" in plain)
+    line("状态条在（运行中/节点数）", "运行中" in plain and "节点" in plain)
 
     print("=" * 80)
     print("I. 用户没交底：入口开口之前，先让他把话说完")
@@ -470,37 +469,38 @@ def main():
          scr.plain() == "")
 
     print("=" * 80)
-    print("J. 节点级吐字：每个节点正在说的话/想的事，画进树里它的节点下")
+    print("J. 选中节点 → 流的思考/说话可见（Tab 切树焦点，↓ 选中叶子）")
     scr = slow_session([root(), "好，那继续谈。"],
-                       [(0.4, "2026-12-31 收盘\r"), (5.0, "\x04")])
-    line("思考一小口一小口按 node_id 画进树", "▸ 思考: 先看看" in scr.plain())
-    line("思考的尾巴跟着长（不是只有头一个字）", "再决定怎么" in scr.plain())
-    line("content 也画进树（▸ 说:）", "▸ 说: 我要拆成三个子任务" in scr.plain())
-    line("树照样跑完、判定留在屏幕上",
-         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
+                       [(0.4, "\t"), (0.5, "\x1b[B"), (5.0, "\x04")])
+    plain = scr.plain().replace("\r\n", "").replace("\r", "")
+    line("叶子被选中：流的思考行出现", "思考:" in plain)
+    line("思考的尾巴跟着长（不是只有头一个字）", "再决定怎么" in plain)
+    line("说话也进流（任务节点的说:）", "说: 我要拆成三个子任务" in plain)
+    line("树照样跑完、判定以 ✓ 留在树上",
+         "✓ [叶子] 做一个能赚钱的量化系统" in plain)
 
     print("=" * 80)
-    print("K. 跑任务时输入不冻结：敲的字进 Live 帧，跑完按顺序交出去")
+    print("K. 跑任务时输入不冻结：敲的行排队，按顺序交给入口")
     scr = slow_session([root(), "你说的「赚大钱」按哪个数字判定？", "好。"],
                        [(0.6, "2026-12-31 收盘\r"), (1.2, "先停一下\r"),
                         (1.8, "3\r"), (5.5, "\x04")])
-    line("跑的时候敲的字没有丢（进过 Live 帧的输入行）",
-         "先停一下" in scr.plain())
-    line("跑完后输入行的字按顺序交出去",
-         scr.plain().count("（运行中你输入了") >= 2,
-         "%d 条" % scr.plain().count("（运行中你输入了"))
+    plain = scr.plain().replace("\r\n", "").replace("\r", "")
+    line("跑的时候敲的字没有丢（输入行草稿上过屏）", "先停一下" in plain)
+    line("敲的行按顺序交出去（你: 出现在流里）",
+         plain.find("你: 2026-12-31 收盘") < plain.find("你: 3")
+         and "你: 2026-12-31 收盘" in plain,
+         "%d < %d" % (plain.find("你: 2026-12-31 收盘"), plain.find("你: 3")))
 
     print("=" * 80)
-    print("L. 每节点一行铺开：整棵树所有节点正在吐的字都看得见（真终端）")
+    print("L. 并行：跑任务的三个孩子同时挂在树上（并行地图）")
     scr = slow_session([root(kind="dispatch"), "好，那继续谈。"],
                        [(0.4, "2026-12-31 收盘\r"), (5.5, "\x04")], kids=3)
+    plain = scr.plain().replace("\r\n", "").replace("\r", "")
     line("三个孩子都在各自的节点行上（不是只显示一个）",
-         all(x in scr.plain() for x in
-             ["子任务A", "子任务B", "子任务C"]))
-    line("孩子都在吐字（思考画进树）",
-         scr.plain().count("▸ 思考") >= 2)
-    line("根出了结论，判定留在屏幕上",
-         "[满足] 账户权益在2026-12-31收盘 >= 本金 x 2" in scr.plain())
+         all(x in plain for x in ["子任务A", "子任务B", "子任务C"]))
+    line("孩子都在跑（· 标记，运行中不折叠）", plain.count("· [叶子]") >= 3,
+         "%d 个" % plain.count("· [叶子]"))
+    line("根出了结论，判定以 ✓ 留在树上", "✓ [分配]" in plain)
 
     print("=" * 80)
     print("M. 树视图：非最后一个孩子画竖线、最后一个收尾（缩进只由 is_last 决定）")
@@ -583,7 +583,8 @@ def main():
     ]
     rows = render_stream(msgs, intake=True)
     line("user 消息带你: 前缀", any(k == "user" and t.startswith("你: ") for k, t in rows))
-    line("assistant 文本进说", any(k == "say" and t == "说: 我先看看。" for k, t in rows))
+    line("入口的 assistant 文本标入口:",
+         any(k == "say" and t == "入口: 我先看看。" for k, t in rows))
     line("工具调用行单独标记", any(k == "tool" and "bash" in t for k, t in rows), str(rows))
     line("工具输出全文进历史", any(k == "toolout" and "data.csv" in t for k, t in rows))
     rows = render_stream(msgs, intake=False)
@@ -591,6 +592,11 @@ def main():
          any(k == "user" and t.startswith("任务: ") for k, t in rows))
     rows = render_stream(msgs, {"thinking": "想…", "speaking": "说…"})
     line("实时尾巴附加在底部", rows[-1] == ("speaking", "说: 说…"), str(rows[-1]))
+    rows = render_stream(msgs, intake=True, verdict="满足", accept="产出 clean.csv",
+                         conclusion="全部完成")
+    line("出结论补判定行（判定 + 验收 + 结论）",
+         any(k == "verdict" and t == "[满足] 产出 clean.csv" for k, t in rows)
+         and any(k == "verdict" and t == "→ 全部完成" for k, t in rows), str(rows))
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")

@@ -72,17 +72,24 @@ def render_folded(root, registry, *, selected=None, expanded=frozenset()):
     return rows
 
 
-def render_stream(msgs, streams=None, *, intake=False):
+def render_stream(msgs, streams=None, *, intake=False, verdict="", accept="", conclusion=""):
     """选中节点的消息流：历史 `msgs` 按序 + 实时尾巴。返回 [(kind, text)]。
 
-    kind 词表：user / say / tool / toolout / thinking / speaking —— 颜色由应用层
-    按 kind 定（思考灰、说话正文、工具青色）。工具输出全文进历史（TERMINAL.md §4，
-    不截断）；实时阶段只画调用行，耗时由 `tool_end` 事件补。
+    kind 词表：user / say / tool / toolout / verdict / thinking / speaking ——
+    颜色由应用层按 kind 定（思考灰、说话正文、工具青色）。工具输出全文进历史
+    （TERMINAL.md §4，不截断）；实时阶段只画调用行，耗时由 `tool_end` 事件补。
 
-    `msgs` 就是 `Dialogue.to_list()` 的平铺账本，渲染层不碰 store。
+    `msgs` 就是 `Dialogue.to_list()` 的平铺账本，渲染层不碰 store。说话尾巴与
+    对话去重：已提交进对话的整段话不重复显示（尾巴里只露超出最后一条已提交
+    说话的部分）；思考不进对话（`dialogue.assistant` 只存 content），永远实时。
     """
     rows = []
-    who = "你" if intake else "任务"
+    who, say = ("你", "入口") if intake else ("任务", "说")
+    last_say = ""
+    for m in reversed(msgs):
+        if m.get("role") == "assistant" and m.get("content"):
+            last_say = m["content"]
+            break
     for m in msgs:
         role = m.get("role")
         if role == "user":
@@ -90,18 +97,28 @@ def render_stream(msgs, streams=None, *, intake=False):
         elif role == "assistant":
             content = m.get("content") or ""
             if content:
-                rows.append(("say", "说: %s" % content))
+                rows.append(("say", "%s: %s" % (say, content)))
             for w in m.get("tool_calls") or []:
                 fn = w.get("function") or {}
                 rows.append(("tool", "工具: %s(%s)" % (
                     fn.get("name", ""), fn.get("arguments", ""))))
         elif role == "tool":
             rows.append(("toolout", "输出: %s" % (m.get("content") or "")))
+    if verdict:
+        rows.append(("verdict", "[%s] %s" % (verdict, accept or "")))
+        if conclusion:
+            rows.append(("verdict", "→ %s" % conclusion))
     if streams:
-        for key, label in (("thinking", "思考: "), ("speaking", "说: ")):
-            tail = streams.get(key)
-            if tail:
-                rows.append((key, label + tail))
+        think = streams.get("thinking") or ""
+        if think:
+            rows.append(("thinking", "思考: %s" % think))
+        tail = streams.get("speaking") or ""
+        if tail and not (last_say and tail.startswith(last_say)):
+            rows.append(("speaking", "%s: %s" % (say, tail)))
+        elif tail and last_say and tail.startswith(last_say):
+            shown = tail[len(last_say):]
+            if shown:
+                rows.append(("speaking", "%s: %s" % (say, shown)))
     return rows
 
 
