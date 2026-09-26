@@ -1,12 +1,6 @@
 """树包。
 
-litellm 默认每次 import 都去 GitHub 拉模型成本表（常拉不到，白卡几十秒），
-所以在 `import litellm` 之前用本地副本钉死它 —— 包内模块都经由本文件初始化。
-
-成本表只服务美元记账与上下文安全，我们全不用，本地副本功能等价、启动快、离线可跑。
-想切回拉新鲜表去掉下面这行；网络拉不到就给 litellm 指 `HTTPS_PROXY`。
+包内模块都经由本文件初始化。`core/llm.py` 用官方 openai SDK 直连 OpenAI 兼容
+端点，import 无任何网络副作用——不再需要 litellm 时代"import 前钉死本地模型
+成本表（它默认每次去 GitHub 拉，拉不到白卡几十秒）"的 hack。
 """
-
-import os
-
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")

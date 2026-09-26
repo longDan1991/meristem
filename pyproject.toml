@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "一棵递归工作的 LLM 树"
 requires-python = ">=3.11"
 dependencies = [
-    "litellm",       # LLM 客户端（OpenAI 兼容端点；流式 / 重试 / usage）
+    "openai",        # LLM 客户端（官方 SDK，OpenAI 兼容端点；流式 / 重试 / usage）
     "python-dotenv",  # .env 解析
     "fastmcp>=4.0.5",  # 工具定义（@mcp.tool：schema + 实现一体）
     "pydantic",       # 工具参数与形式字段的形状

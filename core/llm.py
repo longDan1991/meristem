@@ -1,6 +1,6 @@
 """LLM 适配层：给 messages，返回 Message（文本 + 工具调用）。
 
-底层是 `litellm`（任何 OpenAI 兼容端点），重试、超时、流式、usage 都是它的事。
+底层是官方 `openai` SDK（OpenAI 兼容端点），重试、超时、流式、usage 都是它的事。
 给 `tools` 就走工具调用，给 `on_delta` 就走流式；`on_reasoning` 另开一条走模型的
 `reasoning_content`，和回答分开，终端才能把思考画成灰的。
 
@@ -14,7 +14,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-import litellm
+from openai import AsyncOpenAI
 
 
 def _deliver(fut, task):
@@ -51,14 +51,13 @@ class Message:
     usage: dict = None
 
 
-# 只依赖 OpenAI 兼容协议：模型名统一走 openai/ 前缀 + api_base，不交给 litellm 猜 provider
+# 只依赖 OpenAI 兼容协议：模型名原样交给端点，不做任何 provider 猜测。
+# 兼容 litellm 时代的旧配置：模型名若带 "openai/" 前缀则剥掉。
 _COMPAT_PREFIX = "openai/"
 
-litellm.suppress_debug_info = True
-litellm.drop_params = True
-
-# 重试次数与流式无关：litellm 的 num_retries 只重试请求建立阶段的错误，
-# 开始吐字后断流直接抛出、不重发，所以不会把同一段话说两遍。
+# 重试次数与流式无关：SDK 的 max_retries 只重试请求建立阶段的错误
+# （连接失败 / 408 / 409 / 429 / 5xx），开始吐字后断流直接抛出、不重发，
+# 所以不会把同一段话说两遍。
 _RETRIES = 4
 
 
@@ -67,9 +66,19 @@ class LLM:
         self.model = model or os.environ.get("TREE_MODEL", "gpt-4o-mini")
         self.base_url = (base_url or os.environ.get("TREE_BASE_URL") or "").rstrip("/")
         self.api_key = api_key or os.environ.get("TREE_API_KEY")
+        self._client = None
 
     def _route(self, model):
-        return model if "/" in model else _COMPAT_PREFIX + model
+        # litellm 时代的配置可能在模型名前带 openai/ 前缀；原样交给端点前剥掉
+        return model[len(_COMPAT_PREFIX):] if model.startswith(_COMPAT_PREFIX) else model
+
+    def _get_client(self):
+        # 懒建：LLM() 在测试里无 key 也能构造（只测 _stream），HTTP 客户端到真要发请求才建
+        if self._client is None:
+            self._client = AsyncOpenAI(base_url=self.base_url or None,
+                                       api_key=self.api_key,
+                                       max_retries=_RETRIES)
+        return self._client
 
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
                    tools=None):
@@ -78,19 +87,15 @@ class LLM:
         内容每到一个字调一次 `on_delta`、思考调一次 `on_reasoning`（None 不回调）；
         工具调用的参数在增量里拼起来。重试只在请求建立阶段生效。
         """
-        resp = await litellm.acompletion(
-            model=self._route(self.model),
-            messages=messages,
-            temperature=temperature,
-            api_base=self.base_url or None,
-            api_key=self.api_key,
-            tools=tools,
-            tool_choice="auto" if tools else None,
-            parallel_tool_calls=(True if tools else None),
-            stream=True,
-            stream_options={"include_usage": True},  # 真实 usage 在收尾块里，不必攒 chunks 重拼
-            num_retries=_RETRIES,
-        )
+        kwargs = dict(model=self._route(self.model), messages=messages,
+                      temperature=temperature, stream=True,
+                      stream_options={"include_usage": True},  # 真实 usage 在收尾块里，不必攒 chunks 重拼
+                      )
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+            kwargs["parallel_tool_calls"] = True
+        resp = await self._get_client().chat.completions.create(**kwargs)
         return await self._stream(resp, on_delta, on_reasoning)
 
     async def _stream(self, resp, on_delta, on_reasoning):
@@ -105,8 +110,9 @@ class LLM:
         async for chunk in resp:
             u = getattr(chunk, "usage", None)   # 收尾块只有 usage；有的 provider 挂在最后一块内容上
             if u:
-                # usage 是 pydantic 对象，落到 Message.usage 前先转成 dict
-                usage = (u.model_dump() if hasattr(u, "model_dump")
+                # usage 是 pydantic 对象，落到 Message.usage 前先转成 dict；
+                # exclude_none：*_details 没内容时是 None，不记进 token 账
+                usage = (u.model_dump(exclude_none=True) if hasattr(u, "model_dump")
                          else dict(u))
             if not chunk.choices:            # 收尾块：没内容，只有 usage（stream_options）
                 continue

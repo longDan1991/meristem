@@ -124,7 +124,7 @@ def _plain(o):
 
 
 async def openai_spec(name):
-    """一个工具 → OpenAI 格式（litellm 的 tools= 列表里的一项）。"""
+    """一个工具 → OpenAI 格式（chat.completions 的 tools= 列表里的一项）。"""
     t = await mcp.get_tool(name)
     if t is None:
         raise RuntimeError("工具 %r 不在注册表里（注册发生在 tools/defs.py 的 import 时）" % name)
@@ -138,7 +138,7 @@ _specs_cache = None
 
 
 async def openai_tools():
-    """每个作用域的工具清单（OpenAI 格式，给 litellm）。只建一次。"""
+    """每个作用域的工具清单（OpenAI 格式，给 chat.completions）。只建一次。"""
     global _specs_cache
     await load()
     if _specs_cache is None:

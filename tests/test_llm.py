@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`llm._stream` 的定向测试：流式解析（文本 / 思考 / 工具参数拼接 / usage）。
 
-零成本、确定性：不碰网络，用假 chunk（SimpleNamespace）模拟 litellm 流式响应。
+零成本、确定性：不碰网络，用假 chunk（SimpleNamespace）模拟流式响应。
 
   A. 文本 + 思考 + 工具参数两段碎片 → 拼回完整 Message
   B. on_delta / on_reasoning 各自收到碎片
@@ -52,7 +52,7 @@ def test_full():
                                                      args="")]))
         yield chunk(NS(content=None, tool_calls=[tcd(0, args='{"cmd": "ls')]))
         yield chunk(NS(content=None, tool_calls=[tcd(0, args=' -la"}')]))
-        yield chunk(usage=NS(model_dump=lambda: {"total_tokens": 42, "prompt_tokens": 10,
+        yield chunk(usage=NS(model_dump=lambda **k: {"total_tokens": 42, "prompt_tokens": 10,
                                                  "completion_tokens": 32}))
 
     msg = asyncio_run(_run(stream, deltas.append, think.append))
@@ -77,7 +77,7 @@ def test_bad_json():
     async def stream():
         yield chunk(NS(content=None, tool_calls=[tcd(0, tid="x", name="bash",
                                                      args="{bad")]))
-        yield chunk(usage=NS(model_dump=lambda: {"total_tokens": 1}))
+        yield chunk(usage=NS(model_dump=lambda **k: {"total_tokens": 1}))
 
     try:
         asyncio_run(_run(stream))
