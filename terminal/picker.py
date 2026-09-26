@@ -1,71 +1,57 @@
 """会话选择器：`-r` 时用一个列表让用户挑要加载哪场老会话。
 
-用 prompt_toolkit 自绘极简列表（RadioList 的回车是"只选中不确认"，与"选中即加载"不符）；
-它只把"用户挑了哪一个"还回去。
+列表用 Textual 的 `OptionList`（↑↓ 挪高亮、回车选中都是部件自己的能力），
+这里只把"用户挑了哪一个"还回去。
 """
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from textual.app import App
+from textual.binding import Binding
+from textual.content import Content
+from textual.widgets import OptionList, Static
 
-MAX_ROWS = 12
-
-
-def _visible(items, index):
-    n = len(items)
-    if n <= MAX_ROWS:
-        return items, 0
-    top = min(max(0, index - MAX_ROWS // 2), n - MAX_ROWS)
-    return items[top:top + MAX_ROWS], top
+TITLE = "选择要加载的会话"
 
 
-async def pick_session(items, title="选择要加载的会话", inp=None):
-    """让用户挑一个会话；items = [(值, 显示行)]，回车返回选中值，取消返回 None。
+class _PickerApp(App):
+    """一屏：标题 + 会话列表（拿焦点）+ 一行键位提示。"""
 
-    `inp` 只给测试塞管道，键位走的是生产用的同一套。
+    CSS = """
+    #title, #hint { height: 1; padding: 0 1; }
+    #hint { color: $text-muted; }
+    #picker { height: 1fr; }
     """
+
+    BINDINGS = [Binding("ctrl+c", "cancel", "取消", priority=True)]
+
+    def __init__(self, items, title):
+        super().__init__()
+        self.items = items
+        self.title = title
+
+    def compose(self):
+        yield Static(self.title, markup=False, id="title")
+        yield OptionList(*[Content.from_text(label, markup=False) for _, label in self.items],
+                         id="picker")
+        yield Static(" ↑/↓ 选择 · 回车加载 · Ctrl-C 取消", markup=False, id="hint")
+
+    def on_mount(self):
+        self.query_one("#picker", OptionList).focus()
+
+    def on_option_list_option_selected(self, event):
+        event.stop()
+        self.exit(event.option_index)
+
+    def action_cancel(self):
+        self.exit(None)
+
+
+async def pick_session(items, title=TITLE):
+    """让用户挑一个会话；items = [(值, 显示行)]，回车返回选中值，取消返回 None。"""
     if not items:
         return None
-    idx = [0]
-    kb = KeyBindings()
-
-    @kb.add("up")
-    def _up(event):
-        idx[0] = max(0, idx[0] - 1)
-
-    @kb.add("down")
-    def _down(event):
-        idx[0] = min(len(items) - 1, idx[0] + 1)
-
-    @kb.add("enter")
-    def _enter(event):
-        event.app.exit(result=items[idx[0]][0])
-
-    @kb.add("c-d")
-    @kb.add("c-c")
-    def _cancel(event):
-        event.app.exit(result=None)
-
-    def frags():
-        visible, top = _visible(items, idx[0])
-        out = []
-        for off, (_, label) in enumerate(visible):
-            i = top + off
-            out.append(("class:hl" if i == idx[0] else "",
-                        ("> %s\n" if i == idx[0] else "  %s\n") % label))
-        return out
-
-    ctrl = FormattedTextControl(frags, key_bindings=kb, focusable=True)
-    container = HSplit([
-        Window(FormattedTextControl([("bold", " %s" % title)]), height=1),
-        Window(ctrl),
-        Window(FormattedTextControl([("dim", " ↑/↓ 选择 · 回车加载 · Ctrl-D 取消")]),
-               height=1),
-    ])
-    app = Application(layout=Layout(container), full_screen=True, input=inp)
     try:
-        return await app.run_async()
+        index = await _PickerApp(items, title).run_async()
     except EOFError:
         # stdin 关了（不是终端 / 管道没输入），等同于取消
         return None
+    return None if index is None else items[index][0]
