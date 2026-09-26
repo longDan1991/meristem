@@ -169,7 +169,7 @@ async def _one_tool(loop, nid, which, tc, call_id):
     if tc.name not in names:
         store.append_tool(nid, call_id, feedback.unknown_tool(tc.name, names))
         return
-    loop.emit(nid, "tool_start", {"name": tc.name})
+    loop.emit(nid, "tool_start", {"name": tc.name, "arguments": tc.arguments})
     t0 = time.monotonic()
     text = await run_tool(loop, nid, tc.name, tc.arguments)
     loop.emit(nid, "tool_end", {"name": tc.name, "secs": time.monotonic() - t0})
