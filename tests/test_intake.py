@@ -14,9 +14,10 @@
 
 import asyncio
 import json
+import sys
 import tempfile
 
-from harness import line
+from harness import OK, line
 from core.llm import Message, ToolCall
 from core.protocol.fields import Node
 from core.protocol.gate import anchors, validate_root
@@ -211,6 +212,10 @@ def main():
     line("空回车后同一句问题重新问，直到答上",
          len(asked) >= 3 and asked[0] == asked[1] == asked[2], repr(asked))
 
+    print("=" * 80)
+    print("全部通过" if all(OK) else "有失败项")
+    return 0 if all(OK) else 1
+
 
 def any_accept_from(asked):
     """从问过的话里找一个像验收标准的串（测试断言用，不严谨）。"""
@@ -221,4 +226,4 @@ def any_accept_from(asked):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
