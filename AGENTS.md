@@ -129,9 +129,27 @@
 
 **台账机制**：存量违规在行尾以 `# noqa: <规则>` 记账，汇总在 `docs/plan/AGENTS_DEBT_PLAN.md`；`noqa` 只压**已登记的旧账**，新代码再犯直接报错，新增 `noqa` 必须同步登记（否则就是 §2 禁止的"创可贴"）。
 
-未纳入 lint、仍靠人判的：§3/§5/§6/§7/§8/§9/§10/§11/§13，以及 §4 的 `print`（不启用 `T20`：CLI 输出与调试残留无法机器区分）。
+未纳入 lint、仍靠人判的：§3/§5/§6/§7/§8/§9/§10/§11/§13/§14，以及 §4 的 `print`（不启用 `T20`：CLI 输出与调试残留无法机器区分）。
 
 ## 13. 禁止重复造轮子（成熟能力必须用现成库）
 
 一件**小而独立、边界清晰**的事，只要已经存在广泛使用、成熟稳定的第三方库（或标准库）在做，**禁止自己手写一份**。
 判据：功能能用一个函数 / 一个文件装下、输入输出定义明确 → 八成有成熟库，先查再写。
+
+## 14. commit 一律英文 + Conventional 前缀
+
+提交信息是仓库历史里唯一写给**外部读者**的散文。**一律英文**（文档 / issue 可中文，提交不可）——中文提交把可读人群从全部读者缩到会说中文的那部分。**存量中文提交不追改**：改写历史会换掉全部 SHA，不值当；从下一个提交起执行即可。
+
+形式：`<type>(<scope>): <subject>`
+
+- `type` ∈ `feat` / `fix` / `docs` / `test` / `refactor` / `chore` / `build` / `ci` / `perf`；`scope` 可选，指模块（`prompts` / `protocol` / `loop` / `store` / `terminal` / `tools`）
+- `subject`：祈使句现在时、全小写、≤ 72 字符、结尾不加句号
+- `body`：写 **why**，不写 what（diff 自己会说）；与 `subject` 之间空一行
+- 一个提交一件事；**重命名 / 移动 / 纯格式化**必须与逻辑改动分开提交，否则 review 时 diff 不可读
+- 禁用 `wip` / `temp` / `update` / `fix bug` / 单字提交
+
+```
+feat(prompts): derive the rules section from the tool registry
+fix(loop): keep the ledger append-only when a node is resumed
+docs(terminal): pin the five-region layout as an invariant
+```
