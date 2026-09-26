@@ -1,5 +1,5 @@
 [project]
-name = "humanoid"
+name = "meristem"
 version = "0.1.0"
 description = "一棵递归工作的 LLM 树"
 requires-python = ">=3.11"

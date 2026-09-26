@@ -1,4 +1,4 @@
-# humanoid 交接文档
+# meristem 交接文档
 
 写于 2026-09-17，持续更新。交接对象：接着做这个项目的人（或下一个会话的我）。
 
@@ -78,7 +78,7 @@
 ## 1. 怎么跑
 
 ```bash
-cd /Users/wxlong/MYCode/humanoid
+cd /Users/wxlong/MYCode/meristem
 
 # 真跑（路径全部来自 .env，入口默认就是 intake；CLI 只剩 -r 一个参数）
 # 任务、验收标准、并发……全在终端里谈定 —— 入口问你要什么、怎么算验收
