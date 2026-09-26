@@ -86,7 +86,6 @@ uv run ruff check                        # 代码纪律，见 AGENTS.md §12
 |---|---|
 | `docs/PROMPTS.md` | 系统提示词的设计与**不变量** |
 | `docs/TERMINAL.md` | 终端布局的设计与**不变量** |
-| `docs/HANDOVER.md` | 进度与交接（做到哪、还剩什么、踩过哪些坑） |
 | `AGENTS.md` | 本仓库的硬约束禁令清单，能机器判定的部分由 ruff 执行 |
 
 ## License

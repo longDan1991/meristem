@@ -86,7 +86,6 @@ The tests are driven by a fake model (`FakeLLM`) and need no real API key.
 |---|---|
 | `docs/PROMPTS.md` | the design and **invariants** of the system prompt |
 | `docs/TERMINAL.md` | the design and **invariants** of the terminal layout |
-| `docs/HANDOVER.md` | progress and handoff (where things stand, what is left, what bit back) |
 | `AGENTS.md` | this repo's hard-constraint rule list; the machine-decidable parts are enforced by ruff |
 
 ## License
