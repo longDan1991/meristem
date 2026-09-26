@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Local machines only edit code; every check happens here — same convention as
+# llm-fs / llm-sh.
+#
+# The tests are plain scripts that sys.exit() their own return code, sharing
+# tests/harness.py for repo-root path setup and ✓/✗ reporting. There is no test
+# runner to delegate to, so the modules are listed explicitly.
+
+jobs:
+  check:
+    name: ruff + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches the local .venv (requires-python >= 3.11).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v3
+
+      # AGENTS.md §12: the machine-decidable discipline is enforced by ruff,
+      # not by good intentions.
+      - name: Ruff
+        run: uv run ruff check
+
+      # terminal_pty / tty depend on PTY and on Textual's headless behaviour.
+      # This Linux runner is the only place they get exercised outside macOS.
+      - name: Tests
+        run: |
+          for t in cli intake llm protocol resume terminal_pty tools tty; do
+            uv run python tests/test_$t.py
+          done
