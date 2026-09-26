@@ -35,15 +35,53 @@
 
 ## 0. 现在到哪一步了
 
-**跑得动、省得下、下次能捡回来，而且开工前会先把预期谈清楚。终端是能看的全屏布局了。**
+**跑得动、省得下、下次能捡回来，而且开工前会先把预期谈清楚。终端是能看的一条应用（五区一屏）。**
 
-**2026-09-25 TUI 全屏布局落地**（设计在 `docs/TERMINAL.md`）：终端从"滚动对话 + Live 接管"
-换成 **prompt_toolkit 全屏五区**（左树 / 右流 / 状态条 / 输入行拉通）。树是频道选择器：
-选中谁，右流就切到谁的完整消息（对话 / 思考 / 说话 / 工具调用 / 判定）；跑完的子树折成
-一行带统计、活跃路径自动展开；输入一个 buffer 一条队列，跑任务时照样能敲、按顺序交给
-入口；非真终端降级为逐帧打印折叠树。为此 `loop.py` 补了三个事件
-（`tool_start` / `tool_end` / `usage`，TERMINAL.md §6）——工具过程与 token 账对终端不再
-是黑盒。
+**2026-09-26 统一 Textual 组件：rich / prompt_toolkit 删净**（设计同步到 `docs/TERMINAL.md`）：
+上一轮虽然把屏交给了 Textual，行 / 框 / 列表仍在"自己画"或借 rich —— 日志区是 `RichLog`
+吃 rich renderable、工具输出是 rich `Panel`、树条带自己拼带样式的 `Text`、`-r` 的选择器是
+prompt_toolkit 自绘。这一轮把它们全换成组件，并把 rich / prompt_toolkit 从依赖表与代码里删净：
+
+- **组件化**：日志区 = `VerticalScroll` + 一条消息一个组件（`Markdown` / `Static`，工具输出
+  `Collapsible`）；树条带 = `OptionList`（高亮 / 滚动 / 滚轮都是它的）；`-r` 选择器 =
+  `OptionList`；状态条 = `Static`。样式一律走 CSS 类（`view.ROW_CSS`），不手写 rich。
+- **开场白进应用**：新会话"要做什么"由应用自己收（第一条回车就是种子；`store=None` 进场）
+  —— 不再"进应用前先跑一个 prompt_toolkit 提示框"，也就少了一个渲染器与第二套输入。
+- **非真终端按行读**：管道 / 重定向那条路不进应用（那里没有屏可占），输入按行读 `stdin`，
+  EOF / Ctrl-C 当收手。
+- **删净**：`rich` / `prompt-toolkit` 不在 `pyproject.toml`，源码里也没有它们的 import
+  （`test_tty` F 段守着）；textual 自己依赖 rich 是它的内务，与本项目的依赖无关。
+- 顺带：`view.py` 的返回值从 rich renderable 变成组件（`render_tail` 一段一个 `Static`）；
+  `_SessionApp` 的 store 参数可为 `None`。
+
+**2026-09-26 换 Textual：整块屏交给应用**（设计在 `docs/TERMINAL.md`）：
+前一轮是"正常缓冲日志 + 底部 prompt_toolkit 提示区 + 切节点 `\x1b[2J` 清屏重印"，它栽在
+**两个渲染器抢同一块屏**上（坑①），于是这一轮把整块屏交给 Textual：
+
+- **屏归应用**：Textual 进备用屏，五区一屏 —— 日志区（`RichLog`，应用内滚动）+ 实时尾巴
+  + 树条带 + 状态条 + 输入行（`TextArea`）。切频道重绘 = `RichLog.clear()` 再写回去：
+  **不写裸 ANSI**、不猜"我上帧画了几行"，差分重绘与擦除是 Textual 渲染器的事。
+- **提交才落地**：日志区只画选中节点**已提交**的消息（`store.dialogue`）；还没进 store 的
+  那一小段活在**尾巴区**。落地时机 = `tool_start` / 入口提问（`ask`）/ `loop_end` —— 都是
+  "消息已经进了 store"的那几个点；切回来看是同一份内容（重画读 store）。
+- **一个频道一个流**：↑↓ 切选中节点，日志区清掉重画它；别的节点的事件不写进来（免得串台），
+  树条带（`·` 标记）与状态条（`n 运行中`）看得见它在跑，切过去连它的实时尾巴一起看。
+- **代价说清楚**：终端 scrollback 不再承载会话历史（退出应用后终端恢复原样），历史在日志区
+  里滚（滚轮 / PgUp / PgDn 归 Textual，鼠标被应用接管；复制靠 Textual 自己的选择）。
+- 顺带补上 `loop.py` 的 `tool_start.arguments`：文档 §4 早就写着"工具行带参数"，代码没发，
+  终端画出来一直是 `工具: 名()`。
+- 测试：`test_tty` 全段改到**无头驱动 + Pilot**（A/B/D/E/H/J/K/L/Q），新增
+  `test_terminal_pty`（真 pty：备用屏 / 鼠标接管 / 真方向键切频道 / 打字回车 / Ctrl-C 收手）。
+- **踩过的坑**（都留了测试）：① **屏只能有一个 owner** —— rich 手写 `\x1b[2J` 与
+  prompt_toolkit 渲染器互相不知道对方画了什么；而且 `\x1b[2J` 擦掉的是"当前屏"而不是推进
+  scrollback，屏上还没滚出去的对话（含用户刚敲的）直接没了，重印的快照又堆进 scrollback；
+  ② multiline 输入的回车默认是插换行不是提交（要显式绑 Enter=提交、Alt-Enter=换行，
+  prompt_toolkit 与 TextArea 都一样）；③ prompt_toolkit 全局 `AppSession` 缓存第一个
+  `create_output()`（当时只对开场白/非真终端那条路有意义；后来 prompt_toolkit 删净，
+  这两条路都不再走它 —— 见上面"统一 Textual 组件"那条）；
+  ④ 合成键一整段写（`hello\r` 一次写）会和 Textual 的键分发抢跑，提交到半截字 ——
+  真键盘一个键一次读不会遇到，`test_terminal_pty` 照真键盘分开写；⑤ 焦点是挂载后
+  下一个消息泵才生效的，早于它敲进去的键会丢（真用户敲不了那么快，测试等 `PTY_READY` 标记）。
 
 铁证（同一个量化任务，加索引前 vs 后）：
 
@@ -71,7 +109,7 @@
 工作区里还有 29 场「入口并入根之前」的过渡格式会话，当**只读档案**留着
 （`load` 能读回任务树接着跑，但没有入口对话）。
 
-测试：**8 个测试文件、236 条断言，全离线，不调模型**（见 §6）。
+测试：**8 个测试文件、317 条断言，全离线，不调模型**（见 §6）。
 
 ---
 
@@ -175,9 +213,9 @@ export TREE_WORKERS='6'                                # 同时在飞的模型�
 | `tools/bash.py` | **bash 工具独立成文件**：schema 与给模型的描述照抄 oh-my-pi 的 BashTool（`command` / `timeout` / `cwd`，`timeout=0` 禁用 deadline，`cwd` 代替 `cd`）；执行走 llmbash 进程内 shell（不压缩输出）—— 持久 shell 池按 cwd 复用 + 并发重叠降级 one-shot 真并行 + 坏会话弃用重建 |
 | `tools/skills.py` | **通用 skill 加载**：import 时扫描 `cfg.SKILLS_DIRS` 下 `*/SKILL.md` 挂成 fastmcp `SkillsDirectoryProvider` + `read_skill` 工具（leaf 动作，读 `skill://<名字>/...` 资源）+ `discovered()`（name+description 清单，喂 `<skills>` 节）—— 对齐 oh-my-pi，机制对具体 skill 一无所知 |
 | `tools/context.py` | 工具共享现场：`(loop, nid)` ContextVar 注入（`get_binding` / `_current`）+ `_action_result` 记 tool 观测进 trace |
-| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → 运行现场（一份存储 `env["store"]`）→ 打横幅，`-r` 时 `Store.load(id)` 读回整棵树；`converse` 是终端话轮。真终端 = **全屏五区**（左树 / 右流 / 状态条 / 输入行拉通，布局见 `docs/TERMINAL.md`）：`SessionApp` 管事件路由（loop_start / loop_end / message_update / tool_* / usage）与一条输入队列（谈与跑共用，回车提交、Alt-Enter 换行、Ctrl-D 收手）；流 = rich 渲成 ANSI 经 `formatted_text.ANSI` 上屏，流式合帧 ≈30fps；非真终端降级为逐帧打印折叠树 |
-| `terminal/view.py` | 树的视图：`render_folded`（地图：折叠渲染，跑完的子树折一行带统计、活跃路径展开，返回 `[(node_id, 行)]`）+ `render_stream`（选中节点的消息流，返回 **[rich renderable]**：assistant 内容 = Markdown、工具输出 = Panel 框、思考 = 蓝斜体、判定绿/红） |
-| `terminal/picker.py` | `-r` 的会话选择器（prompt_toolkit 自绘列表） |
+| `terminal/chat.py` | **终端会话 + 装配层**：`run_session` 拿参数 → `-r` 时 `Store.roots()` 列出老会话、选中后 `Store.load(picked)` 读回整棵树，攒横幅（工作目录 / 并发 / 限制 / 已加载的会话）；`converse` 是终端话轮，按 stdout 是不是真终端分流。真终端 = `_SessionApp`（**Textual**，布局见 `docs/TERMINAL.md`）：五区一屏 —— 日志区（`VerticalScroll`，一条消息一个组件：`Markdown` / `Static` / 工具 `Collapsible`）+ 实时尾巴（没进 store 的那一小段，一段一个 `Static`）+ 树条带（`OptionList`）+ 状态条（`Static`）+ 输入行（`TextArea`）；↑↓ 切频道 = 清日志区重挂（widget 操作，不写裸 ANSI）；Enter 提交 / Alt-Enter 换行 / Ctrl-P·Ctrl-N 翻历史 / Ctrl-T 收展树 / Ctrl-F 折叠 / Ctrl-Q / Ctrl-C 收手（不看输入行里有什么；Ctrl-D 不占，归输入行删字符）/ 状态条常显收手键；事件路由（loop_start / loop_end / message_update / tool_* / usage）+ 一条输入队列（谈与跑共用）。`store=None` = 还没谈定：应用先进场收种子；非真终端降级为逐帧打印 + 按行读 stdin |
+| `terminal/view.py` | 树的视图（**只产 Textual 组件**，样式在 `ROW_CSS`）：`render_folded`（地图：跑完的子树折一行带统计、活跃路径展开，返回 `[(node_id, 行)]`）+ `render_stream`（选中节点**已提交**的消息流：assistant = `Markdown`、工具输出 = `Collapsible` 框、判定绿/红）+ `render_tail`（**还没提交**的实时尾巴：思考灰斜体 / 说话纯文本） |
+| `terminal/picker.py` | `-r` 的会话选择器（Textual `OptionList`：↑↓ 挪高亮、回车选中即加载） |
 | `docs/PROMPTS.md` | **设计文档：本质与不变量**（改代码前先看） |
 | `docs/HANDOVER.md` | 本文档：怎么跑、资产在哪、剩余工作 |
 
@@ -256,9 +294,9 @@ bash 走 `asyncio` 子进程），都不占线程。无锁：树的变更一律�
   （人怎么插话、怎么看见树），不是树的规矩 —— 它的变因和 `terminal/chat.py`
   完全相同，所以共享同一个包，不另开模块。装配那天在 `cli.py` 加子命令即可。
   动作不要直接改内存里的 `Node` —— 写 trace 事件，再由调度器在下一个决策点读进去。
-- **"指着某一层说话"的选点已经在了**：全屏布局的树窗格（`Tab` 切焦点、↑↓ 选中，
-  选中即切流）就是控制面的瞄准具 —— 五个动作都挂在"当前选中节点"上，输入行
-  打给选中的节点（入口根 = 对话，其它节点 = 外部观测）。
+- **"指着某一层说话"的选点已经在了**：树条带（焦点常在输入行，↑↓ 选节点，
+  选中即切流、也决定输入打给谁）就是控制面的瞄准具 —— 五个动作都挂在"当前选中节点"上，
+  输入行打给选中的节点（入口根 = 对话，其它节点 = 外部观测）。
 - **不要做"有树在跑就拒绝"这类锁**：正在跑的叶子看不见字段变更，
   正确做法是走**对话（外部观测消息）**通道 —— 人的话变成一条外部观测，下一个决策点就可见。
 - **不要先做 LLM 视图**：先做一个筛选（阻塞 > 被拒 > 门槛不过 > 其余折叠），
@@ -313,16 +351,17 @@ bash 走 `asyncio` 子进程），都不占线程。无锁：树的变更一律�
 
 | 文件 | 断言 | 管什么 |
 |---|---|---|
-| `tests/test_protocol.py` | 57 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、分配节点没有 execute、**收到的行首 == 协议的形式字段（`FORM_FIELDS`）== 工具 schema 的键**、**设计文档点名的节 == 真渲染的节（测试真读 `docs/PROMPTS.md`）**、**意图链两种节点都有**、**节在场性 / 字节稳定 / 节名校验**、**wire=[system]**、**工具作用域：声明只在 tags 一处 / 清单 == 库的可见性过滤结果 / 指导齐全 / 动作工具集** |
-| `tests/test_tools.py` | 18 | 截断/限制必须可见：read 报区间+可翻页、bash 输出不截断、bash 超时可见/可调/连子进程一起杀、**bash 输出不压缩逐字到达 + rm 真删文件**、**timeout=0 不限时**、**并发 bash 降级 one-shot 真并行** |
-| `tests/test_intake.py` | 23 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**、**给根标 gate**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
-| `tests/test_cli.py` | 14 | `cli.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
-| `tests/test_tty.py` | 68 | 终端会话：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口吐出来（吐完才轮到读）、形式不吐、思考画成灰的（真终端才上色）**、**开场白先收齐**、**读驱的是真 `prompt_toolkit` 会话（管道喂进去）**：回车发送（CR / LF 都算）/ 上箭头翻历史 / Alt-Enter 换行 / 括号粘贴多行当一条 / Ctrl-D 收手、旁白到位、**全屏五区（左树/右流/状态/输入，进备用屏、干净收手）**、**折叠渲染：跑完的子树折一行带统计、活跃路径展开、选中路径强制展开、显式展开压过自动折叠**、**流渲染：你:/入口:/任务:/说: 标签、工具调用行、输出全文进历史、判定行（判定+验收+结论）、实时尾巴去重**、**树选中即切流（Tab 切焦点、↑↓ 选中）**、**跑任务时输入不冻结：敲的行排队、按顺序以「你:」交出去**、**并行：三个孩子同时挂在树上**、**事件词汇：tool_start/tool_end/usage（名/耗时/字段/先后序）**、**非真终端逐帧打印折叠树不上全屏**；**边界守门**：terminal 不碰树的决策层、core 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()`。颜色断言自己摆好环境（`_tty_env`，不受 `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR` / `TTY_COMPATIBLE` 影响） |
+| `tests/test_protocol.py` | 63 | 拆/不拆、门槛、证据降级（含**引自更早一轮的子节点不算编造**）、必填项与 `conc_range` 形状被拒、**`kind` 写错不兜底**、长字段原样通过、分配节点没有 execute、**收到的行首 == 协议的形式字段（`FORM_FIELDS`）== 工具 schema 的键**、**设计文档点名的节 == 真渲染的节（测试真读 `docs/PROMPTS.md`）**、**意图链两种节点都有**、**节在场性 / 字节稳定 / 节名校验**、**wire=[system]**、**工具作用域：声明只在 tags 一处 / 清单 == 库的可见性过滤结果 / 指导齐全 / 动作工具集** |
+| `tests/test_tools.py` | 30 | 截断/限制必须可见：read 报区间+可翻页、bash 输出不截断、bash 超时可见/可调/连子进程一起杀、**bash 输出不压缩逐字到达 + rm 真删文件**、**timeout=0 不限时**、**并发 bash 降级 one-shot 真并行** |
+| `tests/test_intake.py` | 25 | 入口：话原样送到用户面前（多行也不压）、**只认 `root`：别的 JSON／纯聊天都当话**、形式不合规当场打回并说清原因（含 **`kind` 写错/没写**、**给根标 gate**）、**没有回合数限制**、**合规的根被拿去跑、结论回填**、闸门逐条说不、**吐字只吐话不吐形式** |
+| `tests/test_cli.py` | 15 | `cli.py` 的参数契约：入口默认就是 intake、要真模型（没 API key 当场报错，不许拿假模型聊）、`-r` 没有老会话当场说清；**守门**：硬编码的默认任务/标准不许回到源码里、`--intake`/`--mock` 老路已删 |
+| `tests/test_tty.py` | 124 | 终端会话（**无头驱动 + Pilot 驱真应用**）：问→答→**根被跑掉**、问题只显示一遍、**模型的话一小口一小口上屏（屏上有半截话时整段还没到）、形式只走工具那一行**、**思考流式进尾巴区、落地成灰斜体历史行、样式真上了屏**、**长尾巴滚到最新那几行（不卡在头 8 行）**、**新会话"要做什么"在应用里收（第一条回车就是种子，收下才起树）**、**非真终端按行读 stdin（空行也是一条、EOF / Ctrl-C 收手）**、旁白到位、**↑↓ 切频道：日志区清成选中节点的对话（选中底色落在选中那一行）**、**折叠渲染：跑完的子树折一行带统计、活跃路径展开、选中路径强制展开、显式展开压过自动折叠**、**流渲染：加粗 user 行 / `Markdown` 组件 / 工具行 / 工具输出 `Collapsible` 框 / 判定行；尾巴是另一块（render_tail：思考灰斜体、说话纯文本）**、**Markdown 真被解析（`**` 没原样上屏）**、**跑任务时输入不冻结：敲的行排队、按顺序以「你:」交出去**、**并行：三个孩子同时挂在树上（· 不折叠）**、**事件词汇：tool_start（带参数）/tool_end（耗时）/usage（字段/先后序）**、**Q 段：喂真键位与事件——Ctrl-T 收/展、Ctrl-F 只折已出结论的节点、Ctrl-P·Ctrl-N 翻历史（光标落末尾）、回车提交（空行不入队）、Alt-Enter 换行（输入行长高）、尾巴落地（tool_start 把思考+说话写进日志区）、别的频道的事件与尾巴都不串台、loop_end 重画判定（✗→✓）、**Ctrl-Q / Ctrl-C 有字也收手 / Ctrl-D 不再收手（退给输入行删字符）/ 状态条常显收手键****、**run 炸了带着原异常退场（app.error，不吞）**、**converse 按 stdout 分流**、**非真终端逐帧打印折叠树**、**S 段：`-r` 的会话选择器（列表在 / ↑↓ 挪高亮 / 回车挑中那一行 / Ctrl-C 取消）**；**边界守门**：terminal 不碰树的决策层、**视图层只产 Textual 组件**、**rich / prompt_toolkit 在依赖表与源码里都没有**、**不再手写裸 ANSI 清屏 / 不再 patch_stdout**、core 不 import terminal、main.py 不再自己读输入、terminal 不再自己写 `input()` |
+| `tests/test_terminal_pty.py` | 15 | 真终端介质（**真 pty + 真驱动**）：进备用屏 / 退出时离开备用屏、接管鼠标（滚轮归日志区）、第一帧画完（种子/话/思考/树条带/状态条/输入行都在）、**真方向键切频道（↓ 换成子节点对话、↑ 切回）**、输入行拿住焦点（`PTY_READY` 标记）、**敲字回车提交后进日志区**、Ctrl-C 干净收手（退出码 0）。慢（≈10s）且要 pty，所以只放无头驱动看不到的那一层 |
 | `tests/test_resume.py` | 32 | 会话续跑：从 {node, msgs} 检查点重建、崩溃窗口补投递、门槛续跑/作废、in_flight 树接着跑、结论回填、末行截断容错、增量检查点拼回全量、**会话摘要认最新谈成的任务**、**记录读路径认解析后的 kind（嵌入同形键的非 state 记录不算、紧凑分隔符的 state 照样认）**、**同一秒里连开两场会话不撞进同一条记录** |
-| `tests/test_llm.py` | 12 | `llm._stream` 流式解析：文本/思考/工具参数两段碎片拼回完整 Message、usage 随 Message 走、坏参数 JSON 当场炸、自定义型 tool-call 跳过、多个工具按 index 排序 |
+| `tests/test_llm.py` | 13 | `llm._stream` 流式解析：文本/思考/工具参数两段碎片拼回完整 Message、usage 随 Message 走、坏参数 JSON 当场炸、自定义型 tool-call 跳过、多个工具按 index 排序 |
 
 ```bash
-for t in protocol tools intake resume cli tty llm; do python3 tests/test_$t.py; done
+for t in protocol tools intake resume cli tty terminal_pty llm; do python3 tests/test_$t.py; done
 ```
 
 **待补**：控制面落地后，人的五类动作各要一条断言（见 §5①）。
@@ -404,10 +443,11 @@ for t in protocol tools intake resume cli tty llm; do python3 tests/test_$t.py; 
     空行才发送**。当时记下的理由是中文输入法里回车用来确认候选词 —— 但这条规矩
     的真实代价全落在用户身上：**敲完的行改不了、没有历史、粘贴多行会被当成好几句**。
     它看着像纪律，其实是为了省掉"自己写多行输入"这件事。
-    → 现在读直接交给 `prompt_toolkit`（`PromptSession`）：回车发送，方向键 / 历史 /
-    括号粘贴都是现成的，"分几行写"交给 Alt-Enter 这个独立按键；只绑 Alt-Enter、
-    **不绑 `c-j`**（拿 `c-j` 顶换行会在某些路径下把回车也吃成换行：实测
-    `prompt_async` 一去不回，buffer 里多出一个 `\n`）；
+    → 现在读交给成熟部件：交互会话里是 Textual 的 `TextArea`（回车提交、Alt-Enter 换行、
+    历史 Ctrl-P/Ctrl-N、多行粘贴都是部件能力），开场白（新会话"要做什么"）也在同一块屏的
+    同一条输入行上收；非真终端（管道 / 重定向）没有屏可占，就按行读 `stdin` ——
+    一个介质一套输入，不再有第二个渲染器 / 第二套键位。同一课：回车 / 换行的绑定要显式写对 ——
+    多行输入部件的回车默认是插换行，**提交键要自己绑**（拿 `c-j` 顶换行会把回车也吃成换行）；
     `input()` 那套 isatty 补换行、空行收尾、`at_start` 收行的代码一并删掉。
     教训：**凡是把成本转嫁给用户的"规矩"，先问一句"这是不是为了我实现省事"**；
     成熟库已经解决的事，自己写一遍只会更差（AGENTS §13）。
