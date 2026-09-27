@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """形式化协议的定向测试（零成本、确定性，脚本化假模型）。
 
-  A. 门槛不成立 → 兄弟子任务永不启动
-  B. 门槛通过   → 兄弟此时才启动
-  C. 子任务验收标准丢了可测物理量 → 这次分配当场被代码拒
-  D. 判定"满足"但证据指不到任何真实东西 → 降级为"未满足"
-  E. 次数不限：反复"再做一次"不被任何计数器阻止
-  F. 必填项缺一个 → 当场被拒；长字段原样通过
-  G. 分配节点没有 execute 分支 ——"不拆"必须是派一个叶子
-  I. 同构：收到的行首 == 自己要写的键
-  M. 工具作用域：声明只在 tags 一处、清单 == 库的可见性过滤、指导齐全
+沟通模型：没有 verdict、没有证据审计 —— 节点之间靠 communicate 消息来往，
+代码只做形状校验与投递。这里守的是：寻址（parent / 孩子名 / 错名字打回）、
+形状校验、同构（ChildSpec 键 == FORM_FIELDS）、命名分节 wire、作用域清单。
 """
 
 import asyncio
@@ -18,7 +12,7 @@ import re
 import sys
 import tempfile
 
-from harness import ROOT, line
+from harness import line, ROOT
 from core.llm import Message, ToolCall
 from core.protocol.fields import FORM_FIELDS, Node
 from core.prompts import (build_system_sections, render_system,
@@ -31,14 +25,11 @@ from core.runtime.store import Store
 from tools import ACTION_TAG, action_names, load, scope_names, scope_tag, scopes
 from tools.specs import ChildSpec, mcp
 
-C_ANCHORED = "账户权益在2026-12-31收盘 >= 本金 x 2"
 
-
-def kid(name, accept, kind="leaf", gate=False, rng=None,
-        detail="按上层要求把这件事做完", notes=""):
+def kid(name, kind="leaf", rng=None, detail="按上层要求把这件事做完", notes=""):
     """一个合规的子任务形式（所有必填项都在）。"""
-    return {"name": name, "detail": detail, "notes": notes, "accept": accept,
-            "kind": kind, "gate": gate, "conc_range": rng or [100, 500]}
+    return {"name": name, "detail": detail, "notes": notes, "kind": kind,
+            "conc_range": rng or [100, 500]}
 
 
 def bash_call(cmd):
@@ -50,8 +41,11 @@ def create(children):
                                         arguments={"children": children})])
 
 
-def conclude(**kw):
-    return Message(tool_calls=[ToolCall(name="conclude", arguments=kw)])
+def communicate(to, text, rng=None):
+    args = {"to": to, "text": text}
+    if rng:
+        args["conc_range"] = rng
+    return Message(tool_calls=[ToolCall(name="communicate", arguments=args)])
 
 
 class Scripted:
@@ -69,6 +63,17 @@ class Scripted:
             and any(tc.get("function", {}).get("name") == tname
                     for tc in m["tool_calls"]))
 
+    @staticmethod
+    def _reports(messages):
+        """收到的沟通消息（user 且正文带「来自」来源标记）。"""
+        return [m for m in messages
+                if m.get("role") == "user" and "来自「" in str(m.get("content", ""))]
+
+    @staticmethod
+    def _rejected(messages, text):
+        return any(text in str(m.get("content", "")) for m in messages
+                   if m.get("role") == "tool")
+
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
                    tools=None):
         self.calls += 1
@@ -78,102 +83,64 @@ class Scripted:
         # 对话里还没有任何 tool 回话 = 还没动过手（分配节点和叶子同一条判据）。
         fresh = not any(m.get("role") == "tool" for m in messages)
         n_alloc = Scripted._count(messages, "create_children")
+        reports = Scripted._reports(messages)
 
         if "kind: leaf" in user:                        # ── 叶子
-            if name.startswith("GATE"):
-                if self.mode == "gate_pass" and fresh:
-                    return bash_call("echo gate-ok")
-                v = "满足" if self.mode == "gate_pass" else "阻塞"
-                ev = ["第1次观测"] if v == "满足" else []
-                return conclude(verdict=v,
-                                text="门槛测过了" if v == "满足"
-                                else "开户需要人到场，不在工具里",
-                                evidence=ev)
-            if name.startswith("NOEV"):
-                return conclude(verdict="满足", text="我发誓真的做完了",
-                                evidence=["凭良心说的"])
-            if name.startswith("EARLY"):
-                # 第一轮拆出来的孩子：真的做过、真的出过结论
-                if fresh:
-                    return bash_call("echo early")
-                return conclude(verdict="满足", text="早期子任务干完了",
-                                evidence=["第1次观测"])
-            if self.mode == "deep":
-                if fresh:
-                    return bash_call("echo deep")
-                return conclude(verdict="满足", text="收盘价读到了",
-                                evidence=["第1次观测"])
-            if self.mode == "many" and fresh:
-                return bash_call("echo sib")
-            return conclude(verdict="满足", text="兄弟干完了",
-                            evidence=["第1次观测"])
+            if fresh:
+                return bash_call("echo %s" % name)
+            return communicate("parent", "%s 干完了" % name)
 
         # ── 分配节点
         if self.mode == "deep":
             # 三层：ROOT(分配) → MID(分配) → LEAF(叶子)，验意图链真的逐层加长
             if name == "MID":
                 if fresh:
-                    return create([kid(
-                        "LEAF", "2026-12-31 的权益读数已取到",
-                        detail="读收盘价")])
-                return conclude(verdict="满足", text="叶子回来了",
-                                evidence=["LEAF"])
-            if not fresh:
-                return conclude(verdict="满足", text="都回来了", evidence=["MID"])
-            return create([kid(
-                "MID", "2026-12-31 的权益读数已取到", kind="dispatch",
-                detail="先把数据这条线摸清楚")])
-        if self.mode == "recite":
-            # 真跑过的孩子回来后，又发了一次用不了的分配（被代码拒），
-            # 那次进历史时**没有 results**，最后才引第一轮的孩子出结论。
-            if n_alloc == 0:
-                return create([kid("EARLY", "2026-12-31 的权益读数已取到")])
-            if n_alloc == 1:
-                # 第二次分配故意缺 accept → 被代码当场拒
-                return create([{"name": "被拒的孩子", "detail": "d",
-                                "kind": "leaf", "conc_range": [100, 500]}])
-            return conclude(verdict="满足", text="下层都回来了", evidence=["EARLY"])
+                    return create([kid("LEAF", detail="读收盘价")])
+                return communicate("parent", "叶子回来了")
+            if not reports:
+                return create([kid("MID", kind="dispatch",
+                                   detail="先把数据这条线摸清楚")])
+            return Message(text="都回来了")
         if self.mode == "many":
             if n_alloc >= 3:
-                return conclude(verdict="未满足", text="试了三种拆法都不行",
-                                evidence=[])
-            return create([kid(
-                "SIB%d" % (n_alloc + 1),
-                "2026-12-31 的权益读数已取到（第%d次尝试）" % (n_alloc + 1))])
+                return Message(text="试了三种拆法都不行")
+            return create([kid("SIB%d" % (n_alloc + 1))])
+        if self.mode == "roundtrip":
+            # 叶子回报 → 根回一句 → 叶子再回报 → 根收工；验双向寻址
+            if not reports:
+                return create([kid("A")])
+            if len(reports) == 1:
+                return communicate("A", "收到，等我总结")
+            return Message(text="都回来了")
+        if self.mode == "bad_to":
+            if not reports:
+                return create([kid("A")])
+            if not Scripted._rejected(messages, "communicate 的 to"):
+                return communicate("不存在的孩子", "这不该送到")
+            return Message(text="给不出去，收工")
         if n_alloc > 0:
-            return conclude(verdict="满足", text="下层都回来了", evidence=["GATE"])
-        if self.mode == "anchor":
-            return create([kid("跑通就行", "代码能跑起来")])
-        if self.mode == "missing":                  # 故意缺 accept，schema 拒
-            return create([{
-                "name": "缺验收标准的孩子", "detail": "d", "kind": "leaf",
-                "conc_range": [100, 500]}])
+            return Message(text="都回来了")          # 拆过一次了：交出去休息（根没有父节点，纯文本）
+        if self.mode == "missing":                  # 故意缺 detail，gate 拒
+            return create([{"name": "缺 detail 的孩子", "kind": "leaf",
+                            "conc_range": [100, 500]}])
         if self.mode == "badkind":                  # kind 写成示例里的 "dispatch|leaf"
-            s = kid("kind 写错的孩子", "2026-12-31 的权益读数已取到")
+            s = kid("kind 写错的孩子")
             s["kind"] = "dispatch|leaf"
             return create([s])
         if self.mode == "badrange":                 # 下限比上限大
-            return create([{
-                "name": "区间写错的孩子", "detail": "d", "notes": "",
-                "accept": "2026-12-31 的权益读数已取到", "kind": "leaf",
-                "conc_range": [500, 100]}])
-        gate = (self.mode != "noevidence")
-        kids = []
-        if gate:
-            kids.append(kid("GATE", "2026-12-31 之前存在一个正期望策略", gate=True))
-        sib_name = "NOEV" if self.mode == "noevidence" else "SIB"
-        kids.append(kid(sib_name, "截至 2026-12-31 系统已就绪"))
+            return create([{"name": "区间写错的孩子", "detail": "d", "notes": "",
+                            "kind": "leaf", "conc_range": [500, 100]}])
         if self.mode == "long":
-            kids[0]["detail"] = "很长" * 200
+            return create([kid("长字段", detail="很长" * 200)])
         if self.mode == "note":
-            kids[0]["notes"] = "写在字段里放不下的判断依据。" * 50
-        return create(kids)
+            return create([kid("带备注", notes="写在字段里放不下的判断依据。" * 50)])
+        return create([kid("A"), kid("B")])
 
 
-def go(mode, accept=C_ANCHORED, kind="dispatch"):
+def go(mode, kind="dispatch"):
     d = tempfile.mkdtemp()
     store_mod.init(d)
-    root = Node(name="ROOT", accept=accept, kind=kind)
+    root = Node(name="ROOT", kind=kind)
     llm = Scripted(mode)
     cwd = os.getcwd()          # 叶子会跑真的 bash：别污染项目目录
     os.chdir(d)
@@ -231,68 +198,30 @@ def main():
     asyncio.run(load())      # 提示词是同步拼的：先把作用域视图从注册表读出来
 
     print("=" * 80)
-    print("A. 门槛不成立 → 兄弟永不启动")
-    root, reg, recs, _ = go("gate_fail")
-    print("  启动的节点: %s" % kinds(recs))
-    gf = [r for r in recs if r["kind"] == "gate_failed"]
-    sib = [n for n in reg.values() if n.name == "SIB"]
-    ok &= line("SIB 未启动（未启动结论、对话里没有 assistant）",
-               bool(sib) and sib[0].verdict == "未启动"
-               and not any(m.get("role") == "assistant"
-                           for m in last_msgs(recs, sib[0].id)))
-    ok &= line("留下 gate_failed 记录", bool(gf))
-    ok &= line("历史里写明门槛不成立", "门槛不成立" in msgs_text(recs, root.id))
-    ok &= line("根出了结论", bool(root.verdict), root.verdict)
+    print("A. 双向寻址：子报父、父回子；错名字当场打回")
+    root, reg, recs, _ = go("roundtrip")
+    a_node = [n for n in reg.values() if n.name == "A"][0]
+    ok &= line("孩子的回报进了父的对话（带来源标记）",
+               "来自「A」" in msgs_text(recs, root.id))
+    ok &= line("父的回复进了孩子的对话（带来源标记）",
+               "来自「ROOT」" in msgs_text(recs, a_node.id))
+    ok &= line("孩子没有因为父的回复被重跑（bash 只一次）",
+               n_calls(recs, a_node.id, "bash") == 1)
+    ok &= line("根收工后休息（最后一条是 assistant）",
+               last_msgs(recs, root.id)[-1].get("role") == "assistant")
+    root2, reg2, recs2, _ = go("bad_to")
+    ok &= line("communicate 给不存在的孩子 → 当场打回并说明规则",
+               "communicate 的 to" in msgs_text(recs2, root2.id))
+    ok &= line("没有孩子真的收到那条消息",
+               not any("这不该送到" in msgs_text(recs2, n.id) and n.id != root2.id
+                       for n in reg2.values()))
 
     print("=" * 80)
-    print("B. 门槛通过 → 兄弟此时才启动")
-    root, reg, recs, _ = go("gate_pass")
-    print("  启动的节点: %s" % kinds(recs))
-    ok &= line("GATE 通过后 SIB 启动了", any(k == "SIB" for k in kinds(recs)))
-    ok &= line("留下 gate_passed 记录", any(r["kind"] == "gate_passed" for r in recs))
-
-    print("=" * 80)
-    print("C. 子任务验收标准丢了可测物理量 → 这次分配被代码拒")
-    root, reg, recs, _ = go("anchor")
-    drift = [r for r in recs if r["kind"] == "criterion_drift"]
-    ok &= line("留下 criterion_drift 记录", bool(drift))
-    ok &= line("被拒原因写回对话", "丢了可测物理量" in msgs_text(recs, root.id))
-    ok &= line("没有启动任何子节点", not has_child_node(recs))
-
-    print("=" * 80)
-    print("D. 判定「满足」但证据指不到真实东西 → 降级")
-    root, reg, recs, _ = go("noevidence")
-    down = [r for r in recs if r["kind"] == "verdict_downgraded"]
-    noev = [n for n in reg.values() if n.name == "NOEV"][0]
-    print("  NOEV 的判定: %s | %s" % (noev.verdict, noev.conclusion))
-    ok &= line("被降级并留下记录", bool(down))
-    ok &= line("判定变成未满足", noev.verdict == "未满足")
-
-    print("=" * 80)
-    print("D2. 证据引自**上一轮**的子节点，也算指到了真东西")
-    root, reg, recs, _ = go("recite")
-    early = [n for n in reg.values() if n.name == "EARLY"]
-    print("  EARLY 的判定: %s | 根的判定: %s"
-          % (early[0].verdict if early else "?", root.verdict))
-    ok &= line("早期子节点真的跑过", bool(early) and early[0].verdict == "满足")
-    ok &= line("证据引更早一轮的孩子 → 不降级", root.verdict == "满足")
-
-    print("=" * 80)
-    print("E. 次数不限，但每次都看得见")
-    root, reg, recs, _ = go("many")
-    n_attempts = sum(1 for r in recs if r["kind"] == "allocated")
-    print("  根分配了 %d 次，启动的节点: %s" % (n_attempts, kinds(recs)))
-    ok &= line("反复分配没有被计数器阻止", n_attempts >= 3, "%d 次" % n_attempts)
-    ok &= line("每次尝试都在对话里",
-               n_calls(recs, root.id, "create_children") == n_attempts)
-    ok &= line("最终能出结论", bool(root.verdict), "%s / %s" % (root.verdict, root.conclusion))
-
-    print("=" * 80)
-    print("F. 必填项缺一个 → 当场被拒；长字段原样通过（没有任何长度检查）")
+    print("B. 必填项缺一个 → 当场被拒；长字段原样通过（没有任何长度检查）")
     root2, reg2, recs2, _ = go("missing")
-    ok &= line("缺 accept → 被拒并把原因写回对话",
+    ok &= line("缺 detail → 被 schema 层拒并把原因写回对话",
                "工具参数不合形状" in msgs_text(recs2, root2.id)
-               and "children.0.accept" in msgs_text(recs2, root2.id))
+               and "children.0.detail" in msgs_text(recs2, root2.id))
     ok &= line("没有启动任何子节点", not has_child_node(recs2))
     root3, reg3, recs3, _ = go("badrange")
     ok &= line("conc_range 形状不对（[500,100]）→ 被拒",
@@ -309,37 +238,50 @@ def main():
     ok &= line("notes 不限字数", nl >= 400, "最长 %d 字" % nl)
 
     print("=" * 80)
-    print("G. 分配节点没有 execute 分支")
+    print("C. 次数不限，但每次都看得见")
+    root, reg, recs, _ = go("many")
+    n_attempts = sum(1 for r in recs if r["kind"] == "allocated")
+    print("  根分配了 %d 次，启动的节点: %s" % (n_attempts, kinds(recs)))
+    ok &= line("反复分配没有被计数器阻止", n_attempts >= 3, "%d 次" % n_attempts)
+    ok &= line("每次尝试都在对话里",
+               n_calls(recs, root.id, "create_children") == n_attempts)
+    ok &= line("孩子每次的回报都在根的对话里",
+               sum(1 for m in last_msgs(recs, root.id)
+                   if m.get("role") == "user" and "来自「" in str(m.get("content", "")))
+               == n_attempts)
+
+    print("=" * 80)
+    print("D. 意图链逐层物化：叶子带着从根到上层的整条链")
+    _, regI, recsI, _ = go("deep")
+    leafI = [n for n in regI.values() if n.name == "LEAF"][0]
+    lin = last_msgs(recsI, leafI.id)
+    ok &= line("叶子的任务消息里带着从根到它上层的整条意图链",
+               bool(lin) and "上层意图链" in lin[0]["content"]
+               and "ROOT" in lin[0]["content"] and "MID" in lin[0]["content"])
+
+    print("=" * 80)
+    print("E. 分配节点没有 execute 分支")
     allkinds = set()
-    for mode in ("gate_pass", "many"):
+    for mode in ("many", "roundtrip"):
         _, reg3, recs3, _ = go(mode)
         allkinds |= {n.kind for n in reg3.values()}
     print("  出现过的节点类型: %s" % allkinds)
     ok &= line("只有 dispatch 和 leaf 两种", allkinds <= {"dispatch", "leaf"})
-    ok &= line("叶子的产物必须是代码或结论",
-               all(r["kind"] in ("tool", "concluded", "bad_conclusion")
-                   for r in recs3 if r["kind"] in
-                   ("tool", "concluded", "bad_conclusion")))
 
     print("=" * 80)
-    print("I. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
+    print("F. 同构：收到的行首 == 自己要写的键；文档点名的段落 == 真渲染的段落")
     KEYS = FORM_FIELDS
     ok &= line("工具 schema 的键 == 协议的形式字段（同一份、同一顺序）",
                tuple(ChildSpec.model_fields) == KEYS,
                "%s" % (tuple(ChildSpec.model_fields),))
-    # 文档承诺给模型看的**静态**段落 vs 线上真正发出去的基础消息（base_user）。
-    # 在这里**双向**核对：文档说了没渲染 = 承诺落空；渲染了文档没说 = 偷偷塞东西。
-    # 「本层已有尝试 / 观测历史 / 手上的东西」不在这 —— 它们是线上对话机制与
-    # 工具清单的说明（分配记录、tool 消息、工具列表各自承担），不渲进基础消息。
     SECTIONS = ("上层意图链",)
 
     def sys_text(which):
         """该节点回合的 system 文本（= tree/prompts/ 的节组装结果，render_turn 的第一条消息）。"""
-        n = filled("leaf" if which == "leaf" else "dispatch", [])
-        return render_turn(which, n)[0]["content"]
+        return render_turn(which)[0]["content"]
 
     def filled(kind_, lineage):
-        n = Node(name="N", detail="D", notes="X", accept="A 2026-12-31",
+        n = Node(name="N", detail="D", notes="X",
                  kind=kind_, conc_range=[100, 500], lineage=lineage)
         return n
 
@@ -353,9 +295,9 @@ def main():
         got = [s for s in SECTIONS if s in text]
         print("  %s: 收到的行首 %s" % (which, head_keys))
         print("       文档点名 %s / 基础消息里有 %s" % (doc, got))
-        ok &= line("%s 收到的行首 == 自己要写的那 7 个键（同构）" % which,
+        ok &= line("%s 收到的行首 == 自己要写的那 5 个键（同构）" % which,
                    head_keys == list(KEYS), "%s" % head_keys)
-        ok &= line("%s: 收到的 7 个键在文档里都点了名" % which,
+        ok &= line("%s: 收到的 5 个键在文档里都点了名" % which,
                    all(k in sys_txt for k in KEYS))
         ok &= line("%s: 文档点名的静态段落 == 基础消息里有的" % which, doc == got)
         ok &= line("%s: conc_range 在文档与基础消息里都在" % which,
@@ -365,22 +307,21 @@ def main():
                    all(s in text for s in ("[100, 500]",
                                            "ROOT: 把量化系统做出来",
                                            "MID: 摸清数据这条线")))
-    ok &= line("alloc 的两个出口 = create_children / conclude",
-               all(s in sys_text("alloc") for s in ("create_children", "conclude")))
-    ok &= line("leaf 的出口 = bash / read / write / read_skill / conclude",
-               all(s in sys_text("leaf") for s in ("bash", "read", "write", "read_skill", "conclude")))
+    ok &= line("alloc 的两个出口 = create_children / communicate",
+               all(s in sys_text("alloc") for s in ("create_children", "communicate")))
+    ok &= line("leaf 的出口 = bash / read / write / read_skill / communicate",
+               all(s in sys_text("leaf")
+                   for s in ("bash", "read", "write", "read_skill", "communicate")))
+    ok &= line("intake 的出口 = submit_root / communicate",
+               all(s in sys_text("intake") for s in ("submit_root", "communicate")))
     # 双向核对换成**节名集合**（docs/PROMPTS.md §5.6）：文档点名的节 == 真渲染的节。
-    # 恒在节按 §3.2；条件节按出生时静态属性（gate）。
+    # 恒在节按 §3.2 —— 沟通模型下没有条件节，六个节全部恒在。
     DOC_SECTIONS = {"preamble", "process", "tools", "rules", "skills", "input"}
-    # 文档真的被读进来核对，别只在这硬编码一份集合（那样文档漂了测试照样绿）。
-    # 要求的是**节表里的那一行**，不是"文档里出现过这个词"（散文里的反引号会放水）。
     with open(os.path.join(ROOT, "docs", "PROMPTS.md"), encoding="utf-8") as f:
         doc_md = f.read()
     ok &= line("每个节都在设计文档的节表里单独占一行",
-               all(("| `%s` |" % n) in doc_md
-                   for n in DOC_SECTIONS | {"skill_gate"}),
-               str([n for n in DOC_SECTIONS | {"skill_gate"}
-                    if ("| `%s` |" % n) not in doc_md]))
+               all(("| `%s` |" % n) in doc_md for n in DOC_SECTIONS),
+               str([n for n in DOC_SECTIONS if ("| `%s` |" % n) not in doc_md]))
 
     def section_names(sys_t):
         names = set(re.findall(r"<([a-z][a-z0-9_-]*)>", sys_t))
@@ -389,20 +330,13 @@ def main():
         return names
 
     for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
-        nS = filled(kind_, [])
-        got = section_names(render_turn(which, nS)[0]["content"])
+        got = section_names(render_turn(which)[0]["content"])
         ok &= line("%s: 文档点名的节 == 真渲染的节" % which,
                    got == set(DOC_SECTIONS), "%s" % sorted(got))
-    ok &= line("intake: 文档点名的节 == 真渲染的节（无条件节）",
+    ok &= line("intake: 文档点名的节 == 真渲染的节",
                section_names(render_turn("intake")[0]["content"])
                == set(DOC_SECTIONS))
     ok &= line("根没有上层 → 不渲染意图链", lineage(filled("dispatch", [])) == "")
-    _, regI, recsI, _ = go("deep")
-    leafI = [n for n in regI.values() if n.name == "LEAF"][0]
-    lin = last_msgs(recsI, leafI.id)
-    ok &= line("叶子的任务消息里带着从根到它上层的整条意图链",
-               bool(lin) and "上层意图链" in lin[0]["content"]
-               and "ROOT" in lin[0]["content"] and "MID" in lin[0]["content"])
 
     def _raises(fn):
         try:
@@ -415,8 +349,7 @@ def main():
     print("K. 命名分节 wire：system 只有一条、intake 同样、参数校验")
 
     def _wire(which):
-        return [m["role"] for m in render_turn(which, filled(
-            "leaf" if which == "leaf" else "dispatch", []))]
+        return [m["role"] for m in render_turn(which)]
 
     k_roles = _wire("leaf")
     k_roles_alloc = _wire("alloc")
@@ -435,32 +368,23 @@ def main():
     print("=" * 80)
     print("K2. 命名分节：节在场性 / 字节稳定 / 节名校验")
 
-    def sec_sys(kind_, gate=False):
-        n = filled(kind_, [])
-        n.gate = gate
-        return render_turn("leaf" if kind_ == "leaf" else "alloc", n
-                           )[0]["content"]
+    def sec_sys(kind_):
+        return render_turn("leaf" if kind_ == "leaf" else "alloc")[0]["content"]
 
-    n_plain = sec_sys("leaf", False)
-    n_gate = sec_sys("leaf", True)
-    n_alloc = sec_sys("dispatch", True)
+    n_plain = sec_sys("leaf")
+    n_alloc = sec_sys("dispatch")
     ok &= line("preamble 在最前无标签，节按固定顺序包同名标签",
                not n_plain.startswith("<") and "<process>" in n_plain
                and n_plain.index("<tools>") < n_plain.index("<rules>")
                < n_plain.index("<input>"))
-    ok &= line("gate=False → 无 <skill_gate> 节", "<skill_gate>" not in n_plain)
-    ok &= line("<skills> 恒在（三种节点都有），gate 不影响它",
-               "<skills>" in n_plain and "<skills>" in sec_sys("dispatch", True)
+    ok &= line("<skills> 恒在（三种节点都有）",
+               "<skills>" in n_plain and "<skills>" in n_alloc
                and "<skills>" in render_turn("intake")[0]["content"])
-    ok &= line("gate=True → 有 <skill_gate> 节", "<skill_gate>" in n_gate
-               and "<skill_gate>" in n_alloc)
-    ok &= line("压缩已去掉 → 叶子也没有 <skill_compression> 节",
-               "<skill_compression>" not in n_plain
-               and "<skill_compression>" not in n_alloc)
-    n_leaf = filled("leaf", [])
+    ok &= line("没有 skill_gate 节（门槛机制已删）",
+               "<skill_gate>" not in n_plain and "<skill_gate>" not in n_alloc)
     ok &= line("同一节点两次组装字节一致",
-               render_system(build_system_sections("leaf", n_leaf))
-               == render_system(build_system_sections("leaf", n_leaf)))
+               render_system(build_system_sections("leaf"))
+               == render_system(build_system_sections("leaf")))
     try:
         render_system({"preamble": "x", "bad name": "y"})
         ok &= line("节名违反 [a-z][a-z0-9_-]* 当场报错", False)
@@ -478,13 +402,11 @@ def main():
                 return Message(tool_calls=[
                     ToolCall(name="bash", arguments={"command": "echo a"}),
                     ToolCall(name="bash", arguments={"command": "echo b"})])
-            return Message(tool_calls=[ToolCall(
-                name="conclude", arguments={"verdict": "满足", "text": "ok",
-                                            "evidence": ["第1次观测"]})])
+            return Message(text="ok")     # 纯文本：收工休息（叶子没有父节点可报）
 
     d_m = tempfile.mkdtemp()
     store_mod.init(d_m)
-    root_m = Node(name="叶子", accept="2026-12-31 收盘 >= 1", kind="leaf")
+    root_m = Node(name="叶子", kind="leaf")
     cwd = os.getcwd()
     os.chdir(d_m)
     try:
@@ -497,7 +419,8 @@ def main():
                len([r for r in recs_m if r["kind"] == "tool"]) >= 2)
     ok &= line("两条 tool 回话都配上了",
                sum(1 for m in msgs_m if m.get("role") == "tool") >= 2)
-    ok &= line("全部完成后继续，最终出结论", root_m.verdict == "满足")
+    ok &= line("全部完成后收工休息（最后一条是 assistant）",
+               msgs_m[-1].get("role") == "assistant")
 
     print("=" * 80)
     print("M. 工具作用域：声明只有一处（tags）、清单由库的可见性算出来、指导齐全")
@@ -519,12 +442,15 @@ def main():
                    == {n for n, t in registered.items() if scope_tag(w) in t}
                    for w in scopes()),
                str({w: scope_names(w) for w in scopes()}))
-    ok &= line("动手工具 = 注册表里带 action 标签的那些（证据审计只认它们）",
+    ok &= line("动手工具 = 注册表里带 action 标签的那些（bash/read/write/read_skill）",
                set(action_names()) == {n for n, t in registered.items()
                                        if ACTION_TAG in t},
                str(action_names()))
     ok &= line("作用域 = 节点类型（alloc / leaf / intake）",
                set(scopes()) == {"alloc", "leaf", "intake"}, str(scopes()))
+    ok &= line("communicate 三种节点都能调（寻址决定发给谁）",
+               all("communicate" in scope_names(w) for w in scopes()),
+               str({w: scope_names(w) for w in scopes()}))
 
     print("=" * 80)
     print("全部通过" if ok else "有失败项")

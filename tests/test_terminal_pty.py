@@ -73,8 +73,7 @@ class App(chat._SessionApp):
 d = tempfile.mkdtemp()
 store_mod.init(d)
 st = Store.new(Node(name="会话", kind=INTAKE), seed="帮我赚大钱")
-kid = Node(name="归一化", kind=LEAF, parent=st.root.id, accept="产出 clean.csv",
-           conc_range=[1, 2])
+kid = Node(name="归一化", kind=LEAF, parent=st.root.id, conc_range=[1, 2])
 st.put([kid])
 st.root.children.append(kid.id)
 st.append_user(kid.id, "把数据处理干净")

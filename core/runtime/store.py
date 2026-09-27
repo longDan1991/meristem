@@ -1,7 +1,7 @@
 """一场会话的存储：一棵树 + 一份 append-only 记录，写入即账。
 
 会话 = 一棵树（入口节点为根，谈成的任务都是它的孩子）；存储是树与记录的唯一写者，
-工具、Loop 都只经它改树。写入方法是树的所有变更入口（`append_*` / `set_verdict` / `put`）。
+工具、Loop 都只经它改树。写入方法是树的所有变更入口（`append_*` / `put`）。
 
 落盘：先写内存缓冲、`pydash.throttle` 懒写磁盘；检查点 = Node 全字段 + 平铺对话，
 对话增量落盘（第一笔全量，之后只写新增），恢复端按序拼回全量。
@@ -31,6 +31,14 @@ _THROTTLE_MS = 200
 
 # 流式读遇到末行 JSON 坏掉时的哨兵：说明是被截断的半行，停在这里。
 _TRUNCATED = object()
+
+
+def _sent_comm(msgs):
+    """一份对话里有没有向对方发过 communicate（会话摘要的"已回报/运行中"判据）。"""
+    return any(m.get("role") == "assistant" and m.get("tool_calls")
+               and any((tc.get("function") or {}).get("name") == "communicate"
+                       for tc in m["tool_calls"])
+               for m in msgs)
 
 
 def init(root=None):
@@ -103,7 +111,7 @@ class Store:
         for path in Store._paths():
             _states, registry, root = Store._open(path)
             if root is not None:
-                out.append((root.id, Store._label(registry, path)))
+                out.append((root.id, Store._label(registry, _states, path)))
         return out
 
     # ─────────────────────────────────────────── 2. 加载 / 新建
@@ -173,21 +181,16 @@ class Store:
         self.dialogue(nid).tool(call_id, text)
         self._after(nid)
 
-    def append_user(self, nid, text):
-        self.dialogue(nid).user(text)
+    def append_user(self, nid, text, sender=None):
+        """给节点追加一条 user 消息；`sender` = 发送者节点 id（沟通消息带，账本里才有的键）。"""
+        m = {"role": "user", "content": text}
+        if sender:
+            m["from"] = sender
+        self.dialogue(nid).msgs.append(m)
         self._after(nid)
 
     def append_feedback(self, nid, text):
         self.dialogue(nid).feedback(text)
-        self._after(nid)
-
-    def set_verdict(self, nid, verdict, text, evidence, external=None):
-        """落 verdict；结论的完整含义（扫父节点 / 回填 / 门槛）在 conclude 工具里。"""
-        node = self.registry[nid]
-        node.verdict = verdict
-        node.conclusion = text
-        node.evidence = evidence or []
-        node.external = external or []
         self._after(nid)
 
     def _after(self, nid):
@@ -284,7 +287,7 @@ class Store:
         return store
 
     @staticmethod
-    def _label(registry, path):
+    def _label(registry, states, path):
         mtime = os.path.getmtime(path)
         stamp = time.strftime("%m-%d %H:%M", time.localtime(mtime))
         if not registry:
@@ -294,9 +297,10 @@ class Store:
             return "%s （还没跑过任务）" % stamp
         newest = tasks[-1]      # registry 按记录出现顺序 = 节点出生顺序，最后一个是最新谈成的任务
         name = newest.name or "(无任务名)"
-        verdict = newest.verdict or "运行中"
+        msgs = (states.get(newest.id) or {}).get("msgs") or []
+        state = "已回报" if _sent_comm(msgs) else "运行中"
         extra = "" if len(tasks) == 1 else "（共 %d 个任务）" % len(tasks)
-        return "%s %s [%s]%s" % (stamp, name, verdict, extra)
+        return "%s %s [%s]%s" % (stamp, name, state, extra)
 
     # ─────────────────────────────────────────── 内部：写
     def _register(self, node):

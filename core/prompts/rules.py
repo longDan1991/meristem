@@ -1,11 +1,10 @@
 """rules 节：操作纪律（从工具清单推导）+ 协议规则（手写）。
 
-推导部分随工具清单变；手写部分是协议级不变量，对应 `gate.py` 的机械校验。
+推导部分随工具清单变；手写部分是协议级不变量，对应 `gate.py` 的形状校验。
 """
 
-from ..protocol.fields import ANCHOR_HINT, INTAKE
+from ..protocol.fields import INTAKE
 from tools import action_names, scope_names
-from ..protocol import feedback
 
 
 def rules_section(which):
@@ -18,38 +17,24 @@ def rules_section(which):
                      "调不在本层列表里的 → 当场打回。")
         lines.append("已经试过的都记在历史里 —— 别重复撞同一堵墙。")
     if "create_children" in tools:
-        lines.append("create_children 除 notes / gate 外全部必填：缺一个或形状不对，"
+        lines.append("create_children 除 notes 外全部必填：缺一个或形状不对，"
                      "这次分配会被代码当场退回（原因写回对话）。")
-        lines.append("每个子任务的 accept 必须原样带上父/根的可测物理量"
-                     "（%s）—— 丢了会被代码拒掉，"
-                     "那是把任务换成了别的东西。" % ANCHOR_HINT)
-        lines.append("gate 可选、一次最多一个：它是轻重缓急 —— 这件事不先做，"
-                     "其余全是白做。想不出作废条件就别标。")
-    if "conclude" in tools:
-        lines.append("判定「满足」必须指得出具体证据，指不出来会被降级为「未满足」。")
-        lines.append("conclude 的 text 落在上层给的 conc_range 区间里。")
-        if not tools & actions:        # 分配节点（自己没有观测）
-            lines.append("分配节点自己没有观测：证据只能是子任务的 name（原样照抄一个）"
-                         "或磁盘上真存在的产物路径。写「第几次观测」是无效的 —— "
-                         "观测只属于叶子。")
+    if "communicate" in tools:
+        lines.append("communicate 的 to 只能是 \"parent\" 或你一个孩子的 name"
+                     "（原样照抄 create_children 给过的名字）—— 其它会被代码打回。")
+        lines.append("做完了就 communicate 给父节点回报结论；做不了也 communicate 说清楚"
+                     "卡在哪（开户/入金/留痕这种要人到场的，明说缺什么，别编一个能做的"
+                     "假版本代替）。回报要落在对方要求的回复长度区间里（消息里带）。")
+        lines.append("父节点发来的消息要回应：追问就答，要求重做就重做，"
+                     "让你等就等 —— 不要假装没收到。")
     if tools & actions:
         lines.append("文件与命令操作一律走 bash / read / write —— 签名、超时、"
                      "翻页语义在各自的工具描述里（provider 原样喂给你），这里不重复。")
     if "submit_root" in tools:
-        lines.append("submit_root 除 notes / gate 外全部必填，缺一个或形状不对会被当场退回。")
-        lines.append("accept 必须带上可测物理量（%s），否则代码当场退回。"
-                     "这一条是你从对话里谈出来的，"
-                     "不是用户交给你的 —— 他确认过就行。" % ANCHOR_HINT)
-        lines.append("不用给 gate —— 根没有兄弟，「作废整个分支」对它没有意义。")
-        lines.append("每次调 submit_root，任务都会**当场拿去跑**。跑完你会收到一条"
-                     "「任务执行结果（系统观测，不是用户说的话）」—— 据此接着谈："
-                     "把结论讲给用户，或再开下一个任务。谈成什么是什么，"
-                     "跑的结果说了算，不要替它编结论。")
-    if which != INTAKE:
-        lines.append("反复失败、或需要的动作不在工具里（比如开户/入金/留痕需要人到场），"
-                     "就用「阻塞」，把原因写清楚，并指明 external 是哪一类"
-                     "（%s）。"
-                     "不要编一个你能做的假版本来代替做不到的事。"
-                     "「阻塞」只是「这次的条件下没走通」，不是「这条路不行」："
-                     "把卡在哪个条件上写清楚，下一代才探测得动。" % feedback.EXTERNAL_HINT)
+        lines.append("submit_root 除 notes 外全部必填，缺一个或形状不对会被当场退回。")
+        lines.append("每次调 submit_root，任务都会**当场拿去跑**。跑完你会收到任务根"
+                     "发来的消息（进展 / 结论）—— 据此接着谈：把结论讲给用户、"
+                     "communicate 回去要求重做、或再开下一个任务。"
+                     "谈成什么是什么，跑的结果说了算，不要替它编结论。")
+        lines.append("任务根发来的消息要 communicate 回去时，to 用任务根的 name。")
     return "\n".join("· %s" % line for line in lines)

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """入口的定向测试（零成本、确定性：脚本化模型 + 脚本化用户 + 真调度器）。
 
-入口就是会话的根节点（kind="intake"）：谈成能过闸门的任务就 `submit_root` 挂成孩子，
-调度器真跑掉、结论以 child_result 回到根对话。代码不认"话里的 JSON"，形式只从工具调用来。
+入口就是会话的根节点（kind="intake"）：谈拢了任务就 `submit_root` 挂成孩子，
+调度器真跑掉、任务的回报以 communicate 消息回到入口对话。代码不认"话里的 JSON"，
+形式只从工具调用来。
 
-  A. 谈定 → 打回 → 交出合规的任务 → 跑掉、结论回填
+  A. 谈定 → 打回 → 交出合规的任务 → 跑掉、回报回填
   B. 形式不合规 → 当场打回并说清为什么
   C. 只认工具调用：其余一律当话
   D. 没有回合数 / 重复次数的限制
-  E. 闸门：缺字段 / 没有可测物理量，都当场说不
+  E. 闸门：缺字段 / 形状不对，都当场说不
   F. 吐字：话一路出去，交形式一路不吐
 """
 
@@ -20,7 +21,7 @@ import tempfile
 from harness import OK, line
 from core.llm import Message, ToolCall
 from core.protocol.fields import Node
-from core.protocol.gate import anchors, validate_root
+from core.protocol.gate import clean_spec
 from core.runtime import store
 from core.runtime.loop import run
 from core.runtime.store import Store
@@ -31,7 +32,7 @@ class Stop(Exception):
 
 
 class FakeLLM:
-    """按脚本回话的模型：入口说字符串 / 交带 root 的 dict，任务节点跑一次 bash 就 conclude。"""
+    """按脚本回话的模型：入口说字符串 / 交带 root 的 dict，任务节点跑一次 bash 就回报。"""
 
     def __init__(self, replies):
         self.replies, self.said = list(replies), []
@@ -46,8 +47,8 @@ class FakeLLM:
                 return Message(text="", tool_calls=[ToolCall(
                     name="bash", arguments={"command": "echo hi"})])
             return Message(text="", tool_calls=[ToolCall(
-                name="conclude", arguments={"verdict": "满足", "text": "跑完了",
-                                            "evidence": ["第1次观测"]})])
+                name="communicate",
+                arguments={"to": "parent", "text": "跑完了"})])
         spec = self.replies.pop(0) if self.replies else ""
         if isinstance(spec, dict) and "root" in spec:
             reply, calls = "", [ToolCall(name="submit_root",
@@ -94,38 +95,35 @@ def run_intake(llm, seed, answers):
 
 def root(**over):
     r = {"name": "做一个能赚钱的量化系统", "detail": "先拆再干", "notes": "",
-         "accept": "账户权益在2026-12-31收盘 >= 本金 x 2", "kind": "leaf",
-         "conc_range": [100, 500]}
+         "kind": "leaf", "conc_range": [100, 500]}
     r.update(over)
     return {"root": r}
 
 
 def main():
     print("=" * 80)
-    print("A. 谈定 → 打回 → 交出合规的任务 → 跑掉、结论回填")
+    print("A. 谈定 → 打回 → 交出合规的任务 → 跑掉、回报回填")
     talk = ("你说的「赚大钱」按哪个数字判定？\n"
             "我建议写成：账户权益在 2026-12-31 收盘 >= 本金 x 2")
-    llm = FakeLLM([root(accept="系统做好了"), talk, root()])
+    llm = FakeLLM([root(conc_range=[500, 100]), talk, root()])
     asked, said, events = run_intake(llm, "帮我做个能赚大钱的A股量化系统（我没说怎么算赚到）",
                                      ["2026-12-31 收盘前"])
     print("  问过用户: %r" % asked)
-    line("打了回去，并说了为什么", any("可测物理量" in s for s in said))
+    line("打了回去，并说了为什么", any("conc_range" in s for s in said))
     line("话原样送到用户面前（不添字、不包装、不压行）",
          bool(asked) and asked[0] == talk)
     line("用户的话进了下一轮上下文", any("2026-12-31 收盘前" in s for s in llm.said))
-    line("合规的任务真的被跑掉（结论回填进入口对话）",
-         any("下层结论" in str(s) and "满足" in str(s) for s in llm.said))
-    line("任务的可测物理量被识别出来",
-         bool(anchors(any_accept_from(asked))))
-    line("任务节点事件一路透传到 run（出生+出结论各一次，同一棵任务）",
-         len(events) == 2 and events[0] is events[1])
+    line("合规的任务真的被跑掉（任务的回报回到入口对话）",
+         any("来自「" in str(s) and "跑完了" in str(s) for s in llm.said))
+    line("任务节点事件一路透传到 run（出生 + 至少一轮结束，同一棵任务）",
+         len(events) >= 2 and all(e is events[0] for e in events))
 
     print("=" * 80)
     print("B. 形式不合规 → 打回；改一次就过")
-    llm = FakeLLM([root(accept="系统做好了"),   # 没有可测物理量
+    llm = FakeLLM([root(conc_range=[500, 100]),   # 区间写反
                    root()])
     said = run_intake(llm, "帮我赚大钱", [])[1]
-    line("打回时把原因摆出来了", any("用不了" in x and "可测物理量" in x for x in said))
+    line("打回时把原因摆出来了", any("用不了" in x and "conc_range" in x for x in said))
     line("打回走旁白，不占用户的话轮", not any("用不了" in x for x in
                                               [str(x) for x in llm.said[:1]]))
 
@@ -143,7 +141,7 @@ def main():
     asked, _, events = run_intake(llm, "帮我赚大钱", ["做系统"])
     line("② 不是 submit_root → 也当话（代码不认第二种形式）",
          asked and asked[0] == weird)
-    line("② 照样跑掉了一棵任务", len(events) == 2)
+    line("② 照样跑掉了一棵任务", len(events) >= 2)
 
     # ③ 完全不是 JSON
     llm = FakeLLM(["你好，我们聊聊这件事。", root()])
@@ -160,19 +158,17 @@ def main():
          "说了 %d 次" % sum("平台" in a for a in asked))
 
     print("=" * 80)
-    print("E. 闸门：缺字段 / 没有可测物理量 / 给根标了门槛，都当场说不（且说清是哪一条）")
+    print("E. 闸门：缺字段 / 形状不对，都当场说不（且说清是哪一条）")
     for spec, tag, want in (
-            (root(accept="系统做好了")["root"], "没有可测物理量", "可测物理量"),
-            (root(conc_range=[500, 100])["root"], "conc_range 形状不对", "conc_range"),
             (root(name="")["root"], "name 是空的", "缺必填项"),
             (root(kind="dispatch|leaf")["root"], "kind 写成示例里的两种之一", "kind"),
             (root(kind="")["root"], "kind 没填", "kind"),
-            (root(gate=True)["root"], "根标了门槛（根没有兄弟）", "门槛"),
-            (root(accept="")["root"], "accept 是空的", "缺必填项")):
-        out, why = validate_root(spec)
+            (root(conc_range=[500, 100])["root"], "conc_range 形状不对", "conc_range"),
+            (root(conc_range=[100])["root"], "conc_range 不是区间", "conc_range")):
+        out, why = clean_spec(spec)
         print("  %-22s → %s" % (tag, why))
-        line("拒绝: " + tag, out is None and want in (why or ""), why)
-    out, why = validate_root(root()["root"])
+        line("拒绝: " + tag, why is not None and want in (why or ""), why or "")
+    out, why = clean_spec(root()["root"])
     line("合规的根能过", out is not None and why is None)
 
     print("=" * 80)
@@ -206,23 +202,15 @@ def main():
     print("=" * 80)
     print("G. 空回车不算回答：不入账、不惊动模型、重新提问")
     llm = FakeLLM(["确认一下：模拟盘还是实盘？", root()])
-    asked, _, _ = run_intake(llm, "帮我做视频赚钱", ["", "   ", "对"])
+    asked, _, _ = run_intake(llm, "帮我赚大钱", ["", "   ", "实盘"])
     line("空回车/纯空白没被当成一轮（模型第二次收到的是真回答，不是空串）",
-         len(llm.said) >= 2 and llm.said[1] == "对", repr(llm.said[:2]))
+         len(llm.said) >= 2 and llm.said[1] == "实盘", repr(llm.said[:2]))
     line("空回车后同一句问题重新问，直到答上",
          len(asked) >= 3 and asked[0] == asked[1] == asked[2], repr(asked))
 
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")
     return 0 if all(OK) else 1
-
-
-def any_accept_from(asked):
-    """从问过的话里找一个像验收标准的串（测试断言用，不严谨）。"""
-    for a in asked:
-        if "2026-12-31" in str(a):
-            return str(a)
-    return ""
 
 
 if __name__ == "__main__":

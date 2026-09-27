@@ -14,20 +14,20 @@ An agent runtime that lives in the terminal. The task is **not** pre-orchestrate
 
 - A node spawns children with `create_children`; each child is its own independent conversation.
 - Each node's dialogue is flat and has its own ledger (`core/runtime/dialogue.py`).
-- The root converges with `submit_root`; ordinary nodes close with `conclude`.
+- Nodes talk through `communicate`: a parent asks / demands rework / re-tasks a child, a child reports progress and conclusions to the parent — task information settles hierarchically on each node, so no conversation ever bloats.
 - **There is exactly one control flow — a single Loop** (`core/runtime/loop.py`). It is the only thing that advances a tree.
 - A session = one tree + one append-only record (`core/runtime/store.py`). **Writing is the ledger.**
-- Acceptance **never trusts the model's self-report**: `core/protocol/gate.py` mechanically validates form fields and only checks things it can point at.
+- The verdict is not the code's to make: `core/protocol/gate.py` only validates field shape; whether something is done is judged by the parent (ultimately a human) from the messages.
 
 ## Three design decisions
 
 **1. The system prompt is not a built string — it is a named-section data structure.**
 
-`system = Record<section name, content>`: one same-named XML tag per section, and which sections are present is decided by static properties known at the node's **birth**, then frozen for its lifetime. Prose, discipline, conditional skills and the tool list are each a section (`core/prompts/`). The invariants live in `docs/PROMPTS.md`.
+`system = Record<section name, content>`: one same-named XML tag per section, and six sections are always present (no conditional sections under the communication model), frozen for a node's lifetime. Prose, discipline, the skill list and the tool list are each a section (`core/prompts/`). The invariants live in `docs/PROMPTS.md`.
 
 **2. The tool schema is the single source of tool semantics.**
 
-The `rules` section is derived from the tool list, the `tools` section is one line per tool (`core/prompts/tools.py`), and that list itself is derived from each tool's scope declaration. A tool is just an `@mcp.tool` function — schema and implementation in one place, with no second definition to keep in sync (`tools/defs.py`).
+The `rules` section is derived from the tool list, the `tools` section is one line per tool (`core/prompts/tools.py`), and that list itself is derived from each tool's scope declaration. A tool is just an `@mcp.tool` function — schema and implementation in one place, with no second definition to keep in sync (`tools/defs.py`). The verdict is not the code's to make: `communicate` only delivers the message; whether something is done is judged by whoever receives it (the parent, ultimately a human).
 
 **3. The bash tool does not fork/exec.**
 
@@ -44,7 +44,7 @@ core/
   events.py         event outlet: dispatch (type, payload) to consumers in registration order
   llm.py            LLM adapter: messages in, Message out (text + tool calls)
   prompts/          the named-section structure of system (prose / rules / skills / tools)
-  protocol/         form fields + mechanical gate + rendering node state into messages
+  protocol/         form fields + shape validation + rendering node state / communication messages
   runtime/          the single Loop + protocol ops + scheduling rules + session store
 tools/              the only channel between the model and the program
   defs.py           @mcp.tool functions: schema and implementation in one place

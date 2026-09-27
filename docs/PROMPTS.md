@@ -38,9 +38,9 @@ diffSystemPromptSections(previous, current)               // 按节 diff：只�
 2. **按节可测 / 按节可 diff**：哪节在、哪节不在、每节内容——独立断言；未来某节要
    动态化（如带当前回合信息），只重放该节，其余节不变（KV 缓存按节命中）。
 3. **rules 从工具推导**：工具清单决定操作纪律，不是手写死。
-4. **skills = 已激活的节**：树系统的 skill 触发条件是宿主已知的静态事实
-   （`node.gate`），宿主以"节"为单位注入 = 激活，模型不需要
-   "按需读文件"（那是给模型自主选 skill 的场景用的；树的触发者是宿主）。
+4. **skills = 清单节**：`<skills>` 只放已注册技能的 name + description（检索面），
+   全文按需经 `read_skill` 读 —— 树的触发者是宿主，但 skill 清单是静态扫描结果，
+   恒在、不按节点区分。
 
 ---
 
@@ -57,8 +57,9 @@ diffSystemPromptSections(previous, current)               // 按节 diff：只�
 schema 一份。MCP 协议对 `instructions` 明文禁止重复："Should not duplicate
 information already in tool descriptions"（`mcp_types/_types.py:601`）。
 
-**W3 · 无关内容常驻。** 每个叶子不管是否门槛，都背整段 gate 规则。
-pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事。
+**W3 · 无关内容常驻。** 重构前每个节点都背整段与自己无关的规则。
+pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事（沟通模型下没有条件节，
+六个节全部恒在 —— 但节结构让"将来有按节点区分的静态事实"时可以直接加条件节）。
 
 ---
 
@@ -73,8 +74,7 @@ pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事。
 | `tools` | 一行一个工具片段 + 何时用哪个（可一次调多个） | 恒在 | 代码生成（从作用域声明） |
 | `rules` | 操作纪律（推导）+ 协议规则（对应 gate.py） | 恒在 | 推导 + 手写 |
 | `skills` | 已注册技能清单（name + description 检索面，一行一个） | 恒在 | 代码生成（扫描 `SKILLS_DIRS`，`tools.skills.discovered()`） |
-| `input` | user 消息格式说明（7 键 / 意图链 / 观测历史） | 恒在 | 手写 prose |
-| `skill_gate` | 你是门槛：不成立整个分支作废、兄弟不启动 | `node.gate` | 手写 prose |
+| `input` | user 消息格式说明（5 键 / 意图链 / 观测历史） | 恒在 | 手写 prose |
 
 > 注：没有 pi 的 `skills` 元节之外的多余机制 —— 清单节只放 name + description
 > （检索面，对齐 oh-my-pi 的 skills 范式），正文按需经 `read_skill` 读
@@ -84,11 +84,8 @@ pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事。
 
 ### 3.2 每个节点类型的 system 组成（出生时定死，生命周期内不变）
 
-| 节点类型 | 恒在节 | 条件节 |
-|---|---|---|
-| `alloc` | preamble / process / tools / rules / skills / input | `skill_gate`（若 `node.gate`） |
-| `leaf` | preamble / process / tools / rules / skills / input | `skill_gate`（若 `node.gate`） |
-| `intake` | preamble / process / tools / rules / skills / input | 无 |
+沟通模型下没有条件节：六个节对三种节点**全部恒在**（`communicate` 寻址由工具参数
+决定，不在 system 里区分）。
 
 ### 3.3 节渲染规则
 
@@ -109,33 +106,30 @@ pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事。
    三个工具各自注册、各自 schema description 承载签名 / 超时 / 语义，与其它工具完全同构。
 2. **`rules` 节 = 操作纪律（从工具推导）+ 协议规则（手写）**：
    - 推导部分：有 `bash`/`read`/`write` → 文件与命令操作走它们（pi 的
-     `buildRules` 同构）；有 `conclude` → "判定满足必须指得出证据"；有
-     `create_children` → "除 notes / gate 外必填、带父的可测物理量、最多一个门槛"……
+     `buildRules` 同构）；有 `communicate` → "to 只能是 parent 或孩子名、回报要
+     说清楚"；有 `create_children` → "除 notes 外必填"……
      **工具清单变 → 纪律跟着变**。
-   - 手写部分：协议级不变量（gate 语义、阻塞要说清 external），因
-     `gate.py` 变。一次回复可以调**多个**工具（并行执行）—— 那是协议允许的，
+   - 手写部分：协议级不变量（形状校验、寻址规则），因 `gate.py` 变。
+     一次回复可以调**多个**工具（并行执行）—— 那是协议允许的，
      不是"必须且只能调一个"。
    - 工具**内部行为**（bash 超时、read 的 offset/limit）归各工具 schema，
      rules 只放"何时用哪个"的决策纪律，不重复。
-3. **条件节的触发同源**：`node.gate`（Node 字段）一处。
-4. **gate 双语义区分**：`alloc` 的"一次最多一个门槛"是分配节点检查子任务的协议规则，
-   **常驻 alloc 的 `rules` 节**；"你是门槛"才抽进 `skill_gate` 条件节。根不给 gate
-   （根没有兄弟，`validate_root` 会拒）。
+3. **节组成恒定**：没有条件节 —— 六个节对三种节点全部恒在。
 
 ---
 
 ## 5. 不变量（改代码前看）
 
 1. **system = 命名分节 `Record<节名, 内容>`**，节名 = XML 标签名，节名通过正则校验。
-2. **节组成 = f(节点出生时静态属性)**（kind / gate），节点生命周期内
+2. **节组成恒定**（六个节恒在，没有条件节），节点生命周期内
    不变 → system 字节稳定 → KV 缓存按前缀/按节命中。
 3. **工具语义唯一来源 = schema，无例外**（`bash`/`read`/`write` 是叶子的直接工具，
    各住各的 schema description）；**工具在哪些层**也只有一处（声明处的 `scope:<层>` 标签）。
 4. **rules 的操作纪律部分从工具清单推导**，不手写死；协议规则因 `gate.py` 变。
 5. **每节独立可测**：节在场性（哪节在/不在）+ 每节内容独立断言。
-6. **双向核对**：文档点名的节 == 真渲染的节 —— `test_protocol.py` I 段真读本文件
+6. **双向核对**：文档点名的节 == 真渲染的节 —— `test_protocol.py` F 段真读本文件
    （节名以反引号形式出现在这里）并在真渲染的 system 里核对。
-7. **节渲染顺序固定**（3.3），条件节触发同源（§4.3）。
+7. **节渲染顺序固定**（3.3）。
 
 ---
 
@@ -145,16 +139,16 @@ pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事。
 |---|---|
 | 节组装（`Record<节名,内容>` / `render_system` / `render_turn`） | `core/prompts/__init__.py` |
 | 散文节（preamble / process / input） | `core/prompts/prose.py`（每节一个函数，`lines` + join） |
-| 条件节（`skill_gate`）/ `skills` 清单节 | `core/prompts/skills.py`，在场规则在 `core/prompts/__init__.py` |
+| `skills` 清单节 | `core/prompts/skills.py` |
 | 通用 skill 加载（扫描 `SKILLS_DIRS` + read_skill 桥） | `tools/skills.py`；根目录 = `core/config.py` 的 `SKILLS_DIRS` |
 | `tools` 节（一行一个 + 何时用哪个） | `core/prompts/tools.py`，清单来自 `tools.specs.scope_names` |
 | `rules` 节（推导 + 手写） | `core/prompts/rules.py` |
-| 任务 / 下层结论消息（7 键、意图链） | `core/protocol/messages.py`，键清单 = `core/protocol/fields.FORM_FIELDS` |
+| 任务 / 沟通消息（5 键、意图链、来自标记） | `core/protocol/messages.py`，键清单 = `core/protocol/fields.FORM_FIELDS` |
 | 工具的作用域声明（哪层能调哪些） | 各工具定义处的 `tags={scope_tag(…)}`（`tools/defs.py` / `tools/bash.py`）；清单 = fastmcp 的可见性视图（`tools/specs.py` 的 `load` / `scope_names`） |
-| 硬性要求的机器检查（与 rules 对照） | `core/protocol/gate.py`（必填项 / 锚点继承 / 门槛 / 证据降级 / 根校验） |
+| 硬性要求的机器检查（与 rules 对照） | `core/protocol/gate.py`（必填项 / 区间形状） |
 | 词表与形式字段 | `core/protocol/fields.py` |
 
-守住这份设计的断言全在 `tests/test_protocol.py`（I 段同构 + 文档 ↔ 节名、K2 节在场性与
+守住这份设计的断言全在 `tests/test_protocol.py`（F 段同构 + 文档 ↔ 节名、K2 节在场性与
 字节稳定、M 段作用域声明与注册表一致）；改设计与改代码，两边要同时绿。
 
 ---
@@ -163,9 +157,10 @@ pi 的做法是条件拼接片段；本设计按"节在场性"做同样的事。
 
 - **user 消息不加 XML 定界**：任务的形状是"行首是字段名"的平铺文本（`base_user`），
   与模型写出去的键同构，不套一层 `<task>`。
-- **模型按需读 skill 文件**（Claude Code 的"取 skill"工具）：树的触发条件是宿主已知
-  的静态事实，宿主以节为单位注入 = 激活，模型不需要判断——引入取回工具是过度设计。
+- **模型按需读 skill 文件**（Claude Code 的"取 skill"工具）：树把 skill 清单恒在注入，
+  模型按需 `read_skill` 读全文即可，宿主不需要额外机制判断"哪个 skill 激活"。
 - **按节 diff / 增量重放**：pi 用它是为会话恢复时省 token；树的 system 在节点生命周期
   内不变，没有动态节，diff 机制不引入（节结构天然支持，需要时再加）。
 - **prompt 版本管理平台 / agent 框架**：无需求，不引入。
-- **skill 再多切**：只有 `gate` 一个真条件节，其余全部恒在。
+- **条件节**：沟通模型下没有按节点区分的节，六个节全部恒在 —— 等真有
+  按节点区分的静态事实出现，再引入"条件节"这个概念。

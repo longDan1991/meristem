@@ -1,15 +1,13 @@
 """散文节：每个节点类型的 preamble / process / input。
 
-每节一个函数，`lines` 一行一条 append 后 `join("\n")`（和 pi 的 system-prompt.ts 同拼法）；
-`prose(which, name)` 是唯一出口，组装逻辑在 `prompts/__init__.py`。
+任务信息分层次沉淀在树节点上：节点只在自己的对话里看到"任务 + 来往消息"，
+父节点的长篇上下文不会灌进来 —— 注意力不随总工作量漂移，代价由沟通的消息承担。
 """
 
 from ..protocol.fields import ALLOC, FORM_FIELDS, INTAKE, LEAF
 
-# 形式字段清单的唯一源 = 协议层的 FORM_FIELDS；intake 不给 gate（根没有兄弟 —— 
-# `validate_root` 也会拒它）。
+# 形式字段清单的唯一源 = 协议层的 FORM_FIELDS。
 _FIELDS = " / ".join(FORM_FIELDS)
-_FIELDS_INTAKE = " / ".join(k for k in FORM_FIELDS if k != "gate")
 # alloc / leaf 的 input 段只有第一句不同，字段说明从这句起逐字相同。
 _FIELDS_WHAT = "下面这些字段名，值就是上层填的、或程序查出来的："
 
@@ -27,15 +25,18 @@ def _fields_tail():
 
 def _alloc_preamble():
     lines = []
-    lines.append("你的使命是：给上层意图一个结论。")
+    lines.append("你的使命是：把上层交给你的任务做完，向父节点回报结果。")
     return "\n".join(lines)
 
 
 def _alloc_process():
     lines = []
-    lines.append("为了达成使命，你要做的事有两个步骤：")
-    lines.append("  . 把任务拆分成多个更小的任务交给下层节点。")
-    lines.append("  . 查看所有下层节点的结论，判断是否要再拆分任务还是直接返回结论。")
+    lines.append("为了达成使命，你要做的事：")
+    lines.append("  . 把任务拆分成多个更小的任务交给下层节点（create_children）。")
+    lines.append("  . 孩子会以**消息**回报进展与结论（每条都标明来源）；"
+                 "看完回报，判断下一步：再拆 / 追问某个孩子 / 向父节点回报。")
+    lines.append("  . 所有孩子都回报完、你也满意了，就 communicate 给父节点回报结论；"
+                 "不满意就 communicate 回去要求重做、追问、补充说明。")
     return "\n".join(lines)
 
 
@@ -44,24 +45,27 @@ def _alloc_input():
     lines.append("你收到的 user 消息会有任务信息，其结构和你将要拆分的任务是同构的 —— 行首就是")
     lines.append(_FIELDS_WHAT)
     lines.extend(_fields_tail())
-    lines.append("  本层已有尝试: 你每一次 create_children 拆了什么、下层回了什么结论 ——")
-    lines.append("    已经试过的拆法都在这，别重复拆同一套。")
+    lines.append("  来往消息: 你收到标着「来自」的消息 —— 那是孩子（或父节点）发给你的，")
+    lines.append("    照常理解、用 communicate 回。你的每一次 create_children 拆了什么，")
+    lines.append("    也都在这里，别重复拆同一套。")
     return "\n".join(lines)
 
 
 def _leaf_preamble():
     lines = []
     lines.append("你是一个叶子。你的使命是：把上层拆给你的这件事亲手做完，"
-                 "并交出指得到真东西的结论。")
+                 "并向父节点回报结果。")
     return "\n".join(lines)
 
 
 def _leaf_process():
     lines = []
-    lines.append("为了达成使命，你要做的事有两个步骤：")
+    lines.append("为了达成使命，你要做的事：")
     lines.append("  . 动手做：用 bash / read / write / read_skill 亲手把这件事做完"
                  "（可以一次调多个、并行执行，次数不限）。")
-    lines.append("  . 看世界真实的回话，判断下一步做什么，还是已经可以出结论。")
+    lines.append("  . 看世界真实的回话，判断下一步做什么。")
+    lines.append("  . 做完或做不了：communicate 给父节点回报（结论 / 卡在哪，都要说清楚）。"
+                 "父节点可能发消息追问、要求重做 —— 那也是你的任务，接着处理。")
     return "\n".join(lines)
 
 
@@ -96,6 +100,10 @@ def _intake_process():
                  "附加任务的形式化结构大多数时候是你自己生成的。")
     lines.append("")
     lines.append("2) 谈拢了，调 **submit_root** 交形式（**用户已经确认过这个预期**）。")
+    lines.append("")
+    lines.append("任务跑起来之后，你会收到任务根节点发来的**消息**（进展 / 结论）——"
+                 "把它讲给用户，或按要求 communicate 回去（追问 / 要求重做），"
+                 "或再开下一个任务。")
     return "\n".join(lines)
 
 
@@ -105,7 +113,7 @@ def _intake_input():
                  "之后每一轮都是用户对你的回复。")
     lines.append("它不是形式字段 —— 你交出去的形式（submit_root 的 root）"
                  "和分配节点给孩子的结构**完全一样**：")
-    lines.append("  %s，字段的含义见工具签名。" % _FIELDS_INTAKE)
+    lines.append("  %s，字段的含义见工具签名。" % _FIELDS)
     return "\n".join(lines)
 
 

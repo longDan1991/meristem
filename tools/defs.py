@@ -2,9 +2,9 @@
 
 每个工具在声明处用 fastmcp 的 `tags` 说自己属于哪些作用域（`scope_tag(...)` 给的是
 `scope:<层>` 标签，清单由 `tools.specs` 让库的可见性过滤算出来）—— 本文不再另列一份工具清单。
-`action` 标签的是动手工具（证据审计里的"观测"）。
+`action` 标签的是动手工具（规则节说"操作走它们"时认的清单）。
 
-结构类工具（create_children / conclude / submit_root）的语义住 `core/runtime/ops.py`
+结构类工具（create_children / communicate / submit_root）的语义住 `core/runtime/ops.py`
 （协议操作层，与 gate.py 同一变因），这里只留注册壳与参数适配；read / write 的实现在
 本文，bash 独立在 `tools/bash.py`（schema 照抄 oh-my-pi），import 即注册。
 共享的工具现场（ContextVar / 记 trace）在 `tools/context.py`；每次调用由 Loop 用
@@ -24,7 +24,7 @@ from core.runtime import ops
 from tools import bash as _bash  # noqa: F401  # import 即把 bash 工具注册进 mcp（实现在 tools/bash.py）
 from tools import skills as _skills  # noqa: F401  # import 即挂载 SkillProvider + 注册 read_skill（实现在 tools/skills.py）
 from tools.context import _action_result, _binding, _current, get_binding
-from tools.specs import ACTION_TAG, ChildSpec, action_names, mcp, scope_tag
+from tools.specs import ACTION_TAG, ChildSpec, mcp, scope_tag
 
 READ_CAP = 2000
 
@@ -35,30 +35,29 @@ async def create_children(children: list[ChildSpec],
                           _b=Depends(get_binding)) -> dict:
     """把任务拆成更小的子任务交给下层节点（调它 = 再拆一层）。
 
-    有门槛时只有门槛孩子拿到任务，其余对话为空 = 暂缓；成功不写 tool 回话。
+    所有孩子出生即开工；成功不写 tool 回话（父节点进入等待，孩子回报会把它唤醒）。
     """
     _loop, store, nid, _node = _current(_b)
     return {"text": ops.create_children(store, nid,
                                         [c.model_dump() for c in children])}
 
 
-@mcp.tool(tags={scope_tag(ALLOC), scope_tag(LEAF)})
-async def conclude(
-        verdict: Annotated[str, feedback.VERDICT_HINT],
-        text: Annotated[str, "结论正文，落在上层给的 conc_range 区间里。"],
-        evidence: Annotated[list[str] | None,
-                            "判定「满足」时必填：第几次观测 / 产物路径 / 子任务 name。"] = None,
-        external: Annotated[str, "判定「阻塞」时：" + feedback.EXTERNAL_HINT + "。"] = "",
+@mcp.tool(tags={scope_tag(ALLOC), scope_tag(LEAF), scope_tag(INTAKE)})
+async def communicate(
+        to: Annotated[str, '"parent"（父节点）或你一个孩子的 name（create_children 给过的原样名字）。'],
+        text: Annotated[str, "要说的内容：孩子向父回报进展/结论、父向子追问/要求重做/"
+                             "再下任务/强调，都用它。消息进对方的对话，对方会醒来处理。"],
+        conc_range: Annotated[list[int] | None,
+                              "对对方回复的字数建议区间，如 [100,500]。"] = None,
         _b=Depends(get_binding)) -> dict:
-    """出结论：判定这件事做没做完。判定「满足」必须指得出真证据。"""
+    """沟通：把一条消息发给父节点或某个孩子。判定权在收消息的一方，代码只负责投递。"""
     _loop, store, nid, _node = _current(_b)
-    return {"text": ops.conclude(store, nid, verdict, text, evidence or [],
-                                 external, action_tools=action_names())}
+    return {"text": ops.communicate(store, nid, to, text, conc_range)}
 
 
 @mcp.tool(tags={scope_tag(INTAKE)})
 async def submit_root(root: ChildSpec, _b=Depends(get_binding)) -> dict:
-    """把谈成的任务交出去当场跑。返回后任务树开始长，跑完结论回到对话。"""
+    """把谈成的任务交出去当场跑。返回后任务树开始长，任务的回报以消息回到对话。"""
     loop, store, nid, _node = _current(_b)
     return {"text": ops.submit_root(loop, store, nid, root.model_dump())}
 
@@ -94,10 +93,10 @@ async def read(path: Annotated[str, "要读的文件路径（相对工作区）�
 
 @mcp.tool(tags={scope_tag(LEAF), ACTION_TAG})
 async def write(path: Annotated[str, "要写的文件路径（相对工作区）。写文件是产出 —— "
-                                    "结论里必须交代它。"],
+                                    "回报时必须逐个交代。"],
                 content: Annotated[str, "文件内容。"] = "",
                 _b=Depends(get_binding)) -> dict:
-    """写一个文件。写文件是产出，conclude 时必须逐个交代。"""
+    """写一个文件。写文件是产出，向父节点回报时必须逐个交代。"""
     _loop, store, nid, _node = _current(_b)
     try:
         with open(path, "w", encoding="utf-8") as f:

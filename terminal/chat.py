@@ -192,18 +192,14 @@ class _SessionApp(App):
         node = self.registry.get(self.selected)
         msgs = self.store.dialogue(self.selected).to_list() if node is not None else []
         self.query_one("#log", VerticalScroll).remove_children()
-        self._write_rows(render_stream(
-            msgs, intake=(self.selected == self.intake_id),
-            verdict=node.verdict if node is not None else "",
-            accept=node.accept if node is not None else "",
-            conclusion=node.conclusion if node is not None else ""))
+        self._write_rows(render_stream(msgs, intake=(self.selected == self.intake_id)))
         self._refresh_tail()
         self._refresh_tree()
         self._refresh_status()
 
     # ── 面板：树条带 / 状态条 / 尾巴 ──
     def _tree_rows(self):
-        return render_folded(self.root, self.registry, selected=self.selected,
+        return render_folded(self.root, self.store, selected=self.selected,
                              expanded=self.expanded)
 
     def _refresh_tree(self):
@@ -225,7 +221,9 @@ class _SessionApp(App):
         if len(sel) > 16:
             sel = sel[:15] + "…"
         parts = ["选中 %s" % sel]
-        parts.append("%d 运行中" % sum(1 for nd in self.registry.values() if not nd.verdict))
+        working = sum(1 for nid, n in self.registry.items()
+                      if n.kind != INTAKE and not self._resting(nid))
+        parts.append("%d 在动" % working)
         parts.append("%d 节点" % len(self.registry))
         parts.append("%ds" % int(time.monotonic() - self.t0))
         if self.tokens:
@@ -235,6 +233,10 @@ class _SessionApp(App):
         # 退出的路要一直看得见：Ctrl-Q / Ctrl-C 任何时候都通 —— 状态条是唯一常显的地方。
         parts.append("Ctrl-Q/C 收手")
         return " · ".join(parts)
+
+    def _resting(self, nid):
+        msgs = self.store.dialogue(nid).to_list()
+        return bool(msgs) and msgs[-1].get("role") == "assistant"
 
     def _refresh_status(self):
         self.query_one("#status", Static).update(self._status_text())
@@ -346,7 +348,7 @@ class _SessionApp(App):
             return
         area.load_text("")
         if self.store is None:                  # 还没谈定：第一条回车就是种子，树这就建起来
-            self._bind(Store.new(Node(name="会话", kind=INTAKE), seed=intake_seed(text)))
+            self._bind(Store.new(Node(name="会话", kind=INTAKE), seed=text))
             area.placeholder = INPUT_HINT
             self._start()
             return
@@ -402,7 +404,8 @@ class _SessionApp(App):
 
     def action_fold(self):
         node = self.registry.get(self.selected)
-        if node is not None and node.verdict:   # 在跑的节点永远展开，折叠只对已出结论的
+        # 在动的节点永远展开，折叠只对已休息（交出了消息）的
+        if node is not None and self._resting(self.selected):
             if self.selected in self.expanded:
                 self.expanded.discard(self.selected)
             else:
@@ -461,7 +464,6 @@ async def _run_plain(store, llm, *, banner=()):
         store = Store.new(Node(name="会话", kind=INTAKE), seed=intake_seed(task))
     out_line(_trace_row(store))
 
-    registry = store.registry
     spoke, thinking = [False], [False]
 
     async def ask(question):
@@ -488,7 +490,7 @@ async def _run_plain(store, llm, *, banner=()):
                 out(delta)
             return
         if type in ("loop_start", "loop_end"):
-            narrate("\n".join(t for _, t in render_folded(store.root, registry)))
+            narrate("\n".join(t for _, t in render_folded(store.root, store)))
 
     try:
         await run(store, llm, subscribe=on_sink, ask=ask, say=narrate)

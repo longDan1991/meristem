@@ -16,8 +16,6 @@ from fastmcp import FastMCP
 from fastmcp.utilities.json_schema import replace_refs
 from pydantic import BaseModel, Field
 
-from core.protocol.fields import ANCHOR_HINT
-
 # 工具都注册在同一个实例上（实现在 tools/defs.py 的 import 时注册）；进程内当定义表用，不跑 server
 mcp = FastMCP("tree")
 
@@ -88,7 +86,7 @@ def scope_names(which):
 
 
 def action_names():
-    """动手工具名（证据审计唯一认的"观测"来源）。"""
+    """动手工具名（bash/read/write/read_skill —— 规则节说"操作走它们"时的清单）。"""
     _require_loaded()
     return _actions
 
@@ -99,20 +97,11 @@ class ChildSpec(BaseModel):
     name: str = Field(description="≤20 字。这件事叫什么，你和孩子靠它互相指认。")
     detail: str = Field(description="≤240 字。孩子看不见你的脑子，只能看你写的字。")
     notes: str = Field(default="", description="可选，不限字数。其它字段放不下的判断依据。")
-    accept: str = Field(
-        description="验收标准 ≤140 字。必须原样带上你验收标准里的可测物理量"
-                    "（%s）——"
-                    "它是唯一能替你判定「做没做完」的东西，换成下游指标会被代码拒掉。"
-                    % ANCHOR_HINT)
     kind: str = Field(
         description="分工：dispatch = 还要继续拆；leaf = 派一个能亲手干活的叶子。"
                     "没有 execute 分支：「不拆」就是派一个叶子。")
-    gate: bool = Field(
-        default=False,
-        description="可选，一次最多一个。这件事不先做，其余全是白做 —— "
-                    "它第一个做，在它通过之前其余子任务一律不启动。")
     conc_range: list[int] = Field(
-        description="对孩子结论的字数建议区间，如 [100,500]。判断你想要的成果规模。")
+        description="对孩子回报的字数建议区间，如 [100,500]。判断你想要的成果规模。")
 
 
 def _plain(o):

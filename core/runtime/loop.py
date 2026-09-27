@@ -71,10 +71,6 @@ class Loop:
                             await self._cancel()
                             raise exc
                         self.active.add(nid)
-                        node = self.store.registry[nid]
-                        if node.verdict and nid in self.started:
-                            self.started.discard(nid)
-                            self.emit(nid, "loop_end", {"node": node})
                 elif not self.active:
                     break
         finally:
@@ -123,6 +119,9 @@ class Loop:
             return
         if assistant.tool_calls:
             self._fire(nid, self._tools(nid, which, assistant.tool_calls, ids))
+            return
+        # 纯文本回合（没有工具调用）：这一轮交出去了，节点进入等待
+        self.emit(nid, "loop_end", {"node": node})
 
     async def _ask(self, nid, text):
         """等入口回答；空/纯空白不算回答——不入账、不惊动模型，继续等同一句。"""
@@ -141,6 +140,7 @@ class Loop:
         for r in results:
             if isinstance(r, BaseException):
                 raise r
+        self.emit(nid, "loop_end", {"node": self.store.registry[nid]})
 
 
 async def run(store, llm, *, workers=cfg.WORKERS, subscribe=None, ask=None, say=None):
@@ -155,7 +155,7 @@ def _build_wire(loop, node, which):
     store = loop.store
     nid = node.id
     msgs = store.dialogue(nid).to_list()
-    return render_turn(which, node) + pair(msgs)
+    return render_turn(which) + pair(msgs)
 
 
 async def _one_tool(loop, nid, which, tc, call_id):

@@ -1,36 +1,18 @@
-"""闸门：形式字段上的机械校验，不采信自报，只核对指得到的东西。
+"""闸门：形式字段上的机械形状校验。
 
-代码只做四件事（都在形式字段上，不是计数器）：① 规范化字段（不切长度，kind 只能是
-dispatch / leaf）；② 子任务验收标准必须携带父/根的可测物理量，否则当场被拒；
-③ 一次最多一个门槛，不成立则其余子任务不启动；④ 判定"满足"却指不出证据就降级为"未满足"。
+只做两件事：子任务/任务根的必填项与形状（`clean_spec`）、`conc_range` 区间形状
+（`parse_range`）。代码不判内容、不判做没做完 —— 判定权在父节点（最终是人），
+代码只保证"形状合法，字段没被模型写坏"。
 
 提示词在 `core/prompts/`，改完要回来对一遍上面这几件事。
 """
 
-import os
-import re
-
 from . import feedback
-from .messages import result_marks
-from .fields import (ANCHOR_RE, EXTERNAL_CLASSES, KINDS, SATISFIED, UNSATISFIED,
-                     VERDICTS, norm)
-
-# "可测物理量"的定义（正则 + 措辞）住 `fields`，这里只做查询，不另抄一份。
-
-
-def anchors(text):
-    return set(ANCHOR_RE.findall(text or ""))
-
-
-def covers(anchor_set, text):
-    """`text` 是否命中给定锚点集；空集不构成约束（放行）。anchors / 继承校验共用。"""
-    if not anchor_set:
-        return True
-    return any(x in (text or "") for x in anchor_set)
+from .fields import KINDS, norm
 
 
 def parse_range(v):
-    """结论字数区间 [下限, 上限]；是上层对下层回复粒度的要求，不是字数警察。"""
+    """回报字数区间 [下限, 上限]；是上层对下层回复粒度的要求，不是字数警察。"""
     if not isinstance(v, (list, tuple)) or len(v) != 2:
         return None
     try:
@@ -45,19 +27,17 @@ def parse_range(v):
 def clean_spec(spec):
     """规范化一个子任务的形式字段，没有任何长度检查。
 
-    必填 name / detail / accept / kind / conc_range，选填 notes、gate；kind 写错当场拒、
+    必填 name / detail / kind / conc_range，选填 notes；kind 写错当场拒、
     不默认成 dispatch（兜底会把"没说清"变成既成事实）。
     """
     kind = norm(spec.get("kind"))
     out = {"name": norm(spec.get("name")),
            "detail": norm(spec.get("detail")),
            "notes": norm(spec.get("notes")),
-           "accept": norm(spec.get("accept")),
            "kind": kind,
-           "gate": bool(spec.get("gate")),
            "conc_range": parse_range(spec.get("conc_range"))}
     why = []
-    missing = [k for k in ("name", "detail", "accept") if not out[k]]
+    missing = [k for k in ("name", "detail") if not out[k]]
     if missing:
         why.append(feedback.missing_fields(missing))
     # kind 不默默兜底成 dispatch：写错不是非法值，是没填对
@@ -66,97 +46,3 @@ def clean_spec(spec):
     if not out["conc_range"]:
         why.append(feedback.bad_conc_range())
     return out, ("; ".join(why) or None)
-
-
-# 结论审计里的"观测"只指叶子亲手做的动作（bash/read/write）；分配节点的 tool 回话不算观测。
-# 哪些工具算动作由工具层声明（`tools.specs.action_names()`），调用方传进来 —— 协议层不认识工具层。
-def _obs_rounds(msgs, action_tools):
-    """一份对话里叶子动手过的轮数（观测序号从 1 数）。"""
-    n = 0
-    for m in msgs:
-        if m.get("role") != "assistant":
-            continue
-        for tc in m.get("tool_calls") or []:
-            if (tc.get("function") or {}).get("name") in action_tools:
-                n += 1
-                break
-    return n
-
-
-def evidence_ok(ev, msgs, action_tools):
-    """证据必须指得到真实存在的东西：某次观测、某个子节点、或磁盘上真有的产物。
-
-    这是代码替上层做的第一道复核（不加它，编一句"子任务A 的结论"就能过）。证据可能是
-    复合串（`第1次观测 / add.py`），拆开逐段看；分配节点自己没有观测，只能引子任务名或产物路径。
-
-    观测序号 = 对话里叶子动手过的轮数；子任务名 = 注入过的下层结论；都从 msgs 推导。
-    """
-    valid, bad = [], []
-    obs_idx = set(range(1, _obs_rounds(msgs, action_tools) + 1))
-    _, kids = result_marks(msgs)
-    for x in ev:
-        s = str(x).strip()
-        hit = False
-        for part in re.split(r"[/、,，;；|]+", s):
-            part = part.strip().strip("'\"` ")
-            if not part:
-                continue
-            if (obs_idx and "观测" in part
-                    and any(int(m) in obs_idx for m in re.findall(r"\d+", part))):
-                hit = True
-                break
-            if any(k and (k in part or part in k) for k in kids):
-                hit = True
-                break
-            if os.path.exists(part):
-                hit = True
-                break
-        (valid if hit else bad).append(s)
-    return valid, bad
-
-
-def clean_conclusion(concl, store, node, msgs, action_tools):
-    """判定必须是 满足|未满足|阻塞，判定"满足"得指得出真证据（观测 / 子任务 / 磁盘产物）。
-
-    返回 (结论, None) 或 (None, 打回理由)；msgs 是平铺对话，证据校验从这里推导；
-    `action_tools` 是算作"观测"的工具名（调用方从工具层拿，不许省 —— 省了观测就全不算数）。
-    """
-    verdict = norm(concl.get("verdict", ""))
-    content = norm(concl.get("text", ""))
-    ev = concl.get("evidence") or []
-    if isinstance(ev, str):
-        ev = [ev]
-    ev = [norm(x) for x in ev if str(x).strip()]
-    ext = concl.get("external") or []
-    if isinstance(ext, str):
-        ext = [ext]
-    ext = [x for x in (str(x).strip() for x in ext) if x in EXTERNAL_CLASSES]
-    if verdict not in VERDICTS:
-        return None, feedback.bad_verdict()
-
-    if verdict == SATISFIED:
-        valid, bad = evidence_ok(ev, msgs or [], action_tools)
-        if not valid:
-            store.record(node.id, "verdict_downgraded",
-                      {"was": SATISFIED, "reason": "证据指不到任何真实存在的东西",
-                       "evidence": bad})
-            return {"verdict": UNSATISFIED, "content": content +
-                    feedback.downgraded_suffix(),
-                    "evidence": [], "external": []}, None
-        if bad:
-            store.record(node.id, "evidence_trimmed", {"dropped": bad, "kept": valid})
-        ev = valid
-    return {"verdict": verdict, "content": content, "evidence": ev,
-            "external": ext}, None
-
-
-def validate_root(spec):
-    """根节点的闸门 = 分配节点的校验，加两条：gate 无意义（根没有兄弟）、accept 必须带可测物理量。"""
-    out, why = clean_spec(spec or {})
-    if why:
-        return None, why
-    if out["gate"]:
-        return None, feedback.root_has_gate()
-    if not anchors(out["accept"]):
-        return None, feedback.root_needs_anchor()
-    return out, None

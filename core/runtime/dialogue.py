@@ -65,11 +65,17 @@ class Dialogue:
 
 
 def pair(msgs):
-    """线上 wire 的配对规范化：给没有回话的 tool_call 补一条占位 tool 回话（账本一个字不改）。"""
+    """线上 wire 的配对规范化：给没有回话的 tool_call 补一条占位 tool 回话（账本一个字不改）。
+
+    同时剥掉账本私有键（`from`：沟通消息的来源标记，只有账本 / 终端用，
+    OpenAI 不认识它 —— 发射边界上删掉，不动账本）。
+    """
     answered = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
     out = []
     for m in msgs:
-        out.append(m)
+        wire = dict(m)
+        wire.pop("from", None)
+        out.append(wire)
         if m.get("role") == "assistant":
             for w in m.get("tool_calls") or []:
                 if w.get("id") not in answered:

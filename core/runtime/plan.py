@@ -1,7 +1,8 @@
 """纯规则：这个节点现在该不该跑；调度与恢复共用这一份。
 
-节点没有编排字段，`actionable` 只看两样已发生的事实：有没有出结论，最后一条是不是 assistant
-（"等孩子"就是"最后一条是 assistant"）。孩子怎么结算、门槛怎么续跑/作废是 conclude 的副作用。
+节点没有编排字段，`actionable` 只看一件已发生的事实：最后一条是不是 assistant
+（"发出了消息，等对方回应"就是"最后一条是 assistant"；结构类工具成功不写 tool
+回话，所以调完 communicate 的节点自然进入等待，对方的消息会把它唤醒）。
 """
 
 from ..protocol.fields import ALLOC, INTAKE, LEAF, Node
@@ -28,8 +29,8 @@ def make_child(parent, spec):
     lineage = [] if parent.kind == INTAKE else \
         parent.lineage + [[parent.name, parent.detail]]
     kid = Node(name=spec["name"], detail=spec["detail"],
-               notes=spec.get("notes") or "", accept=spec["accept"],
-               kind=spec["kind"], gate=bool(spec.get("gate")),
+               notes=spec.get("notes") or "",
+               kind=spec["kind"],
                conc_range=spec.get("conc_range") or [],
                parent=parent.id, depth=parent.depth + 1, lineage=lineage)
     parent.children.append(kid.id)

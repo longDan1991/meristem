@@ -197,7 +197,7 @@ def drive(store, llm, script, then, *, size=(100, 30), run_it=None):
 class FakeLLM:
     """按脚本回话，同时服务入口（字符串 = 说话、带 root 的 dict = submit_root）与任务节点。
 
-    任务节点动手一次就出满足结论；`slow` 时慢吐，给"看着它吐"的断言留时间。
+    任务节点动手一次就向入口回报；`slow` 时慢吐，给"看着它吐"的断言留时间。
     """
 
     def __init__(self, replies, reasoning="", slow=False, kids=1):
@@ -228,24 +228,21 @@ class FakeLLM:
                 return Message(text=reply, tool_calls=[ToolCall(
                     name="bash", arguments={"command": "echo hi"})])
             return Message(text="", tool_calls=[ToolCall(
-                name="conclude", arguments={"verdict": "满足", "text": "跑完了",
-                                            "evidence": ["第1次观测"]})])
+                name="communicate", arguments={"to": "parent", "text": "跑完了"})])
         kids_names = ["子任务%s" % c for c in "ABC"][:self.kids]
-        have_result = any("下层结论" in str(m.get("content", "")) for m in messages)
+        have_result = any("来自「" in str(m.get("content", "")) for m in messages)
         if not self._spawned:
             self._spawned = True
             return Message(text="", tool_calls=[ToolCall(
                 name="create_children", arguments={"children": [
                     {"name": n, "detail": "d", "notes": "",
-                     "accept": "2026-12-31 收盘 >= 1（%s 负责）" % n,
-                     "kind": "leaf", "gate": False, "conc_range": [1, 10]}
+                     "kind": "leaf", "conc_range": [1, 10]}
                     for n in kids_names]})])
         if not have_result:
             return Message(text="", tool_calls=[ToolCall(
-                name="conclude", arguments={"verdict": "满足", "text": "先等孩子回来"})])
+                name="communicate", arguments={"to": "parent", "text": "先等孩子回来"})])
         return Message(text="", tool_calls=[ToolCall(
-            name="conclude", arguments={"verdict": "满足", "text": "全部完成",
-                                        "evidence": [kids_names[0]]})])
+            name="communicate", arguments={"to": "parent", "text": "全部完成"})])
 
     async def chat(self, messages, temperature=0.2, on_delta=None, on_reasoning=None,
                    tools=None):
@@ -306,25 +303,29 @@ def _subseq(needle, hay):
 
 
 def q_store():
-    """Q 段专用树：1 入口 + 2 叶子（甲满足/乙未满足），叶子带各自的短对话。"""
+    """Q 段专用树：1 入口 + 2 叶子（甲已休息、乙还在动手），叶子带各自的短对话。"""
     d = tempfile.mkdtemp()
     store_mod.init(d)
     st = store_mod.Store.new(Node(name="会话", kind=INTAKE), seed="帮我赚大钱")
     for i, name in enumerate(["甲", "乙"]):
-        nd = Node(name=name, kind=LEAF, parent=st.root.id,
-                  accept="a", conc_range=[1, 2])
-        nd.verdict, nd.conclusion = ("满足" if i == 0 else "未满足", "干完" + name)
+        nd = Node(name=name, kind=LEAF, parent=st.root.id, conc_range=[1, 2])
         st.put([nd])
         st.root.children.append(nd.id)
         st.append_user(nd.id, "输入给" + name)
-        st.append_assistant(nd.id, "给%s的回复。" % name, [])
+        if i == 0:
+            st.append_assistant(nd.id, "给%s的回复。" % name, [])       # 休息：✓
+        else:
+            # 乙还在动手：assistant 带了 bash 调用、工具结果也回来了 → 最后一条是 tool
+            cid = st.append_assistant(nd.id, "给%s的回复。" % name,
+                                      [ToolCall(name="bash",
+                                                arguments={"command": "echo 乙"})])[0]
+            st.append_tool(nd.id, cid, "乙的输出")
     return st
 
 
 def root(**over):
     r = {"name": "做一个能赚钱的量化系统", "detail": "先拆再干", "notes": "",
-         "accept": "账户权益在2026-12-31收盘 >= 本金 x 2", "kind": "leaf",
-         "conc_range": [100, 500]}
+         "kind": "leaf", "conc_range": [100, 500]}
     r.update(over)
     return {"root": r}
 
@@ -342,7 +343,7 @@ class _EventLLM:
     """回话 + 每次调用都带 usage：工具与用量事件都能发出来。
 
     入口按脚本说话 / 交 root（交完就说话 → 触发 ask → 测试收手）；
-    任务节点跑一次 bash 就 conclude。
+    任务节点跑一次 bash 就向入口回报。
     """
 
     def __init__(self, replies, usage):
@@ -362,8 +363,8 @@ class _EventLLM:
             return Message(text="", tool_calls=[ToolCall(
                 name="bash", arguments={"command": "echo hi"})], usage=self.usage)
         return Message(text="", tool_calls=[ToolCall(
-            name="conclude", arguments={"verdict": "满足", "text": "跑完了",
-                                        "evidence": ["第1次观测"]})], usage=self.usage)
+            name="communicate", arguments={"to": "parent", "text": "跑完了"})],
+            usage=self.usage)
 
 
 def run_events(seed="帮我赚大钱"):
@@ -478,11 +479,11 @@ def main():
     print("=" * 80)
     print("E. 旁白（打回理由）显示到终端；交形式不吐")
     env = _env("帮我赚大钱")
-    llm = FakeLLM([root(accept="系统做好了"), root()])
+    llm = FakeLLM([root(conc_range=[500, 100]), root()])
     got = drive(env["store"], llm, [chars("开始"), press("enter"), wait(4.0)],
                 screen_text)
     print("  屏上：\n%s" % "\n".join("    " + x for x in got.splitlines() if x.strip()))
-    line("打回理由走了旁白通道", "可测物理量" in got)
+    line("打回理由走了旁白通道", "conc_range" in got)
     line("交形式只走工具那一行（说话里不重复吐）",
          got.count('{"root"') == got.count("工具: submit_root(") > 0, got[:120])
     line("打回后照样把改好的任务跑了（✓ 标记）",
@@ -572,11 +573,10 @@ def main():
     line("入口的对话在日志区", "你: 开始" in intake_screen)
     line("树条带带着任务行", "[叶子] 做一个能赚钱的量化系统" in intake_screen)
     line("入口的工具过程写进了它的日志区", "工具结束: submit_root" in intake_screen)
-    line("切到任务节点：它的工具过程与结论在它的频道里",
-         "工具: bash(" in got and "工具: conclude(" in got and "→ 跑完了" in got,
-         got[-160:])
-    line("状态条在（选中/运行中/节点）",
-         "选中" in got and "运行中" in got and "节点" in got)
+    line("切到任务节点：它的工具过程与回报在它的频道里",
+         "工具: bash(" in got and "工具: communicate(" in got, got[-160:])
+    line("状态条在（选中/在动/节点）",
+         "选中" in got and "在动" in got and "节点" in got)
     line("输入行常驻（空着也看得见提示）",
          "回车发送" in got, got.splitlines()[-1:])
 
@@ -669,20 +669,21 @@ def main():
     first = next((s for s in shots if all(x in s for x in names)), "")
     line("三个孩子都在各自的节点行上（不是只显示一个）", bool(first))
     no_ws = re.sub(r"[^\S\n]+", "", first)
-    line("孩子都在跑（· 标记，运行中不折叠）",
-         all(("·[叶子]" + x) in no_ws for x in names), first.replace("\n", " / "))
+    line("三个孩子都挂在树上（并行地图）",
+         all(("[叶子]" + x) in no_ws for x in names), first.replace("\n", " / "))
     line("分配根在条带上", "[分配] 做一个能赚钱的量化系统" in got)
 
     print("=" * 80)
     print("M. 折叠渲染的缩进：非最后一个孩子画 ├─、最后一个收尾（is_last 决定）")
-    top = Node(name="会话", kind="intake")
-    kid_a = Node(name="甲", kind="dispatch", parent=top.id, depth=1,
-                 accept="A 2026-12-31", verdict="满足")
-    kid_b = Node(name="乙", kind="leaf", parent=top.id, depth=1,
-                 accept="B 2026-12-31")
+    d_m = tempfile.mkdtemp()
+    store_mod.init(d_m)
+    st_m = store_mod.Store.new(Node(name="会话", kind="intake"), seed="s")
+    top = st_m.root
+    kid_a = Node(name="甲", kind="dispatch", parent=top.id, depth=1)
+    kid_b = Node(name="乙", kind="leaf", parent=top.id, depth=1)
     top.children = [kid_a.id, kid_b.id]
-    reg = {n.id: n for n in (top, kid_a, kid_b)}
-    texts = [t for _, t in render_folded(top, reg)]
+    st_m.put([kid_a, kid_b])
+    texts = [t for _, t in render_folded(top, st_m)]
     line("根在最前、没有前缀", texts[0].startswith("└─ "), texts[0])
     line("非最后一个孩子画 ├─", texts[1].startswith("   ├─ "), texts[1])
     line("最后一个孩子画 └─", texts[2].startswith("   └─ "), texts[2])
@@ -714,33 +715,43 @@ def main():
          "%d 次" % len(usages))
 
     print("=" * 80)
-    print("O. 折叠渲染：跑完的子树折一行带统计，活跃路径展开")
-    top = Node(name="会话", kind="intake")
-    a = Node(name="甲", kind="dispatch", parent=top.id, depth=1,
-             accept="A 2026-12-31", verdict="满足")
-    b = Node(name="乙", kind="leaf", parent=top.id, depth=1,
-             accept="B 2026-12-31")
-    a1 = Node(name="甲1", kind="leaf", parent=a.id, depth=2,
-              accept="A1 2026-12-31", verdict="满足")
-    a2 = Node(name="甲2", kind="leaf", parent=a.id, depth=2,
-              accept="A2 2026-12-31", verdict="未满足")
+    print("O. 折叠渲染：休息的子树折一行带统计，活跃路径展开")
+    d_o = tempfile.mkdtemp()
+    store_mod.init(d_o)
+    st_o = store_mod.Store.new(Node(name="会话", kind="intake"), seed="s")
+    top = st_o.root
+    a = Node(name="甲", kind="dispatch", parent=top.id, depth=1)
+    b = Node(name="乙", kind="leaf", parent=top.id, depth=1)
+    a1 = Node(name="甲1", kind="leaf", parent=a.id, depth=2)
+    a2 = Node(name="甲2", kind="leaf", parent=a.id, depth=2)
     top.children = [a.id, b.id]
     a.children = [a1.id, a2.id]
-    reg = {n.id: n for n in (top, a, b, a1, a2)}
-    rows = render_folded(top, reg)
+    st_o.put([a, b, a1, a2])
+    # 甲 拆完休息（create_children 结构调用），甲1/甲2 干完休息，乙 还在动手（最后一条是 tool）
+    st_o.append_user(a.id, "name: 甲")
+    st_o.append_assistant(a.id, None, [ToolCall(name="create_children",
+                                                arguments={"children": []})])
+    for k in (a1, a2):
+        st_o.append_user(k.id, "name: " + k.name)
+        st_o.append_assistant(k.id, "干完了", [])
+    st_o.append_user(b.id, "name: 乙")
+    cid_b = st_o.append_assistant(b.id, "还在干", [ToolCall(name="bash",
+                                                            arguments={"command": "x"})])[0]
+    st_o.append_tool(b.id, cid_b, "x")
+    rows = render_folded(top, st_o)
     texts = [t for _, t in rows]
-    line("跑完的子树折成一行带节点数",
+    line("休息的子树折成一行带节点数",
          any("[分配] 甲 (2 节点)" in t for t in texts), str(texts))
-    line("运行中的节点展开可见", any("· [叶子] 乙" in t for t in texts), str(texts))
+    line("还在动手的节点展开可见", any("· [叶子] 乙" in t for t in texts), str(texts))
     line("入口根不折、孩子不画进来", any("[入口] 会话" in t for t in texts)
          and not any("甲1" in t for t in texts), str(texts))
-    rows2 = render_folded(top, reg, selected=a2.id)
+    rows2 = render_folded(top, st_o, selected=a2.id)
     texts2 = [t for _, t in rows2]
     line("选中折叠子树里的节点 → 路径展开",
          any("[叶子] 甲1" in t for t in texts2) and any("[叶子] 甲2" in t for t in texts2),
          str(texts2))
     line("展开后孩子行带竖线前缀", any("   ├─ " in t for t in texts2), str(texts2))
-    rows3 = render_folded(top, reg, expanded={a.id})
+    rows3 = render_folded(top, st_o, expanded={a.id})
     texts3 = [t for _, t in rows3]
     line("显式展开压过自动折叠", any("[叶子] 甲1" in t for t in texts3), str(texts3))
 
@@ -768,11 +779,11 @@ def main():
     rows = render_stream([{"role": "assistant", "content": "好", "reasoning": "想想"}])
     line("已提交的思考画成历史行（随消息，不只在尾巴里）",
          any(isinstance(r, Static) and r.content == "思考: 想想" for r in rows))
-    rows = render_stream(msgs, intake=True, verdict="满足", accept="产出 clean.csv",
-                         conclusion="全部完成")
-    line("判定行 = 绿字（类名 verdict-ok）",
-         any(isinstance(r, Static) and r.content == "[满足] 产出 clean.csv"
-             and "verdict-ok" in r.classes for r in rows))
+    rows = render_stream([{"role": "user", "content": "来自「甲」的消息：\n干完了", "from": "x"}],
+                         intake=True)
+    line("沟通消息不加「你:」前缀（正文自带来源标记）",
+         any(isinstance(r, Static) and r.content.startswith("来自「甲」")
+             for r in rows))
     think_tail = render_tail("think", "想…")
     line("思考尾巴 = 灰斜体（类名 tail-think，带 `思考: ` 前缀）",
          isinstance(think_tail, Static) and think_tail.content == "思考: 想…"
@@ -887,18 +898,18 @@ def main():
     got = drive(st, None, [press("down"), other_channel, press("down")], screen_text)
     line("切过去才看到它的实时尾巴", "乙在说" in got, got[-80:])
 
-    def conclude(_pilot, app):
-        nd = app.store.registry[app.store.root.children[1]]   # 乙 未满足 → 满足
-        nd.verdict = "满足"
-        app.on_sink("loop_end", {"scope": nd.id})
+    def settle(_pilot, app):
+        # 乙 还在动手（最后一条是 tool）→ 补一条 assistant 让它休息，loop_end 触发重画
+        app.store.append_assistant(app.store.root.children[1], "干完了", [])
+        app.on_sink("loop_end", {"scope": app.store.root.children[1]})
 
-    got = drive(st, None, [press("down"), press("down"), conclude], screen_text)
-    line("loop_end 后条带按新判定重画（✗ → ✓）",
-         "✓ [叶子] 乙" in got and "✗ [叶子] 乙" not in got, got.replace("\n", " | "))
+    got = drive(st, None, [press("down"), press("down"), settle], screen_text)
+    line("loop_end 后条带按休息状态重画（· → ✓）",
+         "✓ [叶子] 乙" in got and "· [叶子] 乙" not in got, got.replace("\n", " | "))
 
     got = drive(st, None, [press("down"), press("ctrl+f")],
                 lambda app: set(app.expanded))
-    line("Ctrl-F 只对已出结论的节点显式展开", got == {st.root.children[0]}, got)
+    line("Ctrl-F 只对已休息的节点显式展开", got == {st.root.children[0]}, got)
 
     got = drive(st, None, [chars("草稿"), press("ctrl+c")], lambda app: app.is_running)
     line("Ctrl-C 有字也收手（退路不看输入行里有什么）", got is False, got)

@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
 """会话可续跑的定向测试（零成本、确定性：脚本化模型 + 真 Loop + 真落盘）。
 
-核心不变量：一场会话 = 一棵树，入口节点是根；state 检查点只有 Node 全字段 + 平铺对话，
-崩溃后 `Store.load` 读回这棵树直接丢给 `runtime.loop.run`，该不该跑由 `plan.actionable` 从数据推导。
-
-  A. Node 序列化往返：node_to_dict → node_from_dict 不丢字段
-  B. load 返回一棵树；没根 / 多根当场报错
-  C. 续跑：跑到一半"崩溃" → load → resume → 跑完
-  D. 入口对话 = 根节点的 msgs（种子进根对话）
-  E. 整场会话崩溃 → load 一棵树 → resume → 全完工
-  F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果
-  G. 一场会话多个任务 = 一棵树多个孩子，只有没跑完的被接着跑
-  H. 增量检查点：第一笔全量、之后只带新增，load 按序拼回全量
-  I. 会话摘要（Store.roots）：当前格式认入口的孩子，档案（无入口）认根本身
-  J. 一场会话多个任务：摘要认最新谈成的那个任务
-  K. 记录读路径的病态输入：嵌入同形键的非 state 记录、紧凑分隔符写的 state
-  L. 同一秒里连开两场会话不撞进同一条记录
+沟通模型下"跑完/没跑完"没有 verdict，只有消息：发出 communicate 的节点最后一条是
+assistant（休息，等回应），收到消息的节点最后一条是 user（醒来）。崩溃恢复后
+`actionable` 用同一条判据，所以没说完的接着说完、说完的不被重跑 —— 这里守的就是这个。
 """
 
 import asyncio
@@ -33,10 +21,9 @@ from core.runtime.loop import run
 from core.runtime.store import Store
 
 
-def kid(name, accept="2026-12-31 收盘 >= 1", kind="leaf", gate=False):
-    return {"name": name, "detail": "d", "notes": "",
-            "accept": "%s（%s 负责）" % (accept, name), "kind": kind,
-            "gate": gate, "conc_range": [1, 10]}
+def kid(name, kind="leaf"):
+    return {"name": name, "detail": "d", "notes": "", "kind": kind,
+            "conc_range": [1, 10]}
 
 
 def state_rec(node, msgs):
@@ -83,27 +70,29 @@ class ScriptLLM:
         return Message(text="", tool_calls=[ToolCall(name=name, arguments=args)])
 
 
+def comm(name, text):
+    return ("communicate", {"to": "parent", "text": text})
+
+
 async def main():
     print("=" * 80)
     print("A. Node 序列化往返：node_to_dict → node_from_dict 不丢任何字段")
-    n = Node(name="任务", detail="详情", notes="注意", accept="2026-12-31 收盘 >= 1",
-             kind="leaf", gate=True, conc_range=[1, 2],
-             lineage=[["根", "根的详情"]])
-    n.verdict, n.conclusion = "满足", "做完了"
-    n.evidence, n.external = ["证据"], ["外部需求"]
+    n = Node(name="任务", detail="详情", notes="注意", kind="leaf",
+             conc_range=[1, 2], lineage=[["根", "根的详情"]])
     n2 = node_from_dict(node_to_dict(n))
-    line("字段原样回来", n2.name == n.name and n2.accept == n.accept
-         and n2.kind == n.kind and n2.gate == n.gate)
-    line("结构/结局都在", n2.lineage == n.lineage
-         and n2.verdict == "满足" and n2.conclusion == "做完了"
-         and n2.evidence == ["证据"])
+    line("字段原样回来", n2.name == n.name and n2.kind == n.kind
+         and n2.detail == n.detail and n2.notes == n.notes)
+    line("结构都在", n2.lineage == n.lineage and n2.conc_range == [1, 2])
+    line("旧档案的 accept/gate/verdict 键被丢（只认当前字段）",
+         not hasattr(node_from_dict({**node_to_dict(n), "accept": "x",
+                                     "verdict": "满足"}), "accept")
+         and not hasattr(node_from_dict({**node_to_dict(n), "gate": True}), "gate"))
 
     print("=" * 80)
     print("B. load 返回一棵树（入口为根）；没根 / 多根当场报错")
     d = tempfile.mkdtemp()
     intake = Node(name="会话", kind="intake")
-    leaf = Node(name="子A", accept="2026-12-31 收盘 >= 1（子A 负责）", kind="leaf",
-                parent=intake.id, depth=1)
+    leaf = Node(name="子A", kind="leaf", parent=intake.id, depth=1)
     intake.children = [leaf.id]
     t = load_tree(d, intake, [
         (intake.id, "state", state_rec(intake, [
@@ -127,8 +116,8 @@ async def main():
     except ValueError:
         line("空记录报错（没有 state 检查点）", True)
     d_multi = tempfile.mkdtemp()
-    r1 = Node(name="任务一", accept="2026-12-31 收盘 >= 1", kind="dispatch")
-    r2 = Node(name="任务二", accept="2026-12-31 收盘 >= 1", kind="dispatch")
+    r1 = Node(name="任务一", kind="dispatch")
+    r2 = Node(name="任务二", kind="dispatch")
     store_mod.init(d_multi)
     write_recs(os.path.join(d_multi, "runs", "t", "trace.jsonl"),
                [(r1.id, "state", state_rec(r1, [])),
@@ -140,10 +129,10 @@ async def main():
         line("多个根报错（不是入口为根的一棵树）", True)
 
     print("=" * 80)
-    print("C. 续跑：一棵树跑到一半崩溃 → load → resume → 跑完")
+    print("C. 续跑：一棵树跑到一半崩溃 → load → resume → 说完")
     d2 = tempfile.mkdtemp()
     store_mod.init(d2)
-    root2 = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
+    root2 = Node(name="根任务", kind="dispatch")
     try:
         await run(Store.new(root2), ScriptLLM([
             ("create_children", {"children": [kid("子A")]}),
@@ -159,16 +148,20 @@ async def main():
              and any(tc.get("function", {}).get("name") == "bash"
                      for tc in m["tool_calls"]) for m in msgs_of(t, cid)))
     await run(t, ScriptLLM([
-        ("conclude", {"verdict": "满足", "text": "子A做完了", "evidence": ["第1次观测"]}),
-        ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["子A"]})]))
-    line("没跑完的节点接着跑完了",
-         t.root.verdict == "满足" and t.root.conclusion == "全部完成")
+        comm("子A", "子A做完了"),
+        "全部完成"]))
+    line("子A的回报进了根的对话",
+         any("来自「子A」" in str(m.get("content", "")) for m in msgs_of(t, root2.id)))
+    line("根收到回报后把这一轮交出去了（休息）",
+         msgs_of(t, root2.id)[-1].get("role") == "assistant")
     line("孩子没被重跑（bash 工具调用只有一次）",
          sum(1 for m in msgs_of(t, cid)
              if m.get("role") == "assistant" and m.get("tool_calls")
              and any(tc.get("function", {}).get("name") == "bash"
                      for tc in m["tool_calls"])) == 1)
-    line("再次 load：root 判定在", Store.load(root2.id).root.verdict == "满足")
+    line("再次 load：回报还在对话里",
+         any("来自「子A」" in str(m.get("content", ""))
+             for m in msgs_of(Store.load(root2.id), root2.id)))
 
     print("=" * 80)
     print("D. 入口对话 = 根节点的 msgs（新会话的种子进根对话）")
@@ -215,18 +208,16 @@ async def main():
     line("任务挂成入口的孩子", len(task) == 1 and task[0].kind == "leaf")
     llm5 = ScriptLLM([
         ("bash", {"command": "echo hi"}),
-        ("conclude", {"verdict": "满足", "text": "任务X做完了",
-                      "evidence": ["第1次观测"]}),
+        comm("任务X", "任务X做完了"),
         "跑完了。"])
     try:
         await run(t, llm5, ask=lambda tx: (_ for _ in ()).throw(EOFError()))
     except EOFError:
         pass
     t2 = Store.load(intake4.id)
-    task2 = [n for n in t2.registry.values() if n.parent == t2.root.id][0]
-    line("二次 load：任务出结论", task2.verdict == "满足")
-    line("入口对话带着任务结论",
-         any("下层结论" in str(m.get("content", "")) for m in msgs_of(t2, t2.root.id)))
+    line("任务把回报发给了入口",
+         any("来自「任务X」" in str(m.get("content", ""))
+             for m in msgs_of(t2, t2.root.id)))
 
     print("=" * 80)
     print("F. 末行截断容错：崩溃写了一半的最后一行不埋掉成果")
@@ -248,8 +239,8 @@ async def main():
     llm6 = ScriptLLM([
         ("submit_root", {"root": kid("任务一", kind="dispatch")}),
         ("create_children", {"children": [kid("甲")]}),
-        ("conclude", {"verdict": "满足", "text": "甲好了", "evidence": ["e"]}),
-        ("conclude", {"verdict": "满足", "text": "任务一完成", "evidence": ["甲"]}),
+        comm("甲", "甲好了"),
+        comm("任务一", "任务一完成"),
         ("submit_root", {"root": kid("任务二", kind="leaf")}),
         RuntimeError("崩")])
     try:
@@ -262,12 +253,11 @@ async def main():
     line("两个任务都是入口的孩子", tasks == ["任务一", "任务二"])
     t1 = [n for n in t.registry.values() if n.name == "任务一"][0]
     t2 = [n for n in t.registry.values() if n.name == "任务二"][0]
-    line("跑完的任务一有判定，任务二没有",
-         t1.verdict == "满足" and not t2.verdict)
+    line("任务一回报过、任务二没有",
+         _sent_comm(msgs_of(t, t1.id)) and not _sent_comm(msgs_of(t, t2.id)))
     llm7 = ScriptLLM([
         ("bash", {"command": "echo 2"}),
-        ("conclude", {"verdict": "满足", "text": "任务二完成",
-                      "evidence": ["第1次观测"]}),
+        comm("任务二", "任务二完成"),
         "都跑完了。"])
     try:
         await run(t, llm7, ask=lambda tx: (_ for _ in ()).throw(EOFError()))
@@ -275,21 +265,21 @@ async def main():
         pass
     t_after = Store.load(intake6.id)
     t2_after = [n for n in t_after.registry.values() if n.name == "任务二"][0]
-    line("恢复后任务二接着跑完", t2_after.verdict == "满足")
+    line("恢复后任务二接着回报", _sent_comm(msgs_of(t_after, t2_after.id)))
     line("任务一没被动过",
-         [n for n in t_after.registry.values() if n.name == "任务一"][0].verdict
-         == "满足")
+         _sent_comm(msgs_of(t_after, t1.id))
+         and len(msgs_of(t_after, t1.id)) == len(msgs_of(t, t1.id)))
 
     print("=" * 80)
     print("H. 增量检查点：每节点第一笔全量、之后只带新增消息，load 按序拼回全量")
     d_h = tempfile.mkdtemp()
     store_mod.init(d_h)
-    root_h = Node(name="根任务", accept="2026-12-31 收盘 >= 1", kind="dispatch")
+    root_h = Node(name="根任务", kind="dispatch")
     llm_h = ScriptLLM([
         ("create_children", {"children": [kid("子A")]}),
         ("bash", {"command": "echo hi"}),
-        ("conclude", {"verdict": "满足", "text": "子A做完了", "evidence": ["第1次观测"]}),
-        ("conclude", {"verdict": "满足", "text": "全部完成", "evidence": ["子A"]})])
+        comm("子A", "子A做完了"),
+        "全部完成"])
     st_h = await run(Store.new(root_h), llm_h)
     events = {}
     for r in Store.iter_lines(st_h.path):
@@ -302,13 +292,15 @@ async def main():
          and "delta" not in ch[1]
          and [m["role"] for m in ch[1]["msgs"]] == ["user"]
          and ch[2].get("delta") and ch[2]["base"] == 1
-         and ch[3].get("delta") and ch[3]["base"] == 2)
+         and ch[3].get("delta") and ch[3]["base"] == 2
+         and ch[4].get("delta") and ch[4]["base"] == 3)
     t_h = Store.load(root_h.id)
     msgs_h = msgs_of(t_h, child_h)
-    line("H: load 拼回完整对话（任务 + asst/tool 配对、顺序不变）",
+    line("H: load 拼回完整对话（任务 + asst/tool 配对 + 沟通，顺序不变）",
          [m["role"] for m in msgs_h] == ["user", "assistant", "tool",
                                          "assistant"]
-         and msgs_h[1]["tool_calls"][0]["function"]["name"] == "bash")
+         and msgs_h[1]["tool_calls"][0]["function"]["name"] == "bash"
+         and msgs_h[3]["tool_calls"][0]["function"]["name"] == "communicate")
     line("H: 混着老格式全量检查点也能读（delta 字段缺省 = 全量）",
          _delta_and_legacy_mix_loads())
 
@@ -316,31 +308,37 @@ async def main():
     print("I. 会话摘要（Store.roots）：当前格式认入口的孩子，档案（无入口）认根本身")
     d_i = tempfile.mkdtemp()
     it_i = Node(name="会话", kind="intake")
-    leaf_i = Node(name="子A", accept="x", kind="leaf", parent=it_i.id, depth=1)
-    leaf_i.verdict, leaf_i.conclusion, leaf_i.evidence = "满足", "done", ["e"]
+    leaf_i = Node(name="子A", kind="leaf", parent=it_i.id, depth=1)
     it_i.children = [leaf_i.id]
+    leaf_msgs = [{"role": "assistant", "content": None,
+                  "tool_calls": [{"id": "1", "type": "function",
+                                  "function": {"name": "communicate",
+                                               "arguments": "{}"}}]}]
     load_tree(d_i, it_i, [(it_i.id, "state", state_rec(it_i, [])),
-                          (leaf_i.id, "state", state_rec(leaf_i, []))])
+                          (leaf_i.id, "state", state_rec(leaf_i, leaf_msgs))])
     lbl = _label_of(it_i.id)
-    line("当前格式：任务 = 入口的孩子", "子A" in lbl and "[满足]" in lbl)
+    line("当前格式：任务 = 入口的孩子，回报过 = 已回报",
+         "子A" in lbl and "[已回报]" in lbl, lbl)
     d_j = tempfile.mkdtemp()
-    root_j = Node(name="老任务", accept="x", kind="dispatch")
-    root_j.verdict, root_j.conclusion = "阻塞", "做不了"
+    root_j = Node(name="老任务", kind="dispatch")
     load_tree(d_j, root_j, [(root_j.id, "state", state_rec(root_j, []))])
     lbl2 = _label_of(root_j.id)
-    line("档案：没有入口，根本身就是任务", "老任务" in lbl2 and "[阻塞]" in lbl2)
+    line("档案：没有入口，根本身就是任务；没回报 = 运行中",
+         "老任务" in lbl2 and "[运行中]" in lbl2, lbl2)
 
     print("=" * 80)
     print("J. 一场会话多个任务：摘要认最新谈成的那个任务")
     d_m = tempfile.mkdtemp()
     it_m = Node(name="会话", kind="intake")
-    first = Node(name="第一个任务", accept="x", kind="dispatch", parent=it_m.id, depth=1)
-    first.verdict, first.conclusion = "满足", "done"
-    second = Node(name="第二个任务", accept="x", kind="dispatch", parent=it_m.id, depth=1)
-    second.verdict = ""
+    first = Node(name="第一个任务", kind="dispatch", parent=it_m.id, depth=1)
+    second = Node(name="第二个任务", kind="dispatch", parent=it_m.id, depth=1)
     it_m.children = [first.id, second.id]
+    first_msgs = [{"role": "assistant", "content": None,
+                   "tool_calls": [{"id": "1", "type": "function",
+                                   "function": {"name": "communicate",
+                                                "arguments": "{}"}}]}]
     load_tree(d_m, it_m, [(it_m.id, "state", state_rec(it_m, [])),
-                          (first.id, "state", state_rec(first, [])),
+                          (first.id, "state", state_rec(first, first_msgs)),
                           (second.id, "state", state_rec(second, []))])
     lbl_m = _label_of(it_m.id)
     line("认最新那个（第二个），不是第一个", "第二个任务" in lbl_m
@@ -359,6 +357,13 @@ async def main():
     print("=" * 80)
     print("全部通过" if all(OK) else "有失败项")
     return 0 if all(OK) else 1
+
+
+def _sent_comm(msgs):
+    return any(m.get("role") == "assistant" and m.get("tool_calls")
+               and any((tc.get("function") or {}).get("name") == "communicate"
+                       for tc in m["tool_calls"])
+               for m in msgs)
 
 
 class _FrozenSecond:
@@ -399,7 +404,7 @@ def _lookalike_records_are_ignored():
     """
     d = tempfile.mkdtemp()
     store_mod.init(d)
-    n = Node(name="真任务", kind="dispatch", accept="x")
+    n = Node(name="真任务", kind="dispatch")
     p = os.path.join(d, "runs", "t", "trace.jsonl")
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:

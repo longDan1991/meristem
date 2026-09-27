@@ -4,35 +4,19 @@
 之后 assistant / tool / user 逐条累积。`intake_seed(task)` 是入口根的第一条（用户原话 +
 "验收标准由你提"），也在出生时拼进 `msgs[0]`。
 
-`child_result(node)` 是把下层结论注入父对话的那一条（分配节点的观测）；
-文本带 `（id:…）` 标记，恢复时靠 `result_marks` 判断哪个孩子的结论已投递。
+`comm_content(...)` 是 communicate 消息的正文：来源 + 内容 + 可选的回复长度要求。
+消息进对方对话时带 `from` 键（发送者 id）—— 终端渲染与恢复靠它，发射时由
+`dialogue.pair()` 剥掉（OpenAI 不认识这个键，账本里才有）。
 
-变因：协议字段与消息格式 —— FORM_FIELDS 变了 / 注入格式改了，只动这里。
+变因：协议字段与消息格式 —— FORM_FIELDS 变了 / 消息格式改了，只动这里。
 """
 
 import json
-import re
 
 from .fields import FORM_FIELDS
 
-# child_result 注入文本里的孩子 id 标记（8 位 hex，和 Node.id 同源）
-_RESULT_ID = re.compile(r"（id:([0-9a-f]{6,16})）")
-# 下层结论行的开头（名字在「｜」之前）。
-_CHILD_NAME = re.compile(r"下层结论：([^｜]+)｜")
 # 空值的统一写法：字段渲染与 as_json 共用。
 EMPTY = "(无)"
-
-
-def result_marks(msgs):
-    """一份对话里已注入的下层结论：返回 (已投递的孩子 id 集合, 出现过的孩子名集合)。"""
-    ids, names = set(), set()
-    for m in msgs:
-        if m.get("role") != "user":
-            continue
-        text = str(m.get("content") or "")
-        ids |= set(_RESULT_ID.findall(text))
-        names |= set(_CHILD_NAME.findall(text))
-    return ids, names
 
 
 def as_json(v):
@@ -74,7 +58,7 @@ def lineage(node):
 def base_user(node):
     """模型每次收到的基础 user 消息（形式字段 + 意图链），出生后字节稳定，能命中 provider KV 缓存。
 
-    观测 / 尝试 / 下层结论不在基础里，它们走平铺对话。
+    观测 / 尝试 / 沟通消息不在基础里，它们走平铺对话。
     """
     return "%s%s" % (header(node), lineage(node))
 
@@ -86,11 +70,9 @@ def intake_seed(task):
             "那是你的活：从他的话里提一条具体的写法，让他点头或改一个数。" % task)
 
 
-def child_result(node):
-    """一个下层节点的结论注入父对话的那一条（分配节点的观测）；末尾带 `（id:…）` 标记供恢复时补齐。"""
-    line = "下层结论：%s｜%s｜%s" % (node.name, node.verdict, node.conclusion)
-    if node.evidence:
-        line += "（证据：%s）" % "; ".join(str(x) for x in node.evidence)
-    if node.external:
-        line += "（外部需求：%s）" % "、".join(str(x) for x in node.external)
-    return "%s（id:%s）" % (line, node.id)
+def comm_content(sender_name, text, conc_range=None):
+    """一条沟通消息的正文：来源 + 内容 + 可选的回复长度要求（进对方的对话）。"""
+    lines = ["来自「%s」的消息：" % (sender_name or "?"), str(text or "")]
+    if conc_range:
+        lines.append("（要求回复长度：%d-%d 字）" % tuple(conc_range))
+    return "\n".join(lines)

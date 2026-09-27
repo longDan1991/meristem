@@ -12,7 +12,7 @@ from tools import scope_names
 # 表必须覆盖每个作用域里的每个工具（测试核对），缺了 `tools_section` 当场报错。
 TOOL_GUIDE = {
     "create_children": "任务能再拆、自己不该硬做时",
-    "conclude": "做完了 / 判定做不了时",
+    "communicate": "要向父节点回报 / 追问孩子 / 要求重做 / 说清楚卡在哪时",
     "bash": "要改变世界（装包 / 起进程 / 跑脚本）时",
     "read_skill": "要读已注册 skill 的全文 / 子文件（清单节列出的技能）时",
     "read": "要看已有内容时",

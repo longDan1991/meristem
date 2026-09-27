@@ -3,20 +3,16 @@
 runtime / protocol / tools 只决定"发生了什么"，不自己拼给模型看的话；会写回对话的句子
 都在这里注册。（工具字段 description 是另一回事，住 `tools/specs.py`。）
 
-物理上住 protocol：它的变因是协议规则（判定词表、锚点、外部需求）与模型措辞，被
+物理上住 protocol：它的变因是协议规则（形状校验 / 沟通寻址）与模型措辞，被
 gate / runtime / tools 三层共同消费，是依赖图的底部词汇层 —— 谁都不许反向依赖它。
 """
 
-from .fields import ANCHOR_HINT, EXTERNAL_CLASSES, KINDS, VERDICTS
-
-# 词表拼出的提示文本：schema description / rules 节 / 拒绝理由共用同一份，别各自 join 一遍。
-EXTERNAL_HINT = " / ".join(EXTERNAL_CLASSES)
-VERDICT_HINT = " | ".join(VERDICTS)
+from .fields import KINDS
 
 
 def pair_placeholder():
-    """结构类工具（create_children / conclude / submit_root）没有 tool 回话，发模型前补的占位回话。"""
-    return "（已交给下层，结论随后以消息到达。）"
+    """结构类工具（create_children / communicate / submit_root）没有 tool 回话，发模型前补的占位回话。"""
+    return "（已发出，等对方回应。）"
 
 
 def bad_shape(err):
@@ -32,25 +28,16 @@ def tool_error(err):
 
 
 def empty_command():
-    return "command 是空的：要么写一条命令，要么用 conclude 出结论"
+    return "command 是空的：要么写一条命令，要么用 communicate 向父节点回报"
 
 
-def criterion_drift(missing):
-    return ("子任务的 accept 丢了可测物理量（缺 %s）—— 这是把任务换成了别的东西"
-            % ", ".join(sorted(missing)))
-
-
-def too_many_gates():
-    return "一次分配最多一个门槛"
+def bad_comm_to(to):
+    return ('communicate 的 to 必须是 "parent"（你的父节点）或你一个孩子的 name'
+            "（收到 %r —— 孩子名必须是 create_children 里给过的原样名字）。" % (to,))
 
 
 def bad_root(why):
     return "这样不行：" + why + " 改一次再给。"
-
-
-def gate_failed(conclusion):
-    """门槛不成立时，暂缓兄弟的结论文本（会随 child_result 进父节点对话）。"""
-    return "门槛不成立：%s" % conclusion
 
 
 # ---------------------------------------------------------------- gate 的拒绝理由
@@ -64,21 +51,3 @@ def bad_kind(kind):
 
 def bad_conc_range():
     return "conc_range 必须是 [下限, 上限] 两个正整数，如 [100,500]"
-
-
-def bad_verdict():
-    return "判定必须是 " + VERDICT_HINT
-
-
-def downgraded_suffix():
-    return "（原判「满足」但证据指不到真实的东西，已降级）"
-
-
-def root_has_gate():
-    return ("根没有兄弟：gate（门槛）说的是「它不成立，其余全不用做」，"
-            "这对根没有意义 —— 去掉它再交。")
-
-
-def root_needs_anchor():
-    return ("验收标准里必须有一个可测物理量（%s），否则这棵树判不了自己做没做完"
-            % ANCHOR_HINT)
