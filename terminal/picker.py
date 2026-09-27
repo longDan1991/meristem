@@ -4,6 +4,8 @@
 这里只把"用户挑了哪一个"还回去。
 """
 
+import sys
+
 from textual.app import App
 from textual.binding import Binding
 from textual.content import Content
@@ -48,6 +50,10 @@ class _PickerApp(App):
 async def pick_session(items, title=TITLE):
     """让用户挑一个会话；items = [(值, 显示行)]，回车返回选中值，取消返回 None。"""
     if not items:
+        return None
+    if not sys.stdin.isatty():
+        # stdin 不是真终端（管道 / 重定向）：Textual 输入驱动在 EOF 下不退出会
+        # 挂死（新版不抛 EOFError），没有屏幕可交互就等同取消，不进应用。
         return None
     try:
         index = await _PickerApp(items, title).run_async()
