@@ -18,6 +18,9 @@ dev = ["ruff"]
 
 [tool.uv]
 package = false
+# 启动提速：sync 时预编译全部字节码，openai/fastmcp 的几百个模块首次 import
+# 不用现编译 pyc（冷态 5-7s → 2.3s）。否则 .venv 重建后第一跑会白卡。
+compile-bytecode = true
 
 [tool.ruff]
 line-length = 100
