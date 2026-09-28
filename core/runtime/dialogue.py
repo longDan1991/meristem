@@ -25,7 +25,7 @@ class Dialogue:
         """assistant 入账，返回落账的 tool_call id 列表（缺 id 时按回合数算）。
 
         `reasoning` 是思考原文（`reasoning_content`），随消息进历史 ——
-        终端把思考画成历史里的一行（TERMINAL.md §4），会话续跑也在。
+        终端把思考画成历史里的一行，会话续跑也在。
         """
         offset = sum(1 for m in self.msgs if m.get("role") in ("assistant", "tool"))
         ids = [tc.id or "call_%d" % (offset + i) for i, tc in enumerate(tool_calls)]

@@ -25,7 +25,7 @@
 
 **1. system 提示词不是拼好的字符串，是命名分节的数据结构。**
 
-`system = Record<节名, 内容>`：每节一个同名 XML 标签，六个节恒在（沟通模型下没有条件节），生命周期内不再变。散文、纪律、skill 清单、工具清单各成一个节（`core/prompts/`）。不变量写在 `docs/PROMPTS.md`。
+`system = Record<节名, 内容>`：每节一个同名 XML 标签，六个节恒在（沟通模型下没有条件节），生命周期内不再变。散文、纪律、skill 清单、工具清单各成一个节（`core/prompts/`）。"六个节恒在"由 `tests/test_protocol.py` 的节名核对守着。
 
 **2. 工具 schema 是工具语义的唯一来源。**
 
@@ -52,7 +52,7 @@ tools/              模型与程序之间唯一的通道
   defs.py           @mcp.tool 函数：schema 与实现一体
   bash.py           命令跑在 llmbash 进程内 shell 上
   skills.py         SKILLS_DIRS 下 */SKILL.md → fastmcp 资源，模型按需 read_skill
-terminal/           Textual 应用：左树右流五区（docs/TERMINAL.md）
+terminal/           Textual 应用：左树右流五区
 ```
 
 ## 跑起来
@@ -86,8 +86,7 @@ uv run ruff check                        # 代码纪律，见 AGENTS.md §12
 
 | 文档 | 写什么 |
 |---|---|
-| `docs/PROMPTS.md` | 系统提示词的设计与**不变量** |
-| `docs/TERMINAL.md` | 终端布局的设计与**不变量** |
+| `docs/DESIGN.md` | 这棵树的设计动机与不变量 —— 历史记录，2026-09 之后部分机制已改（见文首状态头） |
 | `AGENTS.md` | 本仓库的硬约束禁令清单，能机器判定的部分由 ruff 执行 |
 
 ## License

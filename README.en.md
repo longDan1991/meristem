@@ -23,7 +23,7 @@ An agent runtime that lives in the terminal. The task is **not** pre-orchestrate
 
 **1. The system prompt is not a built string — it is a named-section data structure.**
 
-`system = Record<section name, content>`: one same-named XML tag per section, and six sections are always present (no conditional sections under the communication model), frozen for a node's lifetime. Prose, discipline, the skill list and the tool list are each a section (`core/prompts/`). The invariants live in `docs/PROMPTS.md`.
+`system = Record<section name, content>`: one same-named XML tag per section, and six sections are always present (no conditional sections under the communication model), frozen for a node's lifetime. Prose, discipline, the skill list and the tool list are each a section (`core/prompts/`). That the six sections are always present is pinned by the section-name check in `tests/test_protocol.py`.
 
 **2. The tool schema is the single source of tool semantics.**
 
@@ -50,7 +50,7 @@ tools/              the only channel between the model and the program
   defs.py           @mcp.tool functions: schema and implementation in one place
   bash.py           commands run on the llmbash in-process shell
   skills.py         */SKILL.md under SKILLS_DIRS -> fastmcp resources, read on demand
-terminal/           a Textual app: tree on the left, stream in the middle, five regions (docs/TERMINAL.md)
+terminal/           a Textual app: tree on the left, stream in the middle, five regions
 ```
 
 ## Running it
@@ -84,8 +84,7 @@ The tests are driven by a fake model (`FakeLLM`) and need no real API key.
 
 | Document | What it covers |
 |---|---|
-| `docs/PROMPTS.md` | the design and **invariants** of the system prompt |
-| `docs/TERMINAL.md` | the design and **invariants** of the terminal layout |
+| `docs/DESIGN.md` | the motivation and invariants behind the tree — a historical record; some mechanisms changed after 2026-09 (see the status note at the top) |
 | `AGENTS.md` | this repo's hard-constraint rule list; the machine-decidable parts are enforced by ruff |
 
 ## License

@@ -1,4 +1,4 @@
-"""树的视图：把一棵 Node 树画成给终端看的行与组件（TERMINAL.md §1）。
+"""树的视图：把一棵 Node 树画成给终端看的行与组件。
 
 三个渲染：
 - `render_folded`（地图）：休息的子树折一行带统计，返回 `[(node_id, 行)]`，
@@ -83,7 +83,7 @@ def _subtree_stats(root, store):
 def render_folded(root, store, *, selected=None, expanded=frozenset()):
     """折叠视图：休息的子树折成一行带统计，活跃路径展开。返回 [(node_id, 行)]。
 
-    折叠规则（TERMINAL.md §5）：整棵子树都在休息、也不在选中路径上 → 折成一行带节点数；
+    折叠规则：整棵子树都在休息、也不在选中路径上 → 折成一行带节点数；
     入口根永远展开（它是会话的门面）；显式展开（`expanded`）压过自动折叠。
     渲染量只跟"正在动的东西 + 选中路径"走，折叠的子树一行带统计。
     """

@@ -1,6 +1,6 @@
 """终端：和入口谈定预期，并把跑出来的东西显示给人看。
 
-布局与不变量见 docs/TERMINAL.md：**一块 Textual 应用占满整屏** —— 日志区（选中节点的
+布局：**一块 Textual 应用占满整屏** —— 日志区（选中节点的
 消息流，应用内滚动）+ 实时尾巴 + 树条带 + 状态条 + 输入行，五区一屏。屏归应用所有，
 所以"切频道重绘"是 widget 操作（清日志区再挂回去）：不写裸 ANSI、不需要猜"我上一帧画
 了几行"，也不会有第二个渲染器跟它抢同一块屏。
@@ -344,7 +344,7 @@ class _SessionApp(App):
     def action_submit(self):
         area = self.query_one("#input", TextArea)
         text = area.text
-        if not text.strip():                    # 空/纯空白不进队列（TERMINAL.md §2）
+        if not text.strip():                    # 空/纯空白不进队列
             return
         area.load_text("")
         if self.store is None:                  # 还没谈定：第一条回车就是种子，树这就建起来

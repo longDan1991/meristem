@@ -12,7 +12,7 @@ import re
 import sys
 import tempfile
 
-from harness import line, ROOT
+from harness import line
 from core.llm import Message, ToolCall
 from core.protocol.fields import FORM_FIELDS, Node
 from core.prompts import (build_system_sections, render_system,
@@ -277,7 +277,7 @@ def main():
     SECTIONS = ("上层意图链",)
 
     def sys_text(which):
-        """该节点回合的 system 文本（= tree/prompts/ 的节组装结果，render_turn 的第一条消息）。"""
+        """该节点回合的 system 文本（= core/prompts/ 的节组装结果，render_turn 的第一条消息）。"""
         return render_turn(which)[0]["content"]
 
     def filled(kind_, lineage):
@@ -314,14 +314,9 @@ def main():
                    for s in ("bash", "read", "write", "read_skill", "communicate")))
     ok &= line("intake 的出口 = submit_root / communicate",
                all(s in sys_text("intake") for s in ("submit_root", "communicate")))
-    # 双向核对换成**节名集合**（docs/PROMPTS.md §5.6）：文档点名的节 == 真渲染的节。
-    # 恒在节按 §3.2 —— 沟通模型下没有条件节，六个节全部恒在。
+    # 节名集合：沟通模型下没有条件节，六个节全部恒在 —— 这份集合就是契约本身
+    # （曾经与 docs/PROMPTS.md 的节表双向核对，那份文档已删）。
     DOC_SECTIONS = {"preamble", "process", "tools", "rules", "skills", "input"}
-    with open(os.path.join(ROOT, "docs", "PROMPTS.md"), encoding="utf-8") as f:
-        doc_md = f.read()
-    ok &= line("每个节都在设计文档的节表里单独占一行",
-               all(("| `%s` |" % n) in doc_md for n in DOC_SECTIONS),
-               str([n for n in DOC_SECTIONS if ("| `%s` |" % n) not in doc_md]))
 
     def section_names(sys_t):
         names = set(re.findall(r"<([a-z][a-z0-9_-]*)>", sys_t))
@@ -331,9 +326,9 @@ def main():
 
     for kind_, which in (("dispatch", "alloc"), ("leaf", "leaf")):
         got = section_names(render_turn(which)[0]["content"])
-        ok &= line("%s: 文档点名的节 == 真渲染的节" % which,
+        ok &= line("%s: 渲染出来的节 == 六个恒在节" % which,
                    got == set(DOC_SECTIONS), "%s" % sorted(got))
-    ok &= line("intake: 文档点名的节 == 真渲染的节",
+    ok &= line("intake: 渲染出来的节 == 六个恒在节",
                section_names(render_turn("intake")[0]["content"])
                == set(DOC_SECTIONS))
     ok &= line("根没有上层 → 不渲染意图链", lineage(filled("dispatch", [])) == "")
