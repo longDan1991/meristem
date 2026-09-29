@@ -1,0 +1,16 @@
+{
+  "name": "@meristem/terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "业务界面：把 tui 的组件与 harness 的循环装成一个人用的终端",
+  "exports": { ".": "./src/main.ts" },
+  "bin": { "meristem": "./src/cli.ts" },
+  "dependencies": {
+    "@meristem/atree": "workspace:*",
+    "@meristem/harness": "workspace:*",
+    "@meristem/roles": "workspace:*",
+    "@meristem/tui": "workspace:*",
+    "react": "19.3.0"
+  }
+}
