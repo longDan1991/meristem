@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "lib": ["ESNext"],
+    "types": ["bun"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+
+    // AGENTS.md §12 的等价物：未使用的 import / 局部变量（ruff F401 / F841）由编译器报错。
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["packages/*/src", "packages/*/tests"]
+}

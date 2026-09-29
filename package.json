@@ -1,0 +1,24 @@
+{
+  "name": "meristem",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "人的工作树：人递归，模型在一条线里干活",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "scripts": {
+    "start": "bun run packages/terminal/src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "@types/react": "19.3.0",
+    "typescript": "7.0.2"
+  }
+}
