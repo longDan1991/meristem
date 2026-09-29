@@ -1,0 +1,12 @@
+{
+  "name": "@meristem/roles",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "角色：把 MCP 对接、内置手、技能、系统提示词封成一个概念",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@oh-my-pi/pi-natives": "18.4.0",
+    "@modelcontextprotocol/sdk": "1.30.1"
+  }
+}
