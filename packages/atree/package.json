@@ -1,0 +1,8 @@
+{
+  "name": "@meristem/atree",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "agent 的数据结构与账：任何 agent 都能用，不含业务语义",
+  "exports": { ".": "./src/index.ts" }
+}
