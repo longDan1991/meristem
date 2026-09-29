@@ -84,7 +84,7 @@ The tests are driven by a fake model (`FakeLLM`) and need no real API key.
 
 | Document | What it covers |
 |---|---|
-| `docs/DESIGN.md` | the motivation and invariants behind the tree — a historical record; some mechanisms changed after 2026-09 (see the status note at the top) |
+| `docs/DESIGN.md` | the design of the tree (target design: the human's work tree) — the code still sits on the old structure |
 | `AGENTS.md` | this repo's hard-constraint rule list; the machine-decidable parts are enforced by ruff |
 
 ## License
