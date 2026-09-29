@@ -1,0 +1,13 @@
+{
+  "name": "@meristem/harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "核心逻辑：组装 msgs → 让模型说话 → 执行它伸出的手 → 写回观测",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@meristem/atree": "workspace:*",
+    "@meristem/roles": "workspace:*",
+    "@oh-my-pi/pi-ai": "18.4.0"
+  }
+}
