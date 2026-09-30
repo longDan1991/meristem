@@ -7,29 +7,32 @@
  *
  * `start` 也负责把角色自己管起来的东西接上（比如 MCP 服务）：任何一台连不上 / 起不来
  * 当场抛错 —— 那个角色就不成立（不静默跳过一台，也不产出半个清单）。
+ * 装载是**整个换掉**：`start` 就是这一次的那一份（同一个进程只在开树时叫一次）。
+ *
+ * `SUMMARY_FORK` 的 id 与它的 xml 都住这里：id 只有这一份定义（不许在别处写字符串），
+ * 角色本体是随代码发布的 xml（`registry/`，见 AGENTS §7 那条"包内只读资产"的例外）。
  *
  * 数据就在这个包里（一份列表），不请别人代存。
  *
  * 变因：角色的来源与查找（注册表机制）。
  */
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import type { Role, RoleId } from "./role.ts";
+import { discovered } from "./skills/index.ts";
+import { ALL as BUILTIN_HANDS } from "./tools/index.ts";
+import { parseFile } from "./xml.ts";
+
+/** 随代码发布的角色目录（与代码同生共死，不是部署配置）。 */
+const BUILTIN_DIR = join(import.meta.dir, "..", "registry");
 
 /**
- * 包内自带的**总结分叉**角色（分叉时先抽一份底的那位，乙）。
- * harness 用它把“总结分叉”这件事接上，所以 id 只有这里一份定义（不许在别处写字符串）。
- *
- * 它的职责只有一件：**从历史里抽出与用户那条新消息相关的全部信息，输出成一份自足的底**。
- * 它的 xml 提示词必须照这两条硬纪律写（实现时按这个来）：
- *
- *   · **只总结，不回应用户** —— 不打招呼、不问问题、不给方案、不“好的我来看看”。
- *     回应用户是新角色（丙）的事：乙 一旦也回应，账上就有两个回答者，分不清哪句是回答。
- *   · **抽出来的东西必须自足** —— 丙 拼上下文时到这条线为止（看不到父线），
- *     所以相关的约束 / 已定的事 / 走过的弯路 / 涉及的文件都要写进总结；没写就是丢，
- *     而“丢了什么”事后没法核对。
- *
- * 它的产物是对**历史**的陈述，不是对用户说的话；这一条回复在账里标 `by = 本角色`。
+ * 包内自带的**总结分叉**角色（分叉时先抽一份底的那位，乙）。harness 用它把"总结分叉"接上。
+ * 它的职责与两条硬纪律写在 `registry/summary-fork.xml` 里（提示词就在那儿，不在代码里）。
  */
-export declare const SUMMARY_FORK: RoleId;
+export const SUMMARY_FORK: RoleId = "summary-fork";
+
+const roles = new Map<RoleId, Role>();
 
 /**
  * 装载角色（含包内内置角色）：`dir` = 角色目录，`skillDirs` = 技能根。
@@ -39,10 +42,53 @@ export declare const SUMMARY_FORK: RoleId;
  * 它们属于执行机制，不是某块能力的开关 —— 所以不需要在 xml 里点名，也不许被关掉
  * （模型看不见作业，就不知道一手跑没跑完、也没法看进度，作业就成了隐形的东西）。
  */
-export declare function start(dir: string, skillDirs: readonly string[]): Promise<void>;
+export async function start(dir: string, skillDirs: readonly string[]): Promise<void> {
+  const available = { hands: BUILTIN_HANDS, skills: discovered(skillDirs) };
+  const drafts = await Promise.all(
+    [...xmlFiles(dir), ...xmlFiles(BUILTIN_DIR)].map((path) => parseFile(path, available)),
+  );
 
-/** 按 id 取；没有这个角色 → 抛错（拼错不该静默降级成“没有能力”）。 */
-export declare function get(id: RoleId): Role;
+  // MCP 还没接上（没有时间参数那些手的兜底值也还没定，DESIGN §7）：声明了服务的角色**不成立**，
+  // 不静默少一把手 —— 角色得知道自己的手少了，而不是以为自己在用一把没有的手。
+  const declared = drafts.filter((draft) => draft.mcp.length > 0);
+  if (declared.length > 0) {
+    throw new Error(
+      `角色 ${declared.map((draft) => draft.id).join("、")} 声明了 <mcp>，但 MCP 还没接上` +
+        `（兜底超时还没定，DESIGN §7）：先把 <mcp> 去掉，或等这一层接上`,
+    );
+  }
 
-/** 全部角色：给人挑的清单（分叉时用）。 */
-export declare function list(): readonly Role[];
+  const loaded = new Map<RoleId, Role>();
+  for (const draft of drafts) {
+    if (loaded.has(draft.id)) {
+      throw new Error(`角色 id 重了：${draft.id}（一份语义只允许一份实现）`);
+    }
+    loaded.set(draft.id, draft.role());
+  }
+
+  roles.clear();
+  for (const [id, role] of loaded) roles.set(id, role);
+}
+
+/** 按 id 取；没有这个角色 → 抛错（拼错不该静默降级成"没有能力"）。 */
+export function get(id: RoleId): Role {
+  const role = roles.get(id);
+  if (role === undefined) {
+    const known = [...roles.keys()].join(" / ") || "一个都没有";
+    throw new Error(`没有这个角色：${id}（装载到的：${known}）`);
+  }
+  return role;
+}
+
+/** 全部角色：给人挑的清单（分叉时用），按 id 排序 —— 清单的顺序不该随文件系统抖。 */
+export function list(): readonly Role[] {
+  return [...roles.values()].sort((left, right) => (left.id < right.id ? -1 : 1));
+}
+
+/** 角色目录里的 xml（不递归）—— 排序只为"装载与报错的顺序"稳定。 */
+function xmlFiles(dir: string): readonly string[] {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".xml"))
+    .map((entry) => join(dir, entry.name))
+    .sort();
+}
