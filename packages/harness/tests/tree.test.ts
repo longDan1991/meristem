@@ -277,7 +277,7 @@ describe("手：起手一条回话、结束一条消息", () => {
     expect(String(child.stderr)).toContain("模型点了没有的手");
   });
 
-  test("这条线正在吐字时人插话：当场拒掉（告诉人它在吐字），说完就又能说", async () => {
+  test("吐字期间人说的话：排在它后面（账上的顺序就是事情发生的顺序）", async () => {
     const { promise: pending, resolve: answer } = Promise.withResolvers<WireMessage>();
     let calls = 0;
     const wires: Wire[] = [];
@@ -293,18 +293,17 @@ describe("手：起手一条回话、结束一条消息", () => {
     const node = await tree.fork({ parent: null, role: "talk", inputText: "在吗", dir: tmp() });
     await until(() => transport.wires.length === 1, "这一轮已经发出去了");
 
-    await expect(tree.say(node, "喂")).rejects.toThrow("正在吐字");
-    // 账里没有塞进那半句：它只记人真说成的那些话。
-    expect(contents(store, node)).toHaveLength(1);
+    // 人说话：它**排在还没说完的那一轮后面**（不 await —— 这就是"投给这条线"）。
+    const said = tree.say(node, "喂");
+    await ticks();
+    expect(contents(store, node).map((message) => message.role)).toEqual(["user"]);
 
     answer(reply("先说这一句"));
-    await until(() => contents(store, node).length === 2, "它说完了");
-    await tree.say(node, "接着说");
-    await until(() => contents(store, node).length === 4, "插话之后又回了一句");
+    await said;
     expect(contents(store, node).map((message) => message.content)).toEqual([
       "在吗",
       "先说这一句",
-      "接着说",
+      "喂",
       "在的",
     ]);
 
