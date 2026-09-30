@@ -163,7 +163,7 @@ const contents = (store: LineStore, node: NodeId): readonly WireMessage[] => sto
 
 describe("一轮对话", () => {
   test("人分叉说一句 → 模型回一句；账里两条，状态回到等人", async () => {
-    const { store, loop, transport } = await boot([reply("你好"), reply("在的")], [role("talk", [])]);
+    const { store, loop, transport, events } = await boot([reply("你好"), reply("在的")], [role("talk", [])]);
     void loop.run();
 
     const node = await loop.fork({ parent: null, role: "talk", inputText: "在吗", dir: tmp() });
@@ -171,7 +171,12 @@ describe("一轮对话", () => {
 
     expect(contents(store, node).map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(contents(store, node)[1]?.content).toBe("你好");
-    await until(() => store.get(node)?.props.state === "waiting", "状态落成等人");
+    // 状态是推出来的：它经事件给人看，但**不进账**（账里多一份只会漂）。
+    await until(
+      () => events.some((event) => event.type === "state" && event.node === node && event.state === "waiting"),
+      "状态事件落成等人",
+    );
+    expect("state" in (store.get(node)?.props ?? {})).toBe(false);
     expect(transport.wires[0]?.system).toBe("你是 talk");
     expect(transport.wires[0]?.messages.map((message) => message.content)).toEqual(["在吗"]);
 
@@ -268,17 +273,57 @@ describe("手：起手一条回话、结束一条消息", () => {
     await loop.run();
   });
 
-  test("模型点了一把没有的手：回话里说清楚，不静默", async () => {
-    const { store, loop } = await boot(
-      [reply("", [{ name: "没这把" }]), reply("知道了")],
-      [role("work", [])],
-    );
+  test("模型点了一把没有的手：当场炸（harness 不替它编交代）", async () => {
+    const { store, loop } = await boot([reply("", [{ name: "没这把" }])], [role("work", [])]);
+    const node = await loop.fork({ parent: null, role: "work", inputText: "随便", dir: tmp() });
+
+    await expect(loop.run()).rejects.toThrow("模型点了没有的手：没这把");
+    // 账里只多了模型**确实说过**的那一条：没有替它编出来的回话（末条就是"伸出去、没回话"）。
+    expect(contents(store, node).map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(contents(store, node)[1]?.toolCalls).toHaveLength(1);
+  });
+
+  test("手自己起不来（run 抛出）：也是缺陷，当场炸", async () => {
+    const broken: Hand = {
+      name: "broken",
+      description: "起不来的那一只",
+      schema: { type: "object", properties: {} },
+      async run() {
+        throw new Error("我起不来");
+      },
+    };
+    const { loop } = await boot([reply("", [{ name: "broken" }])], [role("work", [broken])]);
+    await loop.fork({ parent: null, role: "work", inputText: "试试", dir: tmp() });
+
+    await expect(loop.run()).rejects.toThrow("我起不来");
+  });
+
+  test("一条慢线不堵别的线：A 的一轮还没回来，B 的话照样被接上", async () => {
+    const { promise: pending, resolve: answer } = Promise.withResolvers<WireMessage>();
+    let calls = 0;
+    const wires: Wire[] = [];
+    const transport: LlmClient & { readonly wires: Wire[] } = {
+      wires,
+      async chat(wire: Wire) {
+        wires.push(wire);
+        calls += 1;
+        return calls === 1 ? pending : reply("B 的回答");
+      },
+    };
+    const { store, loop } = await bootWith(transport, [role("talk", [])]);
     void loop.run();
 
-    const node = await loop.fork({ parent: null, role: "work", inputText: "随便", dir: tmp() });
-    await until(() => contents(store, node).length === 4, "回话 + 接着说");
+    const slow = await loop.fork({ parent: null, role: "talk", inputText: "慢慢来", dir: tmp() });
+    await until(() => wires.length === 1, "A 那一轮已经发出去了");
 
-    expect(contents(store, node)[2]?.content).toContain("没有叫 没这把 的手");
+    const quick = await loop.fork({ parent: null, role: "talk", inputText: "快回我", dir: tmp() }).catch(() => null);
+    // 造根只能有一个：第二条线从 A 分出来。
+    const other = quick ?? (await loop.fork({ parent: slow, role: "talk", inputText: "快回我", dir: tmp() }));
+    await until(() => contents(store, other).length === 2, "B 的话被接上了，尽管 A 还没回来");
+
+    expect(contents(store, slow)).toHaveLength(1);
+    answer(reply("A 的回答"));
+    await until(() => contents(store, slow).length === 2, "A 的回答也到了");
 
     loop.stop();
     await loop.run();

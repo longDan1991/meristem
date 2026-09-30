@@ -34,14 +34,18 @@
  *      （还在跑 → "作业 #abc 已起…"；已经结束 → 结果）—— 每个 `tool_calls` 因此条条有回话，
  *      provider 那边天然合法，**程序不需要任何配对结构**。
  *   3. **结束一条消息**：若它还在跑，就等它（`job.wait()`，**循环从不 poll**）—— settle 时再往账里写
- *      一条 `role: "user"` 的消息（内容 = `report()`，同一个作业 id 在里面），改状态、**唤醒这条线**；
+ *      一条 `role: "user"` 的消息（内容 = `report()`，同一个作业 id 在里面），发状态事件、**唤醒这条线**；
  *      **内容没变就不写第二次**（立刻结束的手只留起手那一条）。
  *   4. 调度时跳过"还有作业在跑"的线（`plan.actionable(..., true)`；表就是 `roles` 那张，按空间筛）。
  *   5. 人取消 → 转发 `job.cancel()`；`stop`（收手）→ 取消所有在跑的作业。
  *   6. 模型接口失败 → 跳过这条线 + `Event.transport_error`（不入账、不自动重试，§9.8）。
  *
  *   绝不做的：判断这一手会长不长（§9.3）；生成任何文本（消息内容一律来自 `job.report()`）；
- *   设统一超时（超时在每只手的底座里，§9.9）；轮询；重试；因为作业多就限并发。
+ *   设统一超时（超时在每只手的底座里，§9.9）；轮询；重试；因为作业多就限并发；
+ *   **替模型编交代** —— 它点了没有的手、或者手自己起不来，那是缺陷，当场炸（见 `advance` 里的 `guard`）。
+ *
+ * **各条线互不等待**：一轮起起来就往下走（同一轮只起一次用 `busy` 挡），谁先回来谁先被推 ——
+ * 一条慢线不该堵住别的线。
  *
  * 它不认识工具 / 技能 / 提示词分节 / MCP —— 那些词全在角色端口后面。
  *
@@ -112,6 +116,8 @@ export function start(input: StartInput): Loop {
   const failed = new Set<NodeId>();
   /** 正在推的线：同一轮不许被推两次（`fork` 里那几轮也占着这一格）。 */
   const busy = new Set<NodeId>();
+  /** 缺陷（模型点了没有的手 / 手自己起不来）：记下来，由 `run` 当场炸出去 —— 不在这儿吞。 */
+  let defect: unknown = null;
   const seen = new Map<NodeId, NodeState>();
   let stopping = false;
   let woken = false;
@@ -140,14 +146,6 @@ export function start(input: StartInput): Loop {
     const found = input.store.get(id);
     if (found === null) throw new Error(`账里没有这个节点：${id}`);
     return found;
-  }
-
-  /** 树上的所有线（出生顺序，父在子前）。 */
-  function lines(): readonly NodeId[] {
-    const root = input.store.root();
-    if (root === null) return [];
-    const walk = (id: NodeId): NodeId[] => [id, ...input.store.children(id).flatMap(walk)];
-    return walk(root);
   }
 
   /** 写账：`id` 由**我们**定死（传输层给的临时 id 不进账）。 */
@@ -199,24 +197,21 @@ export function start(input: StartInput): Loop {
   async function startHand(id: NodeId, role: Role, call: ToolCall): Promise<void> {
     const hand = role.hands().find((candidate) => candidate.name === call.name);
     if (hand === undefined) {
-      // 点了没有的手：不静默 —— 它的回话就是这条消息（模型得知道自己点了空）。
-      append(id, [{ role: "tool", content: `这条线上没有叫 ${call.name} 的手（有哪些手见 system 的 tools 一节）。` }]);
-      return;
+      // 模型只该点给它的手（schema 就在 wire 里）：点了没有的 = 传下去的手与它看到的不一致 ——
+      // 那是缺陷，当场炸。**不替它编一条交代**：harness 一个字的文本都不写（§9.2）。
+      throw new Error(
+        `模型点了没有的手：${call.name}（这条线的角色是 ${role.id}，它的手只有：${role
+          .hands()
+          .map((candidate) => candidate.name)
+          .join(" / ")}）`,
+      );
     }
 
-    let job: Job;
-    try {
-      job = await hand.run(call.arguments, { outputRoot: node(id).props.outputRoot, space: id });
-    } catch (error) {
-      append(id, [
-        {
-          role: "tool",
-          by: hand.name,
-          content: `这一手（${hand.name}）没能起：${error instanceof Error ? error.message : String(error)}`,
-        },
-      ]);
-      return;
-    }
+    // 手自己起不来（`run` 抛出）也是缺陷：交代是手写的东西，不由这里编（见底座的两个原语）。
+    const job: Job = await hand.run(call.arguments, {
+      outputRoot: node(id).props.outputRoot,
+      space: id,
+    });
 
     const started = job.report();
     append(id, [{ role: "tool", by: hand.name, content: started }]);
@@ -237,42 +232,58 @@ export function start(input: StartInput): Loop {
     });
   }
 
-  /** 推所有该推的线（一起推）；返回"这一轮有没有做事"。 */
-  async function advance(): Promise<boolean> {
-    const running = runningSpaces();
-    const work: Promise<void>[] = [];
+  /**
+   * 把一轮包起来：出了缺陷就记下来（`run` 会把它炸出去），完事唤醒 ——
+   * 一轮结束是"可能有别的线该动了"的时机，所以唤醒归它自己（不靠谁在外面等）。
+   */
+  function guard(work: Promise<void>): Promise<void> {
+    return work
+      .catch((error: unknown) => {
+        defect ??= error;
+      })
+      .finally(() => wake());
+  }
 
-    for (const id of lines()) {
+  /**
+   * 把该动的线都**起起来**（起完就返回，**不等它们**）：一条线慢不该堵住别的线。
+   * 返回"这一轮起了几轮"。
+   */
+  function advance(): boolean {
+    const running = runningSpaces();
+    let started = false;
+
+    for (const id of input.store.nodes()) {
       if (failed.has(id) || busy.has(id)) continue;
       if (!actionable(input.store, id, running.has(id))) continue;
       busy.add(id);
-      work.push(
+      started = true;
+      void guard(
         speak(id, input.role(node(id).props.role), input.store.assemble(id)).finally(() => busy.delete(id)),
       );
     }
 
-    await Promise.all(work);
-    return work.length > 0;
+    return started;
   }
 
-  /** 把状态写回 props 并发事件（状态是**代码给的事实**，不是谁的自我描述）。 */
-  function syncStates(): void {
+  /** 状态只**发事件**、不进账：它是推出来的（读账 + 谁在跑），落一份进账只会漂（`props.ts`）。 */
+  function emitStates(): void {
     const running = runningSpaces();
-    for (const id of lines()) {
+    for (const id of input.store.nodes()) {
       const state = stateOf(input.store, id, running.has(id));
       if (seen.get(id) === state) continue;
       seen.set(id, state);
-      if (node(id).props.state !== state) input.store.patch(id, { state });
       sink.emit({ type: "state", node: id, state });
     }
   }
 
   async function run(): Promise<void> {
     while (!stopping) {
+      if (defect !== null) throw defect;
       woken = false;
-      const progressed = await advance();
-      syncStates();
-      if (!progressed) await idle();
+      const started = advance();
+      emitStates();
+      // 起了新活就马上再看一眼（收尾 / 接手）；否则没别的事就睡到有人动为止。
+      if (!started && !woken) await idle();
     }
   }
 
@@ -296,18 +307,22 @@ export function start(input: StartInput): Loop {
           // 乙：只抽底、不回应用户 —— 它看的是**父线看得见的历史 + 这条新消息**
           // （新线自带边界，往后自己看不到父线，所以这一轮要把两边都摆出来）。
           const history = parent === null ? [] : input.store.assemble(parent.id);
-          await speak(
-            created,
-            input.role(SUMMARY_FORK),
-            [...history, ...input.store.content(created)],
-            SUMMARY_FORK,
+          await guard(
+            speak(
+              created,
+              input.role(SUMMARY_FORK),
+              [...history, ...input.store.content(created)],
+              SUMMARY_FORK,
+            ),
           );
           // 丙：回应用户那句话（常规一轮：组装这条线看得见的 msgs）。
-          await speak(created, input.role(choice.role), input.store.assemble(created));
+          if (defect === null) {
+            await guard(speak(created, input.role(choice.role), input.store.assemble(created)));
+          }
         }
       } finally {
         busy.delete(created);
-        syncStates();
+        emitStates();
         wake();
       }
 

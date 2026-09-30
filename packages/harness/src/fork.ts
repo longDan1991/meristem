@@ -7,7 +7,7 @@
  * "新会话"不是这个包的词：全局一棵树，**一次以根为父的分叉就是一条新会话** ——
  * 那是界面上的一个动作（`parent = store.root()`），harness 不为它多造概念。
  *
- * 出生时定死的事实：**属性**（名字 / 角色 / 做事目录 / 状态）、**父**、
+ * 出生时定死的事实：**属性**（名字 / 角色 / 做事目录）、**父**、
  * **是不是一段内容的边界**（总结分叉开的线自带底 → `boundary = true`）。
  * 定死之后只读 —— 父的名字与角色不会再变，所以意图链不会变旧。
  *
@@ -62,7 +62,6 @@ export function born(input: ForkInput, parent: Node<LineProps> | null): TreeInpu
       name: nameOf(input.inputText),
       role: input.role,
       outputRoot,
-      state: "running",
     },
   };
 }

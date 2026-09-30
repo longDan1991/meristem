@@ -11,8 +11,10 @@
  *      是 → **停住不推进**（不替它编一条回话 —— 账上不编；要接着干就分叉一条新线）。
  *
  * **出错不在这条规则里**：模型接口失败是内存里的一件事（§9.8：账里一个字都不多，也不自动重试），
- * 由循环自己记住、由人重试。**休眠**（`resting`）是 props 里的既成事实（人给的），推不出来 ——
- * 现在没有人写它，等归档 / 休眠那层落地。
+ * 由循环自己记住、由人重试。**休眠**（`resting`）推不出来 —— 那是人给的（归档那一层落地时才有）。
+ *
+ * `stateOf` 是**给界面看的**（事件）：循环推进只看 `actionable` ——
+ * 状态不进账、也不当判据，不给自己留第二份真相。
  *
  * **内部规则**：不上面 —— 界面要的状态读账（`props.state`），调度只在循环里用这一份。
  *
@@ -22,7 +24,7 @@ import type { NodeId } from "@meristem/atree";
 import type { LineStore, NodeState } from "./props.ts";
 import type { WireMessage } from "./shape.ts";
 
-/** 按事实该给这条线什么状态（只推得出在动 / 等我）。 */
+/** 按事实该给这条线什么状态（只推得出在动 / 等我）—— 给界面看，不当判据。 */
 export function stateOf(store: LineStore, node: NodeId, hasRunningJob: boolean): NodeState {
   if (hasRunningJob) return "running";
   return actionable(store, node, hasRunningJob) ? "running" : "waiting";
