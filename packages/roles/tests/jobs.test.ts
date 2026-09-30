@@ -98,7 +98,8 @@ describe("background：起之后才回来的执行", () => {
     land("干完了");
     await job.wait();
 
-    expect(job.report()).toBe("干完了");
+    // 结束那条交代带着作业 id：起手那条回话与它靠这个 id 配对（配对是模型的事，§9.6）。
+    expect(job.report()).toBe(`作业 #${job.id}（handmade）：干完了`);
     expect(running("n1")).toEqual([]);
     expect(stops()).toBe(0);
   });
