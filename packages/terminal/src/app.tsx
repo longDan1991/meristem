@@ -18,7 +18,7 @@
  *
  * 读账直接读 `Store`（渲染树、画一条线）—— 名字 / 角色 / 状态 / 做事目录都在节点的 `props` 里
  * （那是 harness 定的形状），一条线自己的对话在它的内容里。事件从 `Tree.subscribe` 来，
- * 它只是"去看账 / 去看作业"的提示；作业吐出来的东西界面自己遍历 `Job.stream()`（`state` / `message` / `hand_start` / `hand_end` / `usage` / `transport_error`），**真相是账与作业本身**。
+ * 它只是"去看账 / 去看作业"的提示；作业吐出来的东西界面自己遍历 `Job.stream()`（`line` / `message` / `hand_start` / `hand_end` / `usage` / `transport_error`），**真相是账与作业本身**。
  *
  * 屏归这一个应用所有：不写裸 ANSI，也不开第二个渲染器抢同一块屏。
  *

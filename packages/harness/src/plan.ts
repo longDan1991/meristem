@@ -14,8 +14,8 @@
  * 由树自己记住（只在内存里）、由人重试。**休眠**不是这一层的状态：归档落地时再谈（§7）——
  * 那时它也是人给的既成事实，不是推出来的。
  *
- * `stateOf` 是**给界面看的**（事件）：树的推进只看 `actionable` ——
- * 状态不进账、也不当判据，不给自己留第二份真相。
+ * `stateOf` 是**给界面渲染时现算的规则**（树条带上那条线在动还是在等我）：树的推进只看
+ * `actionable` —— 状态不进账、也不是事件里的 payload、也不当判据，不给自己留第二份真相。
  *
  * **内部规则**：不上面 —— 状态经事件给界面，调度只在树里用这一份。
  *
@@ -25,7 +25,7 @@ import type { NodeId } from "@meristem/atree";
 import type { LineStore, NodeState } from "./props.ts";
 import type { WireMessage } from "./shape.ts";
 
-/** 按事实该给这条线什么状态（只推得出在动 / 等我）—— 给界面看，不当判据。 */
+/** 按事实该给这条线什么状态（只推得出在动 / 等我）—— 界面渲染时调它，不当判据。 */
 export function stateOf(store: LineStore, node: NodeId, hasRunningJob: boolean): NodeState {
   if (hasRunningJob) return "running";
   return actionable(store, node, hasRunningJob) ? "running" : "waiting";

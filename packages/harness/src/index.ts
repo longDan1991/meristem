@@ -24,6 +24,7 @@
  */
 
 export type { NodeState, LineProps, LineStore } from "./props.ts";
+export { stateOf } from "./plan.ts";
 export type { ChatRole, JsonSchema, ToolCall, Usage, Wire, WireMessage } from "./shape.ts";
 
 export type { Event } from "./events.ts";

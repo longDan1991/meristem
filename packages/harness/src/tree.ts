@@ -66,8 +66,8 @@ import type { Event } from "./events.ts";
 import type { ForkInput } from "./fork.ts";
 import { born } from "./fork.ts";
 import type { LlmClient } from "./llm.ts";
-import { actionable, stateOf } from "./plan.ts";
-import type { LineProps, LineStore, NodeState } from "./props.ts";
+import { actionable } from "./plan.ts";
+import type { LineProps, LineStore } from "./props.ts";
 import type { ToolCall, WireMessage } from "./shape.ts";
 
 /** 装配输入：**只有端口**，没有值。 */
@@ -127,7 +127,6 @@ export function start(input: StartInput): Tree {
   const failed = new Set<NodeId>();
   /** 每条线一条自己的串行链：投给它的按顺序做，**节点 ID 就是隔离键**。 */
   const chains = new Map<NodeId, Promise<void>>();
-  const seen = new Map<NodeId, NodeState>();
   let stopped = false;
 
   function node(id: NodeId): Node<LineProps> {
@@ -144,19 +143,16 @@ export function start(input: StartInput): Tree {
     );
   }
 
-  /** 状态只**发事件**、不进账：它是推出来的（读账 + 谁在跑），落一份进账只会漂（`props.ts`）。 */
-  function refresh(id: NodeId): void {
-    const state = stateOf(input.store, id, allJobs().some((job) => job.space === id));
-    if (seen.get(id) === state) return;
-    seen.set(id, state);
-    sink.emit({ type: "state", node: id, state });
+  /** 告诉界面"这条线变了，去重读"：事件只说这一件事，推出来的东西（在动 / 等我）由它自己算。 */
+  function notify(id: NodeId): void {
+    sink.emit({ type: "line", node: id });
   }
 
   /**
    * **把事情投给某条线**：排在它已经排上的事后面（一条线一次只做一件）。
    *
    * 这就是全部的并发控制：没有状态机、没有锁 —— 隔离靠"这件事属于哪个节点"，由这条线自己按顺序做。
-   * 头尾各刷一次状态（开始动 / 动完），界面因此看得见它什么时候在动。
+   * 这件事做完喊一声"这条线变了"（事件说的就是"去看账"；动手之前它不是变，是另说一件事）。
    *
    * 出了缺陷（模型点了没有的手 / 手自己起不来 / 传输面用错）：**不回话、不兜底、不咽下去**。
    * 这里不直接 `throw`：我们正站在 async 链的续体里，直接抛只会变成"这条链的 rejection"，
@@ -166,7 +162,6 @@ export function start(input: StartInput): Tree {
   function deliver(id: NodeId, work: () => Promise<void>): Promise<void> {
     const previous = chains.get(id) ?? Promise.resolve();
     const next = previous.then(async () => {
-      refresh(id);
       try {
         await work();
       } catch (error) {
@@ -174,7 +169,7 @@ export function start(input: StartInput): Tree {
           throw error;
         });
       }
-      refresh(id);
+      notify(id);
     });
     chains.set(id, next);
     return next;

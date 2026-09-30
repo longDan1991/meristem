@@ -15,7 +15,7 @@ import type { Event } from "../src/events.ts";
 import type { LlmClient } from "../src/llm.ts";
 import { start } from "../src/tree.ts";
 import type { Tree } from "../src/tree.ts";
-import { actionable } from "../src/plan.ts";
+import { actionable, stateOf } from "../src/plan.ts";
 import type { LineStore } from "../src/props.ts";
 import type { Wire, WireMessage } from "../src/shape.ts";
 
@@ -171,11 +171,12 @@ describe("一轮对话", () => {
 
     expect(contents(store, node).map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(contents(store, node)[1]?.content).toBe("你好");
-    // 状态是推出来的：它经事件给人看，但**不进账**（账里多一份只会漂）。
+    // 事件只说"这条线变了"（去重读）：状态是渲染时按规则现算的 —— 不进账，也不在事件里。
     await until(
-      () => events.some((event) => event.type === "state" && event.node === node && event.state === "waiting"),
-      "状态事件落成等人",
+      () => events.some((event) => event.type === "line" && event.node === node),
+      "这条线变了的信号",
     );
+    expect(stateOf(store, node, false)).toBe("waiting");
     expect("state" in (store.get(node)?.props ?? {})).toBe(false);
     expect(transport.wires[0]?.system).toBe("你是 talk");
     expect(transport.wires[0]?.messages.map((message) => message.content)).toEqual(["在吗"]);

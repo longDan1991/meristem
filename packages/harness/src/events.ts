@@ -1,7 +1,7 @@
 /**
  * 事件出口：唯一通知面 —— 长得出来的只有这几件事，多一个都不发。
  *
- * 事件是"给看得见的人看"的：代码给的状态、流式吐字、手的过程（作业）、用量、模型接口失败。
+ * 事件是"给看得见的人看"的：这条线变了、流式吐字、手的过程（作业）、用量、模型接口失败。
  * 手自己没有"说话"事件：它要跟人说话只有两个口子，都在作业上（输出给人看、交代给模型）——
  * 单一来源，不给手第二个出口。
  * 这里没有"向上汇报"：系统没有上层，只有一个人（DESIGN §5.1 / §5.7）。
@@ -18,11 +18,13 @@
  */
 import type { NodeId } from "@meristem/atree";
 import type { Usage } from "./shape.ts";
-import type { NodeState } from "./props.ts";
 
 export type Event =
-  /** 代码给的状态（不是发言者的自我描述）：在动 / 等我 / 休眠。 */
-  | { readonly type: "state"; readonly node: NodeId; readonly state: NodeState }
+  /**
+   * **这条线变了**（账里多了消息、作业起了 / 回来了）：界面据此重读 `Store` 与 `jobs()` 重画。
+   * 它不带"状态"这类推出来的东西 —— 要标"在动 / 等我"，渲染时按 harness 的规则算（`stateOf`）。
+   */
+  | { readonly type: "line"; readonly node: NodeId }
   /** 一条线正在吐的字：正文与思考两条通道分开。 */
   | {
       readonly type: "message";
