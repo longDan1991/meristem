@@ -61,6 +61,7 @@ export function settled(facts: JobFacts, execution: string | Promise<string>): J
     name: facts.name,
     at,
     produced: () => 0,
+    stream: empty,
     report: () =>
       finished ? final : `作业 #${id}（${facts.name}）还在跑：${progress(job)}`,
     output: () => "",
@@ -123,6 +124,7 @@ export function background(input: BackgroundInput): Job {
     name: input.name,
     at,
     produced: () => output.produced,
+    stream: () => output.stream(),
     report: () => (finished ? final : `作业 #${id}（${input.name}）还在跑：${progress(job)}`),
     output: () => output.text(),
     cancel: () => {
@@ -142,6 +144,7 @@ export function background(input: BackgroundInput): Job {
     if (finished) return;
     finished = true;
     final = text;
+    output.end();
     clearTimeout(timer);
     retire(job);
     land();
@@ -196,21 +199,35 @@ export function background(input: BackgroundInput): Job {
 }
 
 /**
- * 输出：**原文全收**（不裁剪、不折叠），外加一个 O(1) 的字数。
+ * 输出：**原文全收**（不裁剪、不折叠），外加一个 O(1) 的字数，以及"跟着走"的那条流。
  *
- * 两块各为一条热路径：`produced` 让进度句（`report()` / `job_list`，每轮都问）不必把整个输出
- * 拼一遍；`text()` 只在真有人要输出时拼一次，之后复用到有新块为止。
+ * 三块各为一条热路径：`produced` 让进度句（`report()` / `job_list`，每轮都问）不必把整个输出
+ * 拼一遍；`text()` 只在真有人要输出时拼一次，之后复用到有新块为止；
+ * `stream()` 给界面一个自己的游标（块数组本来就留着，所以流只是"读到哪里了"）。
  * 分块进、一次 join（§11：不许在循环里用 `+=` 拼字符串）。
+ *
+ * **流的纪律**：一个遍历者一个游标（互相不打扰）；作业结束时它先把手上的块给完、再收。
+ * 遍历到一半就不管了的那个（界面切走了）不会拖住谁：它留下的只是一个没人再用的等待位。
  */
 class Output {
   private chunks: string[] = [];
   private joined: string | null = null;
   private size = 0;
+  private ended = false;
+  /** 等着"有新块 / 结束"的那些流（各自解自己那个等待位）。 */
+  private waiters = new Set<() => void>();
 
   push(chunk: string): void {
     this.chunks.push(chunk);
     this.joined = null;
     this.size += chunk.length;
+    this.wake();
+  }
+
+  /** 作业结束了：不会再有新块，挂着的流都收摊。 */
+  end(): void {
+    this.ended = true;
+    this.wake();
   }
 
   get produced(): number {
@@ -221,7 +238,37 @@ class Output {
     this.joined ??= this.chunks.join("");
     return this.joined;
   }
+
+  /** 跟着走：先给已有的，再等新的，结束即收。 */
+  async *stream(): AsyncGenerator<string> {
+    let cursor = 0;
+    for (;;) {
+      while (cursor < this.chunks.length) {
+        const chunk = this.chunks[cursor];
+        cursor += 1;
+        if (chunk !== undefined) yield chunk;
+      }
+      if (this.ended) return;
+      await this.readMore();
+    }
+  }
+
+  private readMore(): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.waiters.add(resolve);
+    return promise.finally(() => {
+      this.waiters.delete(resolve);
+    });
+  }
+
+  private wake(): void {
+    for (const resolve of this.waiters) resolve();
+    this.waiters.clear();
+  }
 }
+
+/** `settled` 出来的作业没有产出：给一个立刻收摊的流（界面拿到它就是一空条）。 */
+async function* empty(): AsyncGenerator<string> {}
 
 let sequence = 0;
 

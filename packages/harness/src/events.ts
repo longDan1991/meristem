@@ -7,8 +7,9 @@
  * 这里没有"向上汇报"：系统没有上层，只有一个人（DESIGN §5.1 / §5.7）。
  *
  * **事件不是账**：事件说"去看账"（界面据此重读 `Store` 重画），账才是真相。
- * 作业那三个事件只带**结构**（作业 id、字节数、秒数），文本一个字都不带 ——
- * 界面要看字就去问作业（`Job.report()` / `Job.output()`，DESIGN §9.2 的"面向人"）。
+ * 作业那几个事件只带**结构**（作业 id、名字、参数、秒数），文本一个字都不带 ——
+ * 界面要看字：交代问 `Job.report()`，**吐出来的东西自己遍历 `Job.stream()`**（跟着走、结束即收）
+ * —— 所以没有"进度事件"这回事，也不需要在树里装时钟（DESIGN §9.2 的"面向人"）。
  *
  * 这个 sink 是 **harness 的内部机制**：对外的那一面是 `Tree.subscribe`（操作与事件是同一个
  * 对象的两个方向）。所以别处不要注入 sink —— 事件的出口只有一处，订阅者从 `Tree` 上收。
@@ -36,14 +37,6 @@ export type Event =
       readonly name: string;
       readonly args: unknown;
       readonly job: string;
-    }
-  /** 作业还在跑时的**节流**进度（不是每次吐字都发）：界面据此重画那张卡片。 */
-  | {
-      readonly type: "job_progress";
-      readonly node: NodeId;
-      readonly job: string;
-      readonly bytes: number;
-      readonly secs: number;
     }
   /** 作业结束（交代已经进账）；`secs` 是它跑了多久。 */
   | {
