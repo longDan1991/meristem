@@ -37,24 +37,21 @@
  * 事件往订阅者出去；账的写入（`Store.append`）是同步的，而一条线的事**按投递顺序一件一件做**，
  * 所以同一个节点不会有两件事同时往账里塞消息（不加锁，也不需要）。
  *
- * **作业在树里的位置**（DESIGN §9.2 的"树自己做的"）：
+ * **作业在树里的位置**（DESIGN §9.2 / §9.5 的正文在这里落地）：
  *
- *   1. 起手：把 `args`、`ctx`（`{ outputRoot, space = 这个节点 }`）交给 `hand.run`，拿回一个 `Job`
- *      （作业表由底座登记，树不写那张表）。
- *   2. **起手一条回话**：立刻往账里写一条 `role: "tool"` 的回话，内容 = `job.report()`
- *      （还在跑 → "作业 #abc 已起…"；已经结束 → 结果）—— 每个 `tool_calls` 因此条条有回话，
- *      provider 那边天然合法，**程序不需要任何配对结构**。
- *   3. **结束一条消息**：若它还在跑，就等它（`job.wait()`，**从不 poll**）—— settle 时再往账里写
- *      一条 `role: "user"` 的消息（内容 = `report()`，同一个作业 id 在里面）、发状态事件、
- *      **叫这条线一声**；**内容没变就不写第二次**（立刻结束的手只留起手那一条）。
- *   4. 叫一条线之前先看两件事实：这条线上还有没有作业在跑、账末是不是"伸出去没回话的手"
+ *   1. 起手：`hand.run(args, { outputRoot, space = 这个节点 })` 拿回一个 `Job`（作业表由底座登记，树不写）。
+ *   2. **起手一条回话**：往账里写 `role: "tool"`，内容 = `job.report()`（还在跑 → "已起"；已经结束 → 结果）
+ *      —— 每个 `tool_calls` 因此条条有回话，provider 那边天然合法，**程序不需要任何配对结构**。
+ *   3. **结束一条消息**：还在跑就等它（`job.wait()`，**从不 poll**）；settle 时把 `report()` 写成一条
+ *      `role: "user"`（同一个作业 id 在里面）**投给这条线**，它再自己看要不要接着说；
+ *      **内容没变就不写第二次**（立刻结束的手只留起手那一条）。
+ *   4. 该不该说话永远从账上算：账末该它说、这条线上没有还在跑的作业、不是"伸出去没回话"的未完成区
  *      （`plan.actionable`；表就是 roles 那张，按空间筛）。
- *   5. 人取消 → 转发 `job.cancel()`；`stop`（收手）→ 取消所有在跑的作业。
- *   6. 模型接口失败 → 这条线记在内存里不再动 + `Event.transport_error`（不入账、不自动重试，§9.8）。
+ *   5. 人取消 → 转发 `job.cancel()`；`stop` → 取消所有在跑的作业；模型接口失败 → 记在内存里不再动
+ *      + `Event.transport_error`（不入账、不自动重试，§9.8）。
  *
  *   绝不做的：判断这一手会长不长（§9.3）；生成任何文本（消息内容一律来自 `job.report()`）；
- *   设统一超时（超时在每只手的底座里，§9.9）；轮询；重试；因为作业多就限并发；
- *   **替模型编交代** —— 它点了没有的手、或者手自己起不来，那是缺陷，当场把进程打穿（见 `crash`）。
+ *   设统一超时（§9.9）；轮询；重试；因为作业多就限并发；**替模型编交代**（缺陷 → 打穿进程，见 `deliver`）。
  *
  * 它不认识工具 / 技能 / 提示词分节 / MCP —— 那些词全在角色端口后面。
  *
@@ -124,9 +121,6 @@ export interface Tree {
   subscribe(consumer: (event: Event) => void): () => void;
 }
 
-/** 还没写进账的一条消息（`id` 是写账那一刻才定死的，见 DESIGN §9.6）。 */
-type Fresh = Omit<WireMessage, "id">;
-
 export function start(input: StartInput): Tree {
   const sink: EventSink = createSink();
   /** 模型接口失败过的线：**只在内存里**（§9.8 说账里一个字都不多），人重试 / 再开口时清掉。 */
@@ -142,70 +136,46 @@ export function start(input: StartInput): Tree {
     return found;
   }
 
-  /** 写账：`id` 由**我们**定死（传输层给的临时 id 不进账）。 */
-  function append(id: NodeId, messages: readonly Fresh[]): void {
+  /** 写账：`id` 由**我们**定死（传输层给的临时 id 不进账，见 DESIGN §9.6）。 */
+  function append(id: NodeId, messages: readonly Omit<WireMessage, "id">[]): void {
     input.store.append(
       id,
       messages.map((message) => ({ ...message, id: randomUUID() })),
     );
   }
 
-  /** 这条线上还有没有作业在跑（就一次筛选，树不另存一份）。 */
-  function hasJob(id: NodeId): boolean {
-    return allJobs().some((job) => job.space === id);
-  }
-
-  /**
-   * 缺陷（模型点了没有的手 / 手自己起不来 / 传输面用错）：**不回话、不兜底、不咽下去** ——
-   * 把它扔回进程（定时器里抛 = 未捕获异常），让程序带着真实的栈倒下去。
-   */
-  function crash(error: unknown): void {
-    setTimeout(() => {
-      throw error;
-    }, 0);
-  }
-
-  /**
-   * 跑完一件账上 / 模型上的活儿：缺陷交给进程（`crash`），这件到此为止。
-   * 不在这里吞 —— 缺陷带着栈把程序打穿，谁都别想接着装作没事。
-   */
-  async function attempt(work: () => Promise<void>): Promise<void> {
-    try {
-      await work();
-    } catch (error) {
-      crash(error);
-    }
+  /** 状态只**发事件**、不进账：它是推出来的（读账 + 谁在跑），落一份进账只会漂（`props.ts`）。 */
+  function refresh(id: NodeId): void {
+    const state = stateOf(input.store, id, allJobs().some((job) => job.space === id));
+    if (seen.get(id) === state) return;
+    seen.set(id, state);
+    sink.emit({ type: "state", node: id, state });
   }
 
   /**
    * **把事情投给某条线**：排在它已经排上的事后面（一条线一次只做一件）。
    *
-   * 这就是全部：没有状态机、没有锁 —— 隔离靠的是"这件事属于哪个节点"，由节点自己按顺序做。
-   * 投进来的事做完之后顺手刷新一下这条线的状态事件（状态是推出来的，见 `emitState`）。
+   * 这就是全部的并发控制：没有状态机、没有锁 —— 隔离靠"这件事属于哪个节点"，由这条线自己按顺序做。
+   * 头尾各刷一次状态（开始动 / 动完），界面因此看得见它什么时候在动。
+   *
+   * 出了缺陷（模型点了没有的手 / 手自己起不来 / 传输面用错）：**不回话、不兜底、不咽下去** ——
+   * 扔回进程（定时器里抛 = 未捕获异常），让它带着真实的栈倒下去。
    */
   function deliver(id: NodeId, work: () => Promise<void>): Promise<void> {
     const previous = chains.get(id) ?? Promise.resolve();
     const next = previous.then(async () => {
-      await work();
-      emitState(id);
+      refresh(id);
+      try {
+        await work();
+      } catch (error) {
+        setTimeout(() => {
+          throw error;
+        }, 0);
+      }
+      refresh(id);
     });
-    // 链上不留 rejection：缺陷已经交给进程了，链子还要接得住后面投进来的事。
-    chains.set(
-      id,
-      next.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
+    chains.set(id, next);
     return next;
-  }
-
-  /** 状态只**发事件**、不进账：它是推出来的（读账 + 谁在跑），落一份进账只会漂（`props.ts`）。 */
-  function emitState(id: NodeId): void {
-    const state = stateOf(input.store, id, hasJob(id));
-    if (seen.get(id) === state) return;
-    seen.set(id, state);
-    sink.emit({ type: "state", node: id, state });
   }
 
   /**
@@ -264,7 +234,7 @@ export function start(input: StartInput): Tree {
     append(id, [{ role: "tool", by: hand.name, content: started }]);
     sink.emit({ type: "hand_start", node: id, name: hand.name, args: call.arguments, job: job.id });
 
-    // 还在跑就等它（不是轮询）；结束时那条消息进账、这条线被叫一声。
+    // 还在跑就等它（不是轮询）；结束时把那条消息**投给这条线**，再让它看看要不要接着说。
     void job.wait().then(() => {
       sink.emit({
         type: "hand_end",
@@ -289,8 +259,8 @@ export function start(input: StartInput): Tree {
    */
   async function maybeSpeak(id: NodeId): Promise<void> {
     if (stopped || failed.has(id)) return;
-    if (!actionable(input.store, id, hasJob(id))) return;
-    await attempt(() => speak(id, input.role(node(id).props.role), input.store.assemble(id)));
+    if (!actionable(input.store, id, allJobs().some((job) => job.space === id))) return;
+    await speak(id, input.role(node(id).props.role), input.store.assemble(id));
   }
 
   return {
@@ -312,7 +282,6 @@ export function start(input: StartInput): Tree {
       const parent = choice.parent === null ? null : node(choice.parent);
       const created = input.store.create(born(choice, parent));
       append(created, [{ role: "user", content: choice.inputText }]);
-      emitState(created);
 
       if (choice.mode !== "summarize") {
         void deliver(created, () => maybeSpeak(created));
@@ -320,21 +289,19 @@ export function start(input: StartInput): Tree {
       }
 
       // 总结分叉：两轮都投给**这条新线自己**（乙抽底 → 丙回应）——
-      // 它们排在这条线的链上，中间不会插进别人的话（也是"按节点隔离"的全部含义）。
+      // 它们排在这条线的链上，中间不会插进别人的话（这就是"按节点隔离"的全部含义）。
       await deliver(created, async () => {
         // 乙：只抽底、不回应用户 —— 它看的是**父线看得见的历史 + 这条新消息**
         // （新线自带边界，往后自己看不到父线，所以这一轮要把两边都摆出来）。
         const history = parent === null ? [] : input.store.assemble(parent.id);
-        await attempt(() =>
-          speak(
-            created,
-            input.role(SUMMARY_FORK),
-            [...history, ...input.store.content(created)],
-            SUMMARY_FORK,
-          ),
+        await speak(
+          created,
+          input.role(SUMMARY_FORK),
+          [...history, ...input.store.content(created)],
+          SUMMARY_FORK,
         );
         // 丙：回应用户那句话（常规一轮：组装这条线看得见的 msgs）。
-        await attempt(() => speak(created, input.role(choice.role), input.store.assemble(created)));
+        await speak(created, input.role(choice.role), input.store.assemble(created));
       });
 
       return created;
@@ -360,6 +327,6 @@ export function start(input: StartInput): Tree {
       void deliver(id, () => maybeSpeak(id));
     },
 
-    subscribe: (consumer) => sink.subscribe(consumer),
+    subscribe: sink.subscribe,
   };
 }
