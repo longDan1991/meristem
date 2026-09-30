@@ -12,11 +12,11 @@
  * 定死之后只读 —— 父的名字与角色不会再变，所以意图链不会变旧。
  *
  * **内部规则**：对外只有 `Loop.fork`（人点的那一下）；`born` 不上面 ——
- * 界面不该自己造节点再塞进账里。
+ * 界面不该自己造节点再塞进账里。它只算"这个节点该长什么样"，**记进账的是 Store**（账的唯一写者）。
  *
  * 变因：出生语义（给新线哪些事实、名字与目录怎么起、两种模式各做什么）。
  */
-import type { Node, NodeId } from "@meristem/atree";
+import type { Node, NodeId, TreeInput } from "@meristem/atree";
 import type { RoleId } from "@meristem/roles";
 import type { LineProps } from "./props.ts";
 
@@ -50,5 +50,29 @@ export interface ForkInput {
   readonly dir?: string;
 }
 
-/** 分叉出一条新线：节点造好交给 Store 记进账（账的唯一写者是 atree）。 */
-export declare function born(input: ForkInput, parent: Node<LineProps> | null): Node<LineProps>;
+/** 算出"这个节点该长什么样"（交给 `Store.create` 记进账）。 */
+export function born(input: ForkInput, parent: Node<LineProps> | null): TreeInput<LineProps> {
+  const outputRoot = input.dir ?? parent?.props.outputRoot;
+  if (outputRoot === undefined) throw new Error("造根必须给目录（没有父可以继承）");
+
+  return {
+    parent: input.parent,
+    boundary: input.mode === "summarize",
+    props: {
+      name: nameOf(input.inputText),
+      role: input.role,
+      outputRoot,
+      state: "running",
+    },
+  };
+}
+
+/** 名字：人那句话的第一个非空行，太长就掐断（人的话就是名字的来源，不许模型生成摘要冒充它）。 */
+function nameOf(text: string): string {
+  const line = text
+    .split("\n")
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .find((part) => part !== "");
+  if (line === undefined) return "（没有说一句话）";
+  return line.length <= 24 ? line : `${line.slice(0, 24)}…`;
+}

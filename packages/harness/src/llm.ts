@@ -23,13 +23,18 @@
  *
  * 变因：provider 与流式细节（换端点、换模型、换 SDK）。
  */
-import type { JsonSchema, Wire, WireMessage } from "./shape.ts";
+import type { JsonSchema, Usage, Wire, WireMessage } from "./shape.ts";
 
 export interface StreamHandlers {
   /** 正文增量（终端画在这个节点那一行上）。 */
   onText?(delta: string): void;
   /** 思考增量。 */
   onReasoning?(delta: string): void;
+  /**
+   * 这次调用的用量（流末尾报一次，provider 给多少就是多少）。
+   * 它只有一个去处：`Event.usage`（给人看 / 记账用），**不进 msgs** —— 账里放的是说过的话。
+   */
+  onUsage?(usage: Usage): void;
 }
 
 /** 一把钥匙 + 它的来源：来源是给人看的那一面，值不给任何人看。 */

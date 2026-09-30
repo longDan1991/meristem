@@ -34,8 +34,8 @@
  *      （还在跑 → "作业 #abc 已起…"；已经结束 → 结果）—— 每个 `tool_calls` 因此条条有回话，
  *      provider 那边天然合法，**程序不需要任何配对结构**。
  *   3. **结束一条消息**：若它还在跑，就等它（`job.wait()`，**循环从不 poll**）—— settle 时再往账里写
- *      一条 `role: "user"` 的消息（内容 = `report()`，同一个作业 id 在里面），改状态、**唤醒这条线**。
- *      模型靠那个 id 自己把两条对上（配对是模型的事，§9.6）。
+ *      一条 `role: "user"` 的消息（内容 = `report()`，同一个作业 id 在里面），改状态、**唤醒这条线**；
+ *      **内容没变就不写第二次**（立刻结束的手只留起手那一条）。
  *   4. 调度时跳过"还有作业在跑"的线（`plan.actionable(..., true)`；表就是 `roles` 那张，按空间筛）。
  *   5. 人取消 → 转发 `job.cancel()`；`stop`（收手）→ 取消所有在跑的作业。
  *   6. 模型接口失败 → 跳过这条线 + `Event.transport_error`（不入账、不自动重试，§9.8）。
@@ -47,12 +47,18 @@
  *
  * 变因：控制流的推进方式（唤醒、上下文组装、错误处置、出生与调度规则）。
  */
-import type { NodeId } from "@meristem/atree";
+import { randomUUID } from "node:crypto";
+import type { Node, NodeId } from "@meristem/atree";
 import type { Job, Role, RoleId } from "@meristem/roles";
-import type { Event } from "./events.ts";
+import { SUMMARY_FORK, all as allJobs } from "@meristem/roles";
+import { createSink } from "./events.ts";
+import type { Event, EventSink } from "./events.ts";
 import type { ForkInput } from "./fork.ts";
+import { born } from "./fork.ts";
 import type { LlmClient } from "./llm.ts";
-import type { LineStore } from "./props.ts";
+import { actionable, stateOf } from "./plan.ts";
+import type { LineProps, LineStore, NodeState } from "./props.ts";
+import type { ToolCall, WireMessage } from "./shape.ts";
 
 /** 装配输入：**只有端口**，没有值。 */
 export interface StartInput {
@@ -73,15 +79,8 @@ export interface Loop {
   /**
    * 分叉：开一条新线，返回新线的 id（界面据此选中它）。**造根就是 `parent: null` 的那一种**。
    *
-   * `mode = "inherit"`（缺省）就是造一条新线、把那句话作为它的第一条 `user` 消息。
-   *
-   * `mode = "summarize"`（总结分叉）时，这个动作里连着做完三件事，中间换两次"穿谁的系统提示词"：
-   *   1. 造新线（自带底）+ 把人的那句话写进新线的对话；
-   *   2. **穿总结角色**（`roles.SUMMARY_FORK`，乙）跑一轮：它只从父线看得见的历史里抽出与那条
-   *      新消息相关的**全部**信息，输出成一份自足的底 —— **不回应用户**（回应是丙的事）。
-   *      这一条回复记 `by = 乙`；
-   *   3. **换成人选的新角色**（丙）跑一轮，由丙 回应用户那句话 ——
-   *      所以用户看到的开局是丙 的话，而总结是丙 的底（丙 拼上下文时到这条线为止）。
+   * `mode = "summarize"` 时这个动作里连着做完三件事（造线 → 穿总结角色抽底 → 穿人选角色回应），
+   * 详细次序见 `ForkInput`。
    */
   fork(input: ForkInput): Promise<NodeId>;
 
@@ -104,4 +103,238 @@ export interface Loop {
   subscribe(consumer: (event: Event) => void): () => void;
 }
 
-export declare function start(input: StartInput): Loop;
+/** 还没写进账的一条消息（`id` 是写账那一刻才定死的，见 DESIGN §9.6）。 */
+type Fresh = Omit<WireMessage, "id">;
+
+export function start(input: StartInput): Loop {
+  const sink: EventSink = createSink();
+  /** 模型接口失败过的线：**只在内存里**（§9.8 说账里一个字都不多），人重试时清掉。 */
+  const failed = new Set<NodeId>();
+  /** 正在推的线：同一轮不许被推两次（`fork` 里那几轮也占着这一格）。 */
+  const busy = new Set<NodeId>();
+  const seen = new Map<NodeId, NodeState>();
+  let stopping = false;
+  let woken = false;
+  let wakeup: (() => void) | null = null;
+
+  /**
+   * 唤醒：把挂着的那个等待解开；**没人挂的时候把标记留下** ——
+   * 人操作可能正好发生在循环入睡之前，丢了这一下这条线就再也没人叫了。
+   */
+  function wake(): void {
+    woken = true;
+    const resolve = wakeup;
+    wakeup = null;
+    resolve?.();
+  }
+
+  /** 等人：挂起来，直到有人动（人的操作 / 作业结束 / 收手）；已经有人动过就不睡。 */
+  async function idle(): Promise<void> {
+    if (woken) return;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    wakeup = resolve;
+    await promise;
+  }
+
+  function node(id: NodeId): Node<LineProps> {
+    const found = input.store.get(id);
+    if (found === null) throw new Error(`账里没有这个节点：${id}`);
+    return found;
+  }
+
+  /** 树上的所有线（出生顺序，父在子前）。 */
+  function lines(): readonly NodeId[] {
+    const root = input.store.root();
+    if (root === null) return [];
+    const walk = (id: NodeId): NodeId[] => [id, ...input.store.children(id).flatMap(walk)];
+    return walk(root);
+  }
+
+  /** 写账：`id` 由**我们**定死（传输层给的临时 id 不进账）。 */
+  function append(id: NodeId, messages: readonly Fresh[]): void {
+    input.store.append(
+      id,
+      messages.map((message) => ({ ...message, id: randomUUID() })),
+    );
+  }
+
+  /** 哪些空间里还有作业在跑（一次问到位，循环不逐条查）。 */
+  function runningSpaces(): ReadonlySet<string> {
+    return new Set(allJobs().map((job) => job.space));
+  }
+
+  /**
+   * 让一条线说一轮（它是一整轮：一次调用 + 把它伸出的手起起来）。
+   * `messages` 显式传进来，是因为总结分叉那一轮看的**不是**新线自己看得见的东西（见 `fork`）。
+   */
+  async function speak(id: NodeId, role: Role, messages: readonly WireMessage[], by?: string): Promise<void> {
+    let reply: WireMessage;
+    try {
+      reply = await input.llm.chat(
+        { system: role.system(), messages },
+        role.hands().map((hand) => hand.schema),
+        {
+          onText: (delta) => sink.emit({ type: "message", node: id, channel: "text", delta }),
+          onReasoning: (delta) => sink.emit({ type: "message", node: id, channel: "thought", delta }),
+          onUsage: (usage) => sink.emit({ type: "usage", node: id, usage }),
+        },
+      );
+    } catch (error) {
+      // 模型接口失败：账里一个字都不多 —— 这条线停在这儿，红字与重试归人（§9.8）。
+      failed.add(id);
+      sink.emit({
+        type: "transport_error",
+        node: id,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      return;
+    }
+
+    append(id, [by === undefined ? reply : { ...reply, by }]);
+    // 手按它在 `tool_calls` 里的顺序起（账的顺序 = 它写的顺序）；`run` 只负责"起起来"。
+    for (const call of reply.toolCalls ?? []) await startHand(id, role, call);
+  }
+
+  /** 把一次调用变成一次执行：起手一条回话，结束一条消息（§9.5）。 */
+  async function startHand(id: NodeId, role: Role, call: ToolCall): Promise<void> {
+    const hand = role.hands().find((candidate) => candidate.name === call.name);
+    if (hand === undefined) {
+      // 点了没有的手：不静默 —— 它的回话就是这条消息（模型得知道自己点了空）。
+      append(id, [{ role: "tool", content: `这条线上没有叫 ${call.name} 的手（有哪些手见 system 的 tools 一节）。` }]);
+      return;
+    }
+
+    let job: Job;
+    try {
+      job = await hand.run(call.arguments, { outputRoot: node(id).props.outputRoot, space: id });
+    } catch (error) {
+      append(id, [
+        {
+          role: "tool",
+          by: hand.name,
+          content: `这一手（${hand.name}）没能起：${error instanceof Error ? error.message : String(error)}`,
+        },
+      ]);
+      return;
+    }
+
+    const started = job.report();
+    append(id, [{ role: "tool", by: hand.name, content: started }]);
+    sink.emit({ type: "hand_start", node: id, name: hand.name, args: call.arguments, job: job.id });
+
+    // 还在跑就等它（不是轮询）；结束时那条消息进账、这条线被唤醒。
+    void job.wait().then(() => {
+      sink.emit({
+        type: "hand_end",
+        node: id,
+        name: hand.name,
+        job: job.id,
+        secs: (Date.now() - job.at) / 1000,
+      });
+      const settled = job.report();
+      if (settled !== started) append(id, [{ role: "user", by: hand.name, content: settled }]);
+      wake();
+    });
+  }
+
+  /** 推所有该推的线（一起推）；返回"这一轮有没有做事"。 */
+  async function advance(): Promise<boolean> {
+    const running = runningSpaces();
+    const work: Promise<void>[] = [];
+
+    for (const id of lines()) {
+      if (failed.has(id) || busy.has(id)) continue;
+      if (!actionable(input.store, id, running.has(id))) continue;
+      busy.add(id);
+      work.push(
+        speak(id, input.role(node(id).props.role), input.store.assemble(id)).finally(() => busy.delete(id)),
+      );
+    }
+
+    await Promise.all(work);
+    return work.length > 0;
+  }
+
+  /** 把状态写回 props 并发事件（状态是**代码给的事实**，不是谁的自我描述）。 */
+  function syncStates(): void {
+    const running = runningSpaces();
+    for (const id of lines()) {
+      const state = stateOf(input.store, id, running.has(id));
+      if (seen.get(id) === state) continue;
+      seen.set(id, state);
+      if (node(id).props.state !== state) input.store.patch(id, { state });
+      sink.emit({ type: "state", node: id, state });
+    }
+  }
+
+  async function run(): Promise<void> {
+    while (!stopping) {
+      woken = false;
+      const progressed = await advance();
+      syncStates();
+      if (!progressed) await idle();
+    }
+  }
+
+  return {
+    run,
+
+    async say(id: NodeId, text: string): Promise<void> {
+      append(id, [{ role: "user", content: text }]);
+      failed.delete(id);
+      wake();
+    },
+
+    async fork(choice: ForkInput): Promise<NodeId> {
+      const parent = choice.parent === null ? null : node(choice.parent);
+      const created = input.store.create(born(choice, parent));
+      append(created, [{ role: "user", content: choice.inputText }]);
+      busy.add(created);
+
+      try {
+        if (choice.mode === "summarize") {
+          // 乙：只抽底、不回应用户 —— 它看的是**父线看得见的历史 + 这条新消息**
+          // （新线自带边界，往后自己看不到父线，所以这一轮要把两边都摆出来）。
+          const history = parent === null ? [] : input.store.assemble(parent.id);
+          await speak(
+            created,
+            input.role(SUMMARY_FORK),
+            [...history, ...input.store.content(created)],
+            SUMMARY_FORK,
+          );
+          // 丙：回应用户那句话（常规一轮：组装这条线看得见的 msgs）。
+          await speak(created, input.role(choice.role), input.store.assemble(created));
+        }
+      } finally {
+        busy.delete(created);
+        syncStates();
+        wake();
+      }
+
+      return created;
+    },
+
+    stop(): void {
+      stopping = true;
+      for (const job of allJobs()) job.cancel();
+      wake();
+    },
+
+    jobs(): readonly Job[] {
+      return allJobs();
+    },
+
+    cancel(job: string): void {
+      const found = allJobs().find((candidate) => candidate.id === job);
+      if (found === undefined) return;
+      found.cancel();
+    },
+
+    retry(id: NodeId): void {
+      failed.delete(id);
+      wake();
+    },
+
+    subscribe: (consumer) => sink.subscribe(consumer),
+  };
+}

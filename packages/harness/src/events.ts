@@ -66,4 +66,19 @@ export interface EventSink {
   subscribe(consumer: (event: Event) => void): () => void;
 }
 
-export declare function createSink(): EventSink;
+/** 一个 sink：订阅者列表 + 注册顺序分发（订阅 / 退订都发生在分发之外，按下标摘）。 */
+export function createSink(): EventSink {
+  const consumers: ((event: Event) => void)[] = [];
+  return {
+    emit(event: Event): void {
+      for (const consumer of [...consumers]) consumer(event);
+    },
+    subscribe(consumer: (event: Event) => void): () => void {
+      consumers.push(consumer);
+      return () => {
+        const at = consumers.indexOf(consumer);
+        if (at >= 0) consumers.splice(at, 1);
+      };
+    },
+  };
+}
