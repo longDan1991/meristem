@@ -1,91 +1,87 @@
 # meristem
 
-> A recursively working LLM tree: nodes decide for themselves whether to branch, the root converges to a conclusion.
+> A tree of human work: **people recurse, the model works inside one line.**
 
 [中文](README.md) · English
 
-> **Status: alpha.** The system-prompt structure and the protocol are still moving; no stability guarantees. Not published to PyPI (`[tool.uv] package = false`) — run it as an application.
+> **Status: alpha.** Structure and protocol still move; it runs as an application (`private: true`, not published).
 
 ---
 
-## What it is
+## What this is
 
-An agent runtime that lives in the terminal. The task is **not** pre-orchestrated into a DAG; the model expands it recursively over a tree:
+An agent runtime that lives in the terminal. Work is **not** decomposed automatically: both
+splitting and converging are the human's.
 
-- A node spawns children with `create_children`; each child is its own independent conversation.
-- Each node's dialogue is flat and has its own ledger (`core/runtime/dialogue.py`).
-- Nodes talk through `communicate`: a parent asks / demands rework / re-tasks a child, a child reports progress and conclusions to the parent — task information settles hierarchically on each node, so no conversation ever bloats.
-- **There is exactly one control flow — a single Loop** (`core/runtime/loop.py`). It is the only thing that advances a tree.
-- A session = one tree + one append-only record (`core/runtime/store.py`). **Writing is the ledger.**
-- The verdict is not the code's to make: `core/protocol/gate.py` only validates field shape; whether something is done is judged by the parent (ultimately a human) from the messages.
+- **The human splits and converges**: say something to open a line (`enter`), fork from a line
+  (`ctrl+b`), wind it up (`ctrl+x`).
+- **A line is an angle**: a conversation plus the role (prompt + tools) for that angle. The human
+  can step in and keep talking at any time.
+- **A fork is a new line**: its context grows out of the fork point, it is not a copy of the history.
+- **Writes leave through one exit**: speak / fork / stop. The interface touches nothing else.
+- **The ledger is the result**: append-only JSONL, written as it happens. No separate result store,
+  no separate index.
 
-## Three design decisions
+Why a human does the recursing rather than the model: `docs/DESIGN.md` §1 carries the verdict from
+the previous implementation -- 2443 nodes in one night with 86% never finished, self-reported fields
+gamed 69% of the time, and only 3% of the criteria below the root still mentioning the original goal.
 
-**1. The system prompt is not a built string — it is a named-section data structure.**
+## Three design tradeoffs
 
-`system = Record<section name, content>`: one same-named XML tag per section, and six sections are always present (no conditional sections under the communication model), frozen for a node's lifetime. Prose, discipline, the skill list and the tool list are each a section (`core/prompts/`). That the six sections are always present is pinned by the section-name check in `tests/test_protocol.py`.
+**1. The human is the subject of recursion; the model is the subject of execution.**
+Drift happens in every automatic hand-off, and human involvement restricted to the two ends is too
+coarse. So forks are made by the human, and attention splits where the fork happens.
 
-**2. The tool schema is the single source of tool semantics.**
+**2. The system prompt is named data, not an assembled string.**
+One XML tag per section, sections always present and fixed for the lifetime of a role. Tool schemas
+are the single source of tool semantics -- every hand is grown from its schema and description, with
+no second definition to keep in sync.
 
-The `rules` section is derived from the tool list, the `tools` section is one line per tool (`core/prompts/tools.py`), and that list itself is derived from each tool's scope declaration. A tool is just an `@mcp.tool` function — schema and implementation in one place, with no second definition to keep in sync (`tools/defs.py`). The verdict is not the code's to make: `communicate` only delivers the message; whether something is done is judged by whoever receives it (the parent, ultimately a human).
-
-**3. The bash tool does not fork/exec.**
-
-Commands run on [`llmbash`](https://pypi.org/project/llmbash/) — an in-process bash-compatible shell outside this repo (Rust, 50+ common commands with no dependency on system binaries). Output is slimmed per command type before it enters the context (`tools/bash.py`).
+**3. Screen, loop, capability and ledger each live in their own package.**
+`tui` only draws (cell widths, pinned to the bottom, wide glyphs never cut in half), `harness` owns
+the single Loop and the transport, `roles` owns roles and hands (including the job mechanism), and
+`atree` owns the ledger (append-only, resumable). Assembly belongs to `terminal`.
 
 ## Code map
 
 ```
-cli.py              the only executable entry point: parses arguments
-main.py             initialisation (workspace / API key / trace root), then dispatch to the terminal session
-
-core/
-  config.py         deployment config: where the workspace is, where past sessions are scanned
-  events.py         event outlet: dispatch (type, payload) to consumers in registration order
-  llm.py            LLM adapter: messages in, Message out (text + tool calls)
-  prompts/          the named-section structure of system (prose / rules / skills / tools)
-  protocol/         form fields + shape validation + rendering node state / communication messages
-  runtime/          the single Loop + protocol ops + scheduling rules + session store
-tools/              the only channel between the model and the program
-  defs.py           @mcp.tool functions: schema and implementation in one place
-  bash.py           commands run on the llmbash in-process shell
-  skills.py         */SKILL.md under SKILLS_DIRS -> fastmcp resources, read on demand
-terminal/           a Textual app: tree on the left, stream in the middle, five regions
+packages/
+  atree/      ledger: node shape + append-only JSONL (written as it happens, resumable)
+  harness/    the single Loop + transport (model words and hand results) + the defect node
+  roles/      roles (one xml per role), hands (tools), skills, job table, MCP (not wired yet)
+  tui/        the screen: one file per component (tree strip / stream / live card / status / input)
+  terminal/   assembly and interaction: config (.env) -> ledger -> roles -> transport -> tree -> UI
+docs/DESIGN.md    the design of this tree (why it looks like this, what is invariant)
+AGENTS.md         this repo's hard constraints
 ```
 
 ## Running it
 
-Four values in `.env`:
+Put `.env` at the **repo root** (key names and format in `.env.example`; `.env` is not tracked):
 
 ```bash
-export TREE_BASE_URL='...'        # model endpoint (OpenAI-compatible)
-export TREE_API_KEY='...'
-export TREE_MODEL='...'
-export TREE_WORKSPACE='/path/to/workspace'   # everything produced lands here
+export MERISTEM_BASE_URL='https://…'    # OpenAI-compatible endpoint (omit to use the provider's own)
+export MERISTEM_API_KEY='…'             # the key value itself
+export MERISTEM_MODEL='provider/model'
+export MERISTEM_WORKSPACE='/abs/path'   # the agent's working directory; the ledger lands in <it>/.tree/ledger.jsonl
 ```
 
 ```bash
-uv run python cli.py        # real run: the task and its acceptance criteria are agreed inside the terminal
-uv run python cli.py -r     # resume: pick a past session from a list and load it as the current one
+bun install
+bun start            # for real. An empty ledger is fine: with no root yet, the first sentence is the first line
+bun start --at <id>  # stand on one node's line
 ```
 
-Without `TREE_API_KEY` the entry point fails immediately — it will not silently fall back to a fake model.
+`.env` is loaded from the directory you start the process in (Bun does not search upwards), so from
+anywhere else put the variables in the environment first. A missing required key fails at the entry
+point naming the variable -- no fallback, no silent swap for a fake model.
 
 ## Tests
 
 ```bash
-uv run python tests/test_<module>.py     # cli / intake / llm / protocol / resume / terminal_pty / tools / tty
-uv run ruff check                        # code discipline, see AGENTS.md §12
+bun run typecheck    # both tsconfigs
+bun test             # headless; the one test needing a real process ships its own child fixture
 ```
-
-The tests are driven by a fake model (`FakeLLM`) and need no real API key.
-
-## Docs
-
-| Document | What it covers |
-|---|---|
-| `docs/DESIGN.md` | the design of the tree (target design: the human's work tree) — the code still sits on the old structure |
-| `AGENTS.md` | this repo's hard-constraint rule list; the machine-decidable parts are enforced by ruff |
 
 ## License
 

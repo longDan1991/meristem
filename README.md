@@ -1,93 +1,77 @@
 # meristem
 
-> 一棵递归工作的 LLM 树：节点自己决定要不要分叉，根节点负责收敛成结论。
+> 人的工作树：**人递归，模型在一条线里干活。**
 
 [English](README.en.md) · 中文
 
-> **状态：alpha。** 系统提示词结构与协议仍在演进，不承诺稳定；未发布到 PyPI（`[tool.uv] package = false`），按应用运行。
+> **状态：alpha。** 结构与协议仍在演进；按应用运行（`private: true`，不发包）。
 
 ---
 
 ## 这是什么
 
-一个跑在终端里的 agent 运行时。任务**不是**预先编排成 DAG，而是模型在树上递归展开：
+一个跑在终端里的 agent 运行时。任务**不是**自动递归拆出来的：拆与收都是人做的。
 
-- 一个节点用 `create_children` 派生子节点，子节点各自是一段独立对话；
-- 每个节点的对话是平的，有自己的账本（`core/runtime/dialogue.py`）；
-- 节点之间靠 `communicate` 来往：父向子追问 / 要求重做 / 再下任务，子向父回报进展与结论
-  —— 任务信息分层沉淀在各自节点，谁的上下文都不膨胀；
-- **唯一的控制流是一个 Loop**（`core/runtime/loop.py`）——一棵树只由它推进；
-- 一场会话 = 一棵树 + 一份 append-only 记录（`core/runtime/store.py`），**写入即账**；
-- 判定权不在代码：`core/protocol/gate.py` 只做形式字段的形状校验，做没做完
-  由父节点（最终是人）从消息里判断。
+- **人负责拆和收**：说一句开一条线（`enter`）、从某条线分叉（`ctrl+b`）、收手（`ctrl+x`）。
+- **每条线是一个角度**：线上是一段对话，模型带着这个角度的角色（提示词 + 工具）去做；人随时进去接着说。
+- **分叉是一条新线**：上下文从分叉点长出来，不是把整段历史复制一份。
+- **写账只有一个出口**：说一句 / 分叉 / 停 —— 界面碰不到别的地方。
+- **账就是成果**：append-only 的 JSONL，写入即账；不另建成果库、不另建索引。
+
+为什么要人来做递归（而不是让模型自己拆完）：旧实现的实测判决书在 `docs/DESIGN.md` §1
+——一晚 2443 个节点、86% 从未完工，自报字段被 game 到 69%，根以下只有 3% 的判据还提到最初的目标。
 
 ## 三个设计取舍
 
-**1. system 提示词不是拼好的字符串，是命名分节的数据结构。**
+**1. 人是递归的主体，模型是执行的主体。**
+漂移发生在中间每一次自动分配里，而人的介入只有两头时粒度太粗。所以分叉由人做，注意力在分叉时分开。
 
-`system = Record<节名, 内容>`：每节一个同名 XML 标签，六个节恒在（沟通模型下没有条件节），生命周期内不再变。散文、纪律、skill 清单、工具清单各成一个节（`core/prompts/`）。"六个节恒在"由 `tests/test_protocol.py` 的节名核对守着。
+**2. system 提示词是命名分节的数据结构，不是拼出来的字符串。**
+每节一个同名 XML 标签，节恒在、生命周期内不变；工具 schema 是工具语义的唯一来源（模型的每只手都从 schema 与描述长出来，没有第二份定义要同步）。
 
-**2. 工具 schema 是工具语义的唯一来源。**
-
-`rules` 节从工具清单推导，`tools` 节一行一个工具（`core/prompts/tools.py`），清单本身从工具的 scope 声明派生。工具就是 `@mcp.tool` 函数——schema 与实现一体，没有第二份需要同步的定义（`tools/defs.py`）。判定权不在代码：`communicate` 只负责把消息送到，做没做完由收消息的一方（父节点，最终是人）判断。
-
-**3. bash 工具不 fork / exec。**
-
-命令跑在 [`llmbash`](https://pypi.org/project/llmbash/) 上——本仓库之外的一个进程内 bash 兼容 shell（Rust 实现，50+ 常用命令不依赖系统二进制），输出进上下文前先按命令类型瘦身（`tools/bash.py`）。
+**3. 屏幕、Loop、能力、账，各归各的包。**
+`tui` 只画屏幕（按**格**数、贴底、宽字符不许只露一半），`harness` 只管唯一的 Loop 与传输，
+`roles` 管角色与手（含作业机制），`atree` 管账（append-only + 可 resume）。装配是 `terminal` 的事。
 
 ## 代码地图
 
 ```
-cli.py              唯一可执行入口：解析参数
-main.py             初始化（工作区 / API key / 记录根）后派发给终端会话
-
-core/
-  config.py         部署配置：工作区在哪、历史会话扫哪里
-  events.py         事件出口：把 (type, payload) 按注册顺序分发给消费者
-  llm.py            LLM 适配层：给 messages，返回 Message（文本 + 工具调用）
-  prompts/          system 的命名分节结构（prose / rules / skills / tools）
-  protocol/         形式字段（fields）+ 形状校验（gate）+ 节点/沟通消息渲染（messages）
-  runtime/          唯一的 Loop + 协议操作（ops）+ 调度纯规则（plan）+ 会话存储（store）
-tools/              模型与程序之间唯一的通道
-  defs.py           @mcp.tool 函数：schema 与实现一体
-  bash.py           命令跑在 llmbash 进程内 shell 上
-  skills.py         SKILLS_DIRS 下 */SKILL.md → fastmcp 资源，模型按需 read_skill
-terminal/           Textual 应用：左树右流五区
+packages/
+  atree/      账：节点形状 + append-only 的 JSONL 账本（写入即账，能 resume）
+  harness/    唯一的 Loop + 传输（把模型的话与手的结果接上）+ 缺陷节点
+  roles/      角色（一个 xml 一个角色）、手（工具）、技能、作业表、MCP（未接）
+  tui/        屏幕：五区组件各一文件（树条带 / 消息流 / 实时卡片 / 状态条 / 输入行）
+  terminal/   装配与交互：配置（.env）→ 账 → 角色 → 传输 → 树 → 界面
+docs/DESIGN.md    这棵树的设计（为什么长这样、哪些是不变量）
+AGENTS.md         本仓库的硬约束禁令清单
 ```
 
 ## 跑起来
 
-`.env` 里给四项：
+`.env` 放在**仓库根**（键名与格式见 `.env.example`；`.env` 不进版本控制）：
 
 ```bash
-export TREE_BASE_URL='...'        # 模型端点（OpenAI 兼容）
-export TREE_API_KEY='...'
-export TREE_MODEL='...'
-export TREE_WORKSPACE='/path/to/workspace'   # 跑出来的东西全落这里
+export MERISTEM_BASE_URL='https://…'    # OpenAI 兼容端点（不给就用 provider 自带的）
+export MERISTEM_API_KEY='…'             # 钥匙值本身
+export MERISTEM_MODEL='provider/model'
+export MERISTEM_WORKSPACE='/abs/path'   # agent 的做事目录；账落 <它>/.tree/ledger.jsonl
 ```
 
 ```bash
-uv run python cli.py        # 真跑：任务与验收标准在终端里谈定
-uv run python cli.py -r     # 接着上次的会话：列表选一个加载成当前会话
+bun install
+bun start            # 真跑。空账也能起：连根都没有时，第一句话就是第一条线
+bun start --at <id>  # 直接站到某个节点那条线上
 ```
 
-不给 `TREE_API_KEY` 会直接在入口报错退出——不会静默换假模型。
+`.env` 只从**起进程的目录**加载（Bun 不往上找），所以别处的目录起就要先把变量放进环境；
+缺必填项会在入口带着变量名报错退出——不兜底、不静默换假模型。
 
 ## 测试
 
 ```bash
-uv run python tests/test_<module>.py     # cli / intake / llm / protocol / resume / terminal_pty / tools / tty
-uv run ruff check                        # 代码纪律，见 AGENTS.md §12
+bun run typecheck    # 两套 tsconfig
+bun test             # 无头用例（要真进程的那条自带子进程夹具）
 ```
-
-测试用假模型（`FakeLLM`）驱动，不需要真实 API key。
-
-## 文档
-
-| 文档 | 写什么 |
-|---|---|
-| `docs/DESIGN.md` | 这棵树的设计（目标设计：人的工作树）—— 代码还停在旧结构 |
-| `AGENTS.md` | 本仓库的硬约束禁令清单，能机器判定的部分由 ruff 执行 |
 
 ## License
 

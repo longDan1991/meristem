@@ -5,35 +5,26 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Local machines only edit code; every check happens here — same convention as
-# llm-fs / llm-sh.
-#
-# The tests are plain scripts that sys.exit() their own return code, sharing
-# tests/harness.py for repo-root path setup and ✓/✗ reporting. There is no test
-# runner to delegate to, so the modules are listed explicitly.
-
+# 干净机器上的那道闸：本地跑不跑随你，这里是"别人 clone 下来能不能过"的答案。
 jobs:
   check:
-    name: ruff + tests
+    name: typecheck + tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Matches the local .venv (requires-python >= 3.11).
-      - uses: actions/setup-python@v5
+      # 与本地同一条版本线（engines 里写的是 bun >= 1.3.0；bun.lock 锁依赖）
+      - uses: oven-sh/setup-bun@v2
         with:
-          python-version: "3.11"
-      - uses: astral-sh/setup-uv@v3
+          bun-version: "1.4.2"
 
-      # AGENTS.md §12: the machine-decidable discipline is enforced by ruff,
-      # not by good intentions.
-      - name: Ruff
-        run: uv run ruff check
+      - name: Install
+        run: bun install --frozen-lockfile
 
-      # terminal_pty / tty depend on PTY and on Textual's headless behaviour.
-      # This Linux runner is the only place they get exercised outside macOS.
+      # 两个包（terminal / tui）的 tsconfig 都过 —— 类型是这套代码唯一的机器判据
+      - name: Typecheck
+        run: bun run typecheck
+
+      # `bun test` 全跑：都是无头用例（要真进程的那条自带子进程夹具，不占终端）
       - name: Tests
-        run: |
-          for t in cli intake llm protocol resume terminal_pty tools tty; do
-            uv run python tests/test_$t.py
-          done
+        run: bun test
