@@ -130,7 +130,7 @@ describe("background：起之后才回来的执行", () => {
     expect(running("n1")).toEqual([]);
   });
 
-  test("超时：交代说得清「跑了多久、被杀、怎么跑更久」，尾巴跟着留下", async () => {
+  test("超时：交代说得清「跑了多久、被杀、怎么跑更久」，到此刻的输出跟着留下", async () => {
     vi.useFakeTimers();
     const { job, chunks, stops } = hold("n1", 0.05, "timeout");
 
@@ -164,19 +164,16 @@ describe("background：起之后才回来的执行", () => {
     expect(job.report()).toContain("这只手没有自己的时间参数，统一按 0.05 秒杀");
   });
 
-  test("尾巴有界：头尾留着，中间省略多少字说得出来", async () => {
+  test("输出是原文：底座不裁剪、不折叠（压缩是发送边界的事）", async () => {
     const { job, chunks } = hold("n1");
+    const whole = "头".repeat(3000) + "中".repeat(50_000) + "尾".repeat(3000);
 
-    chunks.push("头".repeat(3000) + "中".repeat(50_000) + "尾".repeat(3000));
+    chunks.push(whole);
     chunks.close();
     await until(() => job.produced() === 56_000, "泵取走整块输出");
 
-    const text = job.output();
-    expect(job.produced()).toBe(56_000);
-    expect(text.startsWith("头")).toBe(true);
-    expect(text.endsWith("尾")).toBe(true);
-    expect(text).toContain("这里省略 52000 字");
-    expect(text.length).toBeLessThan(4200);
+    expect(job.output()).toBe(whole);
+    expect(job.output().length).toBe(56_000);
   });
 });
 
@@ -196,15 +193,15 @@ describe("三只共享手按空间筛", () => {
     expect(other.report()).toContain("没有还在跑的作业");
   });
 
-  test("job_output 看得到尾巴；不认识的 id 说得清它可能已经结束", async () => {
+  test("job_output 读到原样输出；不认识的 id 说得清它可能已经结束", async () => {
     const root = workRoot();
     const { job, chunks } = hold("n1");
     chunks.push("最新的几行");
-    await until(() => job.produced() === 5, "泵取走尾巴");
+    await until(() => job.produced() === 5, "泵取走输出");
 
     const seen = await JOB_OUTPUT.run({ id: job.id }, { outputRoot: root, space: "n1" });
     expect(seen.report()).toContain("最新的几行");
-    expect(seen.report()).toContain("有界窗口，不是最终交代");
+    expect(seen.report()).toContain("输出（原文，不是最终交代）");
 
     const missing = await JOB_OUTPUT.run({ id: "nope" }, { outputRoot: root, space: "n1" });
     expect(missing.report()).toContain("没有 #nope 这个还在跑的作业");

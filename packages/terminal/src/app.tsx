@@ -37,7 +37,7 @@ export interface UiProps {
   readonly roles: readonly Role[];
 }
 
-/** 一整屏：树条带 + 选中那条线的消息流 + 实时尾巴 + 状态条 + 输入行。 */
+/** 一整屏：树条带 + 选中那条线的消息流 + 实时输出 + 状态条 + 输入行。 */
 export declare function App(props: UiProps): ReactElement;
 
 /** 接管终端、跑循环、把人的输入送回账里；返回时终端已还原。非真终端时逐帧追加（降级）。 */

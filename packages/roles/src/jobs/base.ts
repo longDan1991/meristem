@@ -9,16 +9,16 @@
  * 它不认识这只手在干什么 —— 那在 `name` 与传进来的文本里。
  *
  * **结尾那几句话由底座写**（超时 / 被人取消 / 失败），因为它们都是底座自己造成的事实；
- * 手只写"正常结束时的交代"。三种结尾都会把**尾巴**带上：跑了一半的输出不该因为
+ * 手只写"正常结束时的交代"。三种结尾都会把**到此刻的输出原文**带上：跑了一半的输出不该因为
  * 超时或取消就从模型眼前消失（§5.6：限制必须说得出来）。
  *
- * 变因：把执行包成作业的机制（计时、尾巴、登记）。
+ * **这一层不压缩**：输出原样收着（跑出多少就是多少），既不截断也不折叠 —— 要折叠是**发送边界**
+ * 那一层的事，裁掉多少、怎么取回由它自己说清（§5.6）。
+ *
+ * 变因：把执行包成作业的机制（计时、输出、登记）。
  */
 import type { Job, JobFacts } from "./job.ts";
 import { register, retire } from "./table.ts";
-
-/** 尾巴窗口：头尾各留这么多字（中间的原文由手自己的交代负责带出来）。 */
-const WINDOW = 2000;
 
 /** 错误的说法（四处共用的唯一一份）。 */
 export function message(error: unknown): string {
@@ -82,7 +82,7 @@ export function settled(facts: JobFacts, execution: string | Promise<string>): J
 
 /** 一次"起进程 / 发请求、之后才回来"的执行。 */
 export interface BackgroundInput extends JobFacts {
-  /** 输出的块：底座**始终在消费**它，泵进有界尾巴（头 + 尾窗口）—— 没人读也不许反向背压。 */
+  /** 输出的块：底座**始终在消费**它，原样收进输出（**不裁剪**）—— 没人读也不许反向背压。 */
   readonly chunks: AsyncIterable<string>;
   /** 等它结束；resolve 的值 = **最终交代**（正常结束的那个说法，从这一条回来）。 */
   readonly done: Promise<string>;
@@ -104,13 +104,13 @@ export interface BackgroundInput extends JobFacts {
 /**
  * 原语二：包一次"起之后才回来"的执行（`bash` / MCP 手用它）。
  *
- * 底座的活儿：泵 `chunks` 进有界尾巴（`output()` 取）、按 `timeout` 计时、把 `cancel()` 接到
+ * 底座的活儿：把 `chunks` 原样收进输出（`output()` 取）、按 `timeout` 计时、把 `cancel()` 接到
  * `stop()`、`done` 落地时把结局写成交代、还在跑时让 `report()` 说得出进度。
  */
 export function background(input: BackgroundInput): Job {
   const id = nextId();
   const at = Date.now();
-  const window = new Tail();
+  const output = new Output();
   const { promise: waited, resolve: land } = Promise.withResolvers<void>();
   let finished = false;
   let final = "";
@@ -120,19 +120,21 @@ export function background(input: BackgroundInput): Job {
     space: input.space,
     name: input.name,
     at,
-    produced: () => window.produced,
+    produced: () => output.produced,
     report: () => (finished ? final : `作业 #${id}（${input.name}）还在跑：${progress(job)}`),
-    output: () => window.text(),
+    output: () => output.text(),
     cancel: () => {
       if (finished) return;
       input.stop();
-      settle(`作业 #${id}（${input.name}）：被人取消了（已跑 ${elapsed(Date.now() - at)}）。${tail()}`);
+      settle(`作业 #${id}（${input.name}）：被人取消了（已跑 ${elapsed(Date.now() - at)}）。${raw()}`);
     },
     wait: () => waited,
   };
 
-  const tail = (): string =>
-    window.produced === 0 ? "" : `\n到此刻吐了 ${window.produced} 字。\n--- 尾巴 ---\n${window.text()}`;
+  const raw = (): string =>
+    output.produced === 0
+      ? ""
+      : `\n到此刻吐了 ${output.produced} 字。\n--- 输出（原文）---\n${output.text()}`;
 
   const settle = (text: string): void => {
     if (finished) return;
@@ -151,7 +153,7 @@ export function background(input: BackgroundInput): Job {
             input.timeoutArg === undefined
               ? `这只手没有自己的时间参数，统一按 ${input.timeout} 秒杀`
               : `要跑更久就把 ${input.timeoutArg} 写大些（0 = 不限）`;
-          settle(`作业 #${id}（${input.name}）：跑了 ${input.timeout} 秒还没结束，把它杀了；${how}。${tail()}`);
+          settle(`作业 #${id}（${input.name}）：跑了 ${input.timeout} 秒还没结束，把它杀了；${how}。${raw()}`);
         }, input.timeout * 1000)
       : undefined;
 
@@ -162,14 +164,14 @@ export function background(input: BackgroundInput): Job {
   async function pump(): Promise<void> {
     try {
       for await (const chunk of input.chunks) {
-        window.push(chunk);
+        output.push(chunk);
         if (finished) break;
       }
     } catch (error) {
       // 产出这条线自己断了：不掩盖，它就是这个作业的结局。
       if (!finished) {
         input.stop();
-        settle(`作业 #${id}（${input.name}）失败：产出没了 —— ${message(error)}${tail()}`);
+        settle(`作业 #${id}（${input.name}）失败：产出没了 —— ${message(error)}${raw()}`);
       }
     }
   }
@@ -179,43 +181,43 @@ export function background(input: BackgroundInput): Job {
       (text) => ({ ok: true as const, text }),
       (error: unknown) => ({ ok: false as const, error }),
     );
-    // 超时 / 取消先到时结局已经定了：手后来那句交代弃用（它的尾巴已经进过账）。
+    // 超时 / 取消先到时结局已经定了：手后来那句交代弃用（它的输出已经进过账）。
     if (finished) return;
     settle(
       outcome.ok
         ? outcome.text
-        : `作业 #${id}（${input.name}）失败：${message(outcome.error)}${tail()}`,
+        : `作业 #${id}（${input.name}）失败：${message(outcome.error)}${raw()}`,
     );
   }
 
   return job;
 }
 
-/** 有界尾巴：头 + 尾两段原文，中间省略多少字说得出来（`output()` 的唯一来源）。 */
-class Tail {
-  private head = "";
-  private peak = "";
-  private count = 0;
+/**
+ * 输出：**原文全收**（不裁剪、不折叠），外加一个 O(1) 的字数。
+ *
+ * 两块各为一条热路径：`produced` 让进度句（`report()` / `job_list`，每轮都问）不必把整个输出
+ * 拼一遍；`text()` 只在真有人要输出时拼一次，之后复用到有新块为止。
+ * 分块进、一次 join（§11：不许在循环里用 `+=` 拼字符串）。
+ */
+class Output {
+  private chunks: string[] = [];
+  private joined: string | null = null;
+  private size = 0;
 
   push(chunk: string): void {
-    this.count += chunk.length;
-    let rest = chunk;
-    if (this.head.length < WINDOW) {
-      const room = WINDOW - this.head.length;
-      this.head += rest.slice(0, room);
-      rest = rest.slice(room);
-    }
-    if (rest.length > 0) this.peak = (this.peak + rest).slice(-WINDOW);
+    this.chunks.push(chunk);
+    this.joined = null;
+    this.size += chunk.length;
   }
 
   get produced(): number {
-    return this.count;
+    return this.size;
   }
 
   text(): string {
-    const shown = this.head.length + this.peak.length;
-    if (this.count <= shown) return this.head + this.peak;
-    return `${this.head}\n…（这里省略 ${this.count - shown} 字）…\n${this.peak}`;
+    this.joined ??= this.chunks.join("");
+    return this.joined;
   }
 }
 

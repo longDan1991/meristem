@@ -39,19 +39,19 @@ export const JOB_LIST: Hand = {
   },
 };
 
-/** 看某个作业现在吐了什么。**尾巴 ≠ 最终交代**（后者在作业结束时进账）—— description 里要写死。 */
+/** 看某个作业现在吐了什么。**输出原文 ≠ 最终交代**（后者在作业结束时进账）—— description 里要写死。 */
 export const JOB_OUTPUT: Hand = {
   name: "job_output",
   description:
-    "看某个还在跑的作业现在吐了什么。这是**有界窗口（头 + 尾）**，中间的原文在这里看不到，" +
-    "**它不是最终交代** —— 最终交代会在作业结束时自动进账，不要靠它来交付或收尾。",
+    "看某个还在跑的作业现在吐了什么（**原文，不裁剪**）。它**不是最终交代** —— " +
+    "最终交代会在作业结束时自动进账，不要靠它来交付或收尾。",
   schema: {
     type: "object",
     properties: { id: { type: "string", description: "作业 id（消息里那个 # 后面的东西）" } },
     required: ["id"],
     additionalProperties: false,
   },
-  snippet: "看一个还在跑的作业现在吐了什么（尾巴，有界）",
+  snippet: "看一个还在跑的作业现在吐了什么（原文）",
   guidelines: [WAITING_IS_THE_LOOP_S_JOB],
   async run(args: unknown, ctx) {
     const { id } = args as { id: string };
@@ -59,7 +59,7 @@ export const JOB_OUTPUT: Hand = {
     const text =
       job === null
         ? `这条线上没有 #${id} 这个还在跑的作业（它可能已经结束了 —— 结束的交代就在对话里）。`
-        : `#${id}（${job.name}）：${progress(job)}\n--- 尾巴（有界窗口，不是最终交代）---\n${job.output() || "（还没有输出）"}`;
+        : `#${id}（${job.name}）：${progress(job)}\n--- 输出（原文，不是最终交代）---\n${job.output() || "（还没有输出）"}`;
     return settled({ space: ctx.space, name: "job_output" }, text);
   },
 };
@@ -98,7 +98,7 @@ export const JOB_CANCEL: Hand = {
  * 三只作业共享手 —— **所有角色都有**（装载器无条件并入）。
  *
  * 它们的 `description` 要写明两件事（schema 是唯一语义来源，不在提示词里重复）：
- *   1. **看尾巴 ≠ 拿到最终交代**：最终交代会在作业结束时进账，别把 `job_output` 当交付；
+ *   1. **看输出 ≠ 拿到最终交代**：最终交代会在作业结束时进账，别把 `job_output` 当交付；
  *   2. **别拿 `job_output` 当轮询手段**：要等就说完这一轮 —— 等待是循环的事，作业结束会叫醒这条线。
  */
 export const JOB_HANDS: readonly Hand[] = [JOB_LIST, JOB_OUTPUT, JOB_CANCEL];
