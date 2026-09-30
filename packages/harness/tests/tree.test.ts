@@ -15,7 +15,7 @@ import type { Event } from "../src/events.ts";
 import type { LlmClient } from "../src/llm.ts";
 import { start } from "../src/tree.ts";
 import type { Tree } from "../src/tree.ts";
-import { actionable, stateOf } from "../src/plan.ts";
+import { actionable } from "../src/plan.ts";
 import type { LineStore } from "../src/props.ts";
 import type { Wire, WireMessage } from "../src/shape.ts";
 
@@ -162,8 +162,8 @@ async function bootWith(
 const contents = (store: LineStore, node: NodeId): readonly WireMessage[] => store.content(node);
 
 describe("一轮对话", () => {
-  test("人分叉说一句 → 模型回一句；账里两条，状态回到等人", async () => {
-    const { store, tree, transport, events } = await boot([reply("你好"), reply("在的")], [role("talk", [])]);
+  test("人分叉说一句 → 模型回一句；账里两条，这条线回到等人", async () => {
+    const { store, tree, transport } = await boot([reply("你好"), reply("在的")], [role("talk", [])]);
     tree.resume();
 
     const node = await tree.fork({ parent: null, role: "talk", inputText: "在吗", dir: tmp() });
@@ -171,12 +171,7 @@ describe("一轮对话", () => {
 
     expect(contents(store, node).map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(contents(store, node)[1]?.content).toBe("你好");
-    // 事件只说"这条线变了"（去重读）：状态是渲染时按规则现算的 —— 不进账，也不在事件里。
-    await until(
-      () => events.some((event) => event.type === "line" && event.node === node),
-      "这条线变了的信号",
-    );
-    expect(stateOf(store, node, false)).toBe("waiting");
+    // 账里没有"状态"这个东西：在动还是在等人，读账 + 谁在跑就算得出来。
     expect("state" in (store.get(node)?.props ?? {})).toBe(false);
     expect(transport.wires[0]?.system).toBe("你是 talk");
     expect(transport.wires[0]?.messages.map((message) => message.content)).toEqual(["在吗"]);

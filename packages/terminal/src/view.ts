@@ -1,17 +1,17 @@
 /**
  * 视图：**纯函数** —— 只读账 → 行。不认识账怎么写、不认识事件、不认识 tui。
  *
- * 展示的变因住这一层：树怎么折、选中谁、状态怎么标、一行里放什么字。
+ * 展示的变因住这一层：树怎么折、选中谁、一行里放什么字。
  * 颜色 / 布局 / 键位归 `app.tsx`（那头才认识外壳）。
  *
  * 变因：展示（出哪些行、每行标什么）。
  */
 import type { NodeId } from "@meristem/atree";
-import type { LineStore, NodeState } from "@meristem/harness";
+import type { LineStore } from "@meristem/harness";
 import type { Job } from "@meristem/roles";
 
 /** 行的语义标签：只说"这是什么行"，颜色由 app 定。 */
-export type RowTag = "title" | "dim" | "user" | "model" | "thought" | "hand" | "state" | "error";
+export type RowTag = "title" | "dim" | "user" | "model" | "thought" | "hand" | "error";
 
 export interface Row {
   readonly text: string;
@@ -19,13 +19,12 @@ export interface Row {
 }
 
 /**
- * 树条带：每条线一行 —— **人写的名字 + 角色**（都在节点的 `props` 里）+ **状态**（渲染时按
- * harness 的 `stateOf` 算：在动 / 等我），外加**在跑的作业的记号**（这条线手上还有没回来的活）。不在选中路径上、也没有在动的子树
+ * 树条带：每条线一行 —— **人写的名字 + 角色**（都在节点的 `props` 里），
+ * 外加**在跑的作业的记号**（这条线手上还有没回来的活）。不在选中路径上、也没有在动的子树
  * 折成一行带节点数。
  */
 export declare function treeRows(
   store: LineStore,
-  states: (node: NodeId) => NodeState,
   selected: NodeId | null,
   jobs: readonly Job[],
 ): readonly Row[];

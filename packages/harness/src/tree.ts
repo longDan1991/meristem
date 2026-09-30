@@ -143,16 +143,10 @@ export function start(input: StartInput): Tree {
     );
   }
 
-  /** 告诉界面"这条线变了，去重读"：事件只说这一件事，推出来的东西（在动 / 等我）由它自己算。 */
-  function notify(id: NodeId): void {
-    sink.emit({ type: "line", node: id });
-  }
-
   /**
    * **把事情投给某条线**：排在它已经排上的事后面（一条线一次只做一件）。
    *
    * 这就是全部的并发控制：没有状态机、没有锁 —— 隔离靠"这件事属于哪个节点"，由这条线自己按顺序做。
-   * 这件事做完喊一声"这条线变了"（事件说的就是"去看账"；动手之前它不是变，是另说一件事）。
    *
    * 出了缺陷（模型点了没有的手 / 手自己起不来 / 传输面用错）：**不回话、不兜底、不咽下去**。
    * 这里不直接 `throw`：我们正站在 async 链的续体里，直接抛只会变成"这条链的 rejection"，
@@ -169,7 +163,6 @@ export function start(input: StartInput): Tree {
           throw error;
         });
       }
-      notify(id);
     });
     chains.set(id, next);
     return next;

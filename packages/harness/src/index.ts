@@ -6,7 +6,7 @@
  * 节点 + 内容 + 拼接）；工具、技能、提示词分节、MCP 是 roles 的面 —— harness 这些词一个都不认识。
  *
  * **消息与属性的词汇住在这里**：atree 只认"不透明的 props / 不透明的内容数组"，
- * 所以「一条线有哪些人看得见的事实」（`LineProps`：名字 / 角色 / 做事目录 / 状态）与
+ * 所以「一条线有哪些人看得见的事实」（`LineProps`：名字 / 角色 / 做事目录）与
  * 「一次调用流动什么」（`WireMessage` / `Wire` / `Usage`）都是这个包的定义。
  * **没有配对规则**：起手一条回话、结束一条消息，作业 id 拼在内容里，配对由模型自己认（§9.6）。
  *
@@ -23,8 +23,7 @@
  * 主坐标轴：**回合怎么推进**（唤醒时机、上下文组装、错误处置、出生与调度规则）。
  */
 
-export type { NodeState, LineProps, LineStore } from "./props.ts";
-export { stateOf } from "./plan.ts";
+export type { LineProps, LineStore } from "./props.ts";
 export type { ChatRole, JsonSchema, ToolCall, Usage, Wire, WireMessage } from "./shape.ts";
 
 export type { Event } from "./events.ts";

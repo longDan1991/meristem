@@ -11,25 +11,15 @@
  *      是 → **停住不推进**（不替它编一条回话 —— 账上不编；要接着干就分叉一条新线）。
  *
  * **出错不在这条规则里**：模型接口失败是内存里的一件事（§9.8：账里一个字都不多，也不自动重试），
- * 由树自己记住（只在内存里）、由人重试。**休眠**不是这一层的状态：归档落地时再谈（§7）——
- * 那时它也是人给的既成事实，不是推出来的。
+ * 由树自己记住（只在内存里）、由人重试。
  *
- * `stateOf` 是**给界面渲染时现算的规则**（树条带上那条线在动还是在等我）：树的推进只看
- * `actionable` —— 状态不进账、也不是事件里的 payload、也不当判据，不给自己留第二份真相。
- *
- * **内部规则**：不上面 —— 状态经事件给界面，调度只在树里用这一份。
+ * **内部规则**：不上面 —— 它是树自己的判断，界面不看它（界面看账）。
  *
  * 变因：调度规则（"该谁动"的判断算法）。
  */
 import type { NodeId } from "@meristem/atree";
-import type { LineStore, NodeState } from "./props.ts";
+import type { LineStore } from "./props.ts";
 import type { WireMessage } from "./shape.ts";
-
-/** 按事实该给这条线什么状态（只推得出在动 / 等我）—— 界面渲染时调它，不当判据。 */
-export function stateOf(store: LineStore, node: NodeId, hasRunningJob: boolean): NodeState {
-  if (hasRunningJob) return "running";
-  return actionable(store, node, hasRunningJob) ? "running" : "waiting";
-}
 
 /** 现在该让这条线说话吗（手上有活、或者最后一句不是别人说的，就轮不到它说话）。 */
 export function actionable(store: LineStore, node: NodeId, hasRunningJob: boolean): boolean {
