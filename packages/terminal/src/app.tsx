@@ -74,8 +74,10 @@ export interface UiProps {
 /**
  * 输入缓冲区：文本与光标**一个状态**。
  *
- * 一次按键 = 一个纯更新（`setDraft((d) => …)`）—— 同一拍里连来几个键时，它们必须各自接在前一个的
- * 结果上；各自读渲染闭包里的旧值会让"跑个命令"只剩最后一个字。
+ * 草稿是**同步状态**（`useRef` + 重画）而不是渲染闭包里的值：
+ *   · 同一拍里连来几个键，各自接在前一个的结果上（读闭包会让"跑个命令"只剩最后一个字）；
+ *   · **动作读到的就是此刻的草稿** —— 打字快 / 粘贴一整行再回车时，闭包里的那份还是空的，
+ *     于是回车把这句话静默吞掉（人以为卡住了）。
  */
 interface Draft {
   readonly text: string;
@@ -127,7 +129,7 @@ export function App(props: UiProps): ReactElement {
   const { store, tree, roles, workspace } = props;
 
   const [selected, setSelected] = useState<NodeId | null>(props.at);
-  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const draft = useRef<Draft>(EMPTY_DRAFT);
   const [tail, setTail] = useState<Tail | null>(null);
   const [facts, setFacts] = useState<ReadonlyMap<string, HandFact>>(new Map());
   const [errors, setErrors] = useState<ReadonlyMap<NodeId, string>>(new Map());
@@ -137,7 +139,8 @@ export function App(props: UiProps): ReactElement {
   const [jobCursor, setJobCursor] = useState(0);
   const [thoughtsOpen, setThoughtsOpen] = useState(false);
   const [scrollBack, setScrollBack] = useState(0);
-  const [notice, setNotice] = useState("");
+  // 一个可挑的角色都没有时，一进来就把话说清楚：不然按了回车像是界面卡住了
+  const [notice, setNotice] = useState(() => (pickers(roles).length === 0 ? NO_CHOICE : ""));
   const [, redraw] = useState(0);
 
   // 事件只带结构：记下结构事实，然后重画一帧（账与作业自己去读）
@@ -279,28 +282,34 @@ export function App(props: UiProps): ReactElement {
         />
       )}
       <StatusBar left={status.left} right={status.right} />
-      <InputBox value={draft.text} caret={draft.caret} placeholder={placeholder(node, store.root())} />
+      <InputBox value={draft.current.text} caret={draft.current.caret} placeholder={placeholder(node, store.root())} />
     </Frame>
   );
 
   // ---- 动作：写账的只有三样，其余是本地动作 ----
 
   async function send(): Promise<void> {
-    const text = draft.text;
+    const text = draft.current.text;
     if (text.trim() === "") return;
+    if (forkRole === "") {
+      setNotice(NO_CHOICE);
+      return;
+    }
     setNotice("");
-    clearDraft();
     const target = node ?? store.root();
     if (target === null) {
       // 还没有根：这一句就是开树的那句（造根 = 一次没有父的分叉，目录用数据根）
       const born = await tree.fork({ parent: null, role: forkRole, inputText: text, dir: workspace });
+      // 送进去了才清草稿：动作失败时人那句话还在，不用重打一遍
+      clearDraft();
       setSelected(born);
       return;
     }
-    setSelected(target);
     // 再开口 = 这条线不算"接口失败过的"了（harness 那边也一样）
     setErrors((current) => without(current, target));
     await tree.say(target, text);
+    clearDraft();
+    setSelected(target);
   }
 
   async function fork(mode: "inherit" | "summarize"): Promise<void> {
@@ -309,14 +318,18 @@ export function App(props: UiProps): ReactElement {
       setNotice("还没有根：先说一句什么");
       return;
     }
-    const text = draft.text;
+    if (forkRole === "") {
+      setNotice(NO_CHOICE);
+      return;
+    }
+    const text = draft.current.text;
     setNotice("");
     if (mode === "summarize" && text.trim() === "") {
       setNotice("总结分叉要有那句新话：它决定新线从父线历史里抽哪一份底");
       return;
     }
-    clearDraft();
     const born = await tree.fork({ parent, role: forkRole, inputText: text, mode });
+    clearDraft();
     setSelected(born);
   }
 
@@ -361,39 +374,49 @@ export function App(props: UiProps): ReactElement {
   }
 
   function insert(text: string): void {
-    setDraft((buffer) => ({
+    const buffer = draft.current;
+    draft.current = {
       text: buffer.text.slice(0, buffer.caret) + text + buffer.text.slice(buffer.caret),
       caret: buffer.caret + text.length,
-    }));
+    };
+    redraw((tick) => tick + 1);
   }
 
   /** 删光标前（-1）或光标后（1）的一个字符；到边了就不动。 */
   function edit(direction: -1 | 1): void {
-    setDraft((buffer) => {
-      if (direction === -1) {
-        if (buffer.caret === 0) return buffer;
-        return { text: buffer.text.slice(0, buffer.caret - 1) + buffer.text.slice(buffer.caret), caret: buffer.caret - 1 };
-      }
-      if (buffer.caret >= buffer.text.length) return buffer;
-      return { text: buffer.text.slice(0, buffer.caret) + buffer.text.slice(buffer.caret + 1), caret: buffer.caret };
-    });
+    const buffer = draft.current;
+    if (direction === -1) {
+      if (buffer.caret === 0) return;
+      draft.current = {
+        text: buffer.text.slice(0, buffer.caret - 1) + buffer.text.slice(buffer.caret),
+        caret: buffer.caret - 1,
+      };
+    } else {
+      if (buffer.caret >= buffer.text.length) return;
+      draft.current = {
+        text: buffer.text.slice(0, buffer.caret) + buffer.text.slice(buffer.caret + 1),
+        caret: buffer.caret,
+      };
+    }
+    redraw((tick) => tick + 1);
   }
 
   function moveCaret(key: string): void {
-    setDraft((buffer) => {
-      const caret =
-        key === "home"
-          ? 0
-          : key === "end"
-            ? buffer.text.length
-            : Math.min(Math.max(buffer.caret + (key === "left" ? -1 : 1), 0), buffer.text.length);
-      return { text: buffer.text, caret };
-    });
+    const buffer = draft.current;
+    const caret =
+      key === "home"
+        ? 0
+        : key === "end"
+          ? buffer.text.length
+          : Math.min(Math.max(buffer.caret + (key === "left" ? -1 : 1), 0), buffer.text.length);
+    draft.current = { text: buffer.text, caret };
+    redraw((tick) => tick + 1);
   }
 
   function clearDraft(): void {
-    setDraft(EMPTY_DRAFT);
+    draft.current = EMPTY_DRAFT;
     setScrollBack(0);
+    redraw((tick) => tick + 1);
   }
 
   /** 动作失败是**给人看的一件事**（界面上那行提示）：账没变、作业没变，人自己决定下一步。 */
@@ -498,7 +521,11 @@ function buildStatus(
   notice: string,
 ): { readonly left: string; readonly right: string } {
   if (node === null) {
-    return { left: "还没有根 —— 说一句什么，就以它开第一条线", right: "enter 说话 · ctrl+c 退出" };
+    // 没有根时**更**要说清楚：人正要打第一句话，这时按回车没反应最像"界面卡住了"。
+    return {
+      left: notice === "" ? "还没有根 —— 说一句什么，就以它开第一条线" : notice,
+      right: "enter 说话 · ctrl+c 退出",
+    };
   }
   const facts = store.get(node)?.props;
   const left = [
@@ -535,6 +562,11 @@ function placeholder(node: NodeId | null, root: NodeId | null): string {
   if (root === null) return "说一句什么";
   return "跟这条线说一句（回车进账）";
 }
+
+/** 一个可挑的角色都没有时说什么：角色是部署的事（一个 xml 一个角色），代码不替它编一个。 */
+const NO_CHOICE =
+  "没有可选的角色：一个人选的角色就是一个 xml，放进 MERISTEM_ROLES 指的目录" +
+  "（内置的 summary-fork 是分叉时程序穿的机制角色，不给人挑）";
 
 /** 人挑得到的角色：机制角色（总结分叉）不在里面 —— 它是分叉时程序穿的那一位，不是一块能力。 */
 function pickers(roles: readonly Role[]): readonly Role[] {
