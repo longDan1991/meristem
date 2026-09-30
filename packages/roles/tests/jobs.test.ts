@@ -115,6 +115,27 @@ describe("background：起之后才回来的执行", () => {
     expect(running("n1")).toEqual([]);
   });
 
+  test("跟着输出走：先给已有的，再给新来的，作业一结束就收", async () => {
+    const { job, chunks, land } = hold("n1");
+    chunks.push("第一块");
+    await until(() => job.produced() === 3, "泵取走第一块");
+
+    const seen: string[] = [];
+    const following = (async () => {
+      for await (const chunk of job.stream()) seen.push(chunk);
+    })();
+
+    await until(() => seen.length >= 1, "流把已有的给出来了");
+    chunks.push("第二块");
+    await until(() => seen.length >= 2, "新块也给了");
+
+    chunks.close();
+    land("完了");
+    await job.wait();
+    await following; // 结束即收：不然它会一直挂着
+    expect(seen.join("")).toBe("第一块第二块");
+  });
+
   test("被别人取消：交代是「被人取消了」，stop 真的被调，重复取消无害", async () => {
     const { job, chunks, stops } = hold("n1");
 
