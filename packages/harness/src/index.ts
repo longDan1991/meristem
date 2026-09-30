@@ -1,7 +1,7 @@
 /**
  * `@meristem/harness` 的对外面：**一棵树的推进器**。
  *
- * 交互面只有两样：**操作**（`Tree`：run / say / fork / stop / jobs / cancel / retry）与
+ * 交互面只有两样：**操作**（`Tree`：resume / say / fork / stop / jobs / cancel / retry）与
  * **事件**（`Tree.subscribe`）。读账是 atree 的面（界面直接读 `Store`，那是个通用树：
  * 节点 + 内容 + 拼接）；工具、技能、提示词分节、MCP 是 roles 的面 —— harness 这些词一个都不认识。
  *

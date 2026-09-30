@@ -81,9 +81,9 @@ describe("一份 xml → 一个角色", () => {
   });
 
   test("rules 去重：同一句纪律只出现一次", () => {
-    // job_list 与 job_output 贡献同一句"等待是循环的事…"，两者都在手清单里 → 只该留一条。
+    // job_list 与 job_output 贡献同一句"等待是自动的…"，两者都在手清单里 → 只该留一条。
     const draft = parse(`<role id="code" title="编程"><about>干什么</about></role>`, available(), "x");
-    const occurrences = draft.role().system().split("等待是循环的事").length - 1;
+    const occurrences = draft.role().system().split("等待是自动的").length - 1;
 
     expect(occurrences).toBe(1);
   });

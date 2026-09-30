@@ -15,9 +15,9 @@ import type { Hand } from "../role.ts";
 import { progress, settled } from "./base.ts";
 import { find, running } from "./table.ts";
 
-/** 看进度这条纪律三只手共用一句话：等待是循环的事，轮询不是模型的事。 */
+/** 看进度这条纪律三只手共用一句话：等是自动的，轮询不是模型的事。 */
 const WAITING_IS_THE_LOOP_S_JOB =
-  "等待是循环的事：该等就把这一轮说完 —— 作业一结束循环会叫醒你，别拿 job_output 当轮询手段。";
+  "等待是自动的：该等就把这一轮说完 —— 作业一结束你就会被叫一声，别拿 job_output 当轮询手段。";
 
 /** 这条线上现在有哪些作业在跑：按 `space` 筛作业表，说出 id / 名字 / 已跑多久 / 吐了多少。 */
 export const JOB_LIST: Hand = {
@@ -99,6 +99,6 @@ export const JOB_CANCEL: Hand = {
  *
  * 它们的 `description` 要写明两件事（schema 是唯一语义来源，不在提示词里重复）：
  *   1. **看输出 ≠ 拿到最终交代**：最终交代会在作业结束时进账，别把 `job_output` 当交付；
- *   2. **别拿 `job_output` 当轮询手段**：要等就说完这一轮 —— 等待是循环的事，作业结束会叫醒这条线。
+ *   2. **别拿 `job_output` 当轮询手段**：要等就说完这一轮 —— 等是自动的，作业结束这条线会被叫一声。
  */
 export const JOB_HANDS: readonly Hand[] = [JOB_LIST, JOB_OUTPUT, JOB_CANCEL];

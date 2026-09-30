@@ -32,7 +32,7 @@ import type { ReactElement } from "react";
 
 export interface UiProps {
   readonly store: LineStore;
-  readonly loop: Tree;
+  readonly tree: Tree;
   /** 分叉时让人挑的角色清单（数据来源只有 roles 一处）。 */
   readonly roles: readonly Role[];
 }
@@ -40,5 +40,5 @@ export interface UiProps {
 /** 一整屏：树条带 + 选中那条线的消息流 + 实时输出 + 状态条 + 输入行。 */
 export declare function App(props: UiProps): ReactElement;
 
-/** 接管终端、跑循环、把人的输入送回账里；返回时终端已还原。非真终端时逐帧追加（降级）。 */
+/** 接管终端、订阅事件、把人的输入送回账里；返回时终端已还原。非真终端时逐帧追加（降级）。 */
 export declare function mount(props: UiProps, opts: { readonly at: NodeId | null }): Promise<void>;

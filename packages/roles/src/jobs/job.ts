@@ -25,7 +25,7 @@ export interface Job {
   readonly id: string;
 
   /**
-   * 这次执行在哪个**空间**里：由循环在调用那只手的时候给（当前实现就是节点 id）。
+   * 这次执行在哪个**空间**里：由树在调用那只手的时候给（当前实现就是节点 id）。
    * 同一个空间里的作业互相看得见（`table.ts` 按它筛），不同空间互不打扰。
    */
   readonly space: string;
@@ -69,7 +69,7 @@ export interface Job {
 /**
  * 底座造作业需要的事实：在哪个空间、哪只手起的（`id` / `at` 由底座自己给）。
  *
- * `space` 从 `HandContext.space` 抄过来 —— 循环在调用这只手的时候给的那个名字。
+ * `space` 从 `HandContext.space` 抄过来 —— 树在调用这只手的时候给的那个名字。
  */
 export interface JobFacts {
   readonly space: string;

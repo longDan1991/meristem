@@ -75,7 +75,7 @@ export interface HandContext {
   readonly outputRoot: string;
 
   /**
-   * 这次执行所在的**空间**：由循环在调用这只手的时候给（当前实现就是节点 id；
+   * 这次执行所在的**空间**：由树在调用这只手的时候给（当前实现就是节点 id；
    * roles 只把它当键用，不解释它的含义）—— 底座把它写进 `Job.space`，
    * `job_list` 靠它筛出"这条线上起的作业"（从父线继承下来的那些消息里提到过的作业不属于它）。
    */
