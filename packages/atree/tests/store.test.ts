@@ -171,6 +171,21 @@ test("子节点顺序就是出生顺序,读回来也是", async () => {
   await back.close();
 });
 
+test("全部节点按出生顺序给出来,读回来还是这份顺序", async () => {
+  const path = join(dir, "tree.jsonl");
+  const store = await load<Props, string>(path);
+  const root = store.create({ parent: null, props: { name: "我" } });
+  const one = store.create({ parent: root, props: { name: "一" } });
+  const two = store.create({ parent: one, props: { name: "二" } });
+  expect(store.nodes()).toEqual([root, one, two]);
+  await store.close();
+
+  const back = await load<Props, string>(path);
+  expect(back.nodes()).toEqual([root, one, two]);
+  expect(back.root()).toBe(root);
+  await back.close();
+});
+
 test("拿不存在的节点做事当场报错,get 是唯一宽容的入口", async () => {
   const store = await load<Props, string>(join(dir, "tree.jsonl"));
   expect(store.get("没有这个节点")).toBeNull();

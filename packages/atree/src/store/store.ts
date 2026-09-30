@@ -40,6 +40,13 @@ export interface Store<P, M> {
   /** 根；还没造出根时是 `null`（空树是合法状态：这棵树还没开出来）。 */
   root(): NodeId | null;
   get(id: NodeId): Node<P> | null;
+  /**
+   * 全部节点（出生顺序，父在子前）。
+   *
+   * 这份顺序**早就排好了**（账的顺序就是它），所以不用自己走树 —— 每次唤醒都遍历一遍的调用方
+   * （调度、界面）直接拿它。给的是**活引用**（只往后长）：同上，别当快照存着。
+   */
+  nodes(): readonly NodeId[];
   /** 子节点（出生顺序）。 */
   children(id: NodeId): readonly NodeId[];
   /** 造一个节点：父为 `null` 就是造根（第二个根当场报错）。 */
@@ -82,6 +89,8 @@ export async function load<P, M>(path: string): Promise<Store<P, M>> {
 function openStore<P, M>(file: LedgerFile<P, M>, replayed: Replayed<P, M>): Store<P, M> {
   const nodes = new Map<NodeId, Node<P>>(replayed.nodes);
   const content = new Map<NodeId, M[]>(replayed.content);
+  // 出生顺序：重放就是按账的顺序，之后每次造节点往后长一格（所以查询不必走树）。
+  const order: NodeId[] = [...nodes.keys()];
   const kids = new Map<NodeId | null, NodeId[]>();
   for (const node of nodes.values()) childList(kids, node.parent).push(node.id);
 
@@ -110,6 +119,10 @@ function openStore<P, M>(file: LedgerFile<P, M>, replayed: Replayed<P, M>): Stor
       return nodes.get(id) ?? null;
     },
 
+    nodes() {
+      return order;
+    },
+
     children(id) {
       nodeOf(id);
       return childList(kids, id);
@@ -132,6 +145,7 @@ function openStore<P, M>(file: LedgerFile<P, M>, replayed: Replayed<P, M>): Stor
       };
       file.append({ t: at, node: node.id, kind: "node", payload: node });
       nodes.set(node.id, node);
+      order.push(node.id);
       childList(kids, node.parent).push(node.id);
       return node.id;
     },
