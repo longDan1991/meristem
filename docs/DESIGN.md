@@ -173,7 +173,7 @@ Monorepo（Bun workspaces），五个包。主坐标轴宣布为：**谁的命�
 | `@meristem/atree` | 数据结构与存取机制 | **一棵通用的树（参考 DOM）**：节点（父 / 不透明的 `props` / 边界 / 出生顺序）+ 每个节点自己的内容数组 + 沿枝拼接（`assemble`）+ append-only 账。对外只有 `load(path)`（有树折出来，没有就是空的内存树，真写入才落盘）/ 两类操作 / `close()`。**不含任何业务语义**：`props` 与内容都是上层给的类型，一个字段都不解释；落盘格式是内部机制 | 无 |
 | `@meristem/tui` | 组件自身的实现 | 只吃 props 的组件（消息流 / 思考行 / 手卡片 / 输入框 / 树条带 / 状态条 / 外壳） | 无 |
 | `@meristem/roles` | 能力（一块能力因什么而变：它的提示词、它的手、它的技能） | **只有两个面**：LLM 面（`Role`：`system()` / `hands()` / `run`，外加**作业的形状** `Job` 与三只作业共享手）+ 人面（`start` / `list` / `get`） | 无 |
-| `@meristem/harness` | 生命周期（开 / 恢复 / 推进 / 等人 / 出生 / 收手：唤醒、上下文组装、错误处置、出生与调度规则） | **操作 + 事件**：`Loop`（`run` / `say` / `fork` / `stop` / `jobs` / `cancel` / `retry`）+ `subscribe`；另露**上层词汇**（`LineProps` / `WireMessage` / `Usage` / 配对规则）与 `createClient` | atree, roles |
+| `@meristem/harness` | 生命周期（开 / 恢复 / 推进 / 等人 / 出生 / 收手：唤醒、上下文组装、错误处置、出生与调度规则） | **操作 + 事件**：`Tree`（`run` / `say` / `fork` / `stop` / `jobs` / `cancel` / `retry`）+ `subscribe`；另露**上层词汇**（`LineProps` / `WireMessage` / `Usage` / 配对规则）与 `createClient` | atree, roles |
 | `@meristem/terminal` | 交互与展示（业务）+ **部署的事实**（`.env` 怎么解释、怎么分给各包） | 一屏界面 + 入口 + 装配 | atree, roles, harness, tui |
 
 **依赖方向**（实测无环）：
@@ -428,7 +428,7 @@ provider 要的 `tool_calls[].id` / `tool_call_id` 是**临时物**，由传输�
 - **不入 msgs** —— 那条线手里的事实没变，凭什么往对话里写一条；
 - **循环跳过这条线**：不推进、不自动重试、不编交代；
 - 错误给界面（红字，带来源与原因）；
-- 界面上有一个**重试**（`Loop.retry(node)`），只干一件事：把这条线重新放回推进。
+- 界面上有一个**重试**（`Tree.retry(node)`），只干一件事：把这条线重新放回推进。
 
 harness 里因此没有 `error` 态，也没有 `Event.error`：错误要么是一段交代（手的），要么归人（接口的）。
 

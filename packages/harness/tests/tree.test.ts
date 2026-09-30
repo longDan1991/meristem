@@ -13,8 +13,8 @@ import type { Hand, Job, Role, RoleId } from "@meristem/roles";
 import { SUMMARY_FORK, background, settled } from "@meristem/roles";
 import type { Event } from "../src/events.ts";
 import type { LlmClient } from "../src/llm.ts";
-import { start } from "../src/loop.ts";
-import type { Loop } from "../src/loop.ts";
+import { start } from "../src/tree.ts";
+import type { Tree } from "../src/tree.ts";
 import { actionable } from "../src/plan.ts";
 import type { LineStore } from "../src/props.ts";
 import type { Wire, WireMessage } from "../src/shape.ts";
@@ -130,7 +130,7 @@ function slowHand(name: string): {
 
 interface Booted {
   readonly store: LineStore;
-  readonly loop: Loop;
+  readonly loop: Tree;
   readonly transport: LlmClient & { readonly wires: Wire[] };
   readonly events: Event[];
 }

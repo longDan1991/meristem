@@ -1,7 +1,7 @@
 /**
  * 一棵树的推进器：**harness 对外只有两样 —— 操作与事件。**
  *
- * 界面能做的动作全在 `Loop` 的方法上，能看见的东西全在 `subscribe` 那一栏；没有第三样。
+ * 界面能做的动作全在 `Tree` 的方法上，能看见的东西全在 `subscribe` 那一栏；没有第三样。
  * 读账（渲染树、画一条线）是 atree 的面，界面直接读 `Store`，不从这里过。
  *
  * **harness 不要任何配置值，只要端口**（账、角色表、传输）。它不定义"配置"、不读 `.env`、
@@ -19,7 +19,7 @@
  *   收手  —— 人的动作，`stop`（顺带取消所有在跑的作业）
  *
  * 人的动作只有三个：**说话 / 分叉 / 收手**（结构动作只有人有，模型只能提议 —— DESIGN §5.3
- * 这条靠接口写死：模型那侧只有手，拿不到 `Loop`）；另外两个是照看性的：**取消一个作业**、
+ * 这条靠接口写死：模型那侧只有手，拿不到 `Tree`）；另外两个是照看性的：**取消一个作业**、
  * **重试一次模型接口失败**。
  *
  * 操作从队列进来、事件往订阅者出去（消息传递，不共享可变状态、不加锁）：
@@ -73,7 +73,7 @@ export interface StartInput {
 }
 
 /** 一棵正在推进的树：操作 + 事件。两个方向都收在这里，别处不另开口子。 */
-export interface Loop {
+export interface Tree {
   /** 推进到收手为止：树休息不是出口。 */
   run(): Promise<void>;
 
@@ -110,7 +110,7 @@ export interface Loop {
 /** 还没写进账的一条消息（`id` 是写账那一刻才定死的，见 DESIGN §9.6）。 */
 type Fresh = Omit<WireMessage, "id">;
 
-export function start(input: StartInput): Loop {
+export function start(input: StartInput): Tree {
   const sink: EventSink = createSink();
   /** 模型接口失败过的线：**只在内存里**（§9.8 说账里一个字都不多），人重试时清掉。 */
   const failed = new Set<NodeId>();
