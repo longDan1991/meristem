@@ -16,8 +16,11 @@ import type { Store } from "@meristem/atree";
 import type { RoleId } from "@meristem/roles";
 import type { WireMessage } from "./shape.ts";
 
-/** 状态：在动 / 等我 / 休眠（前两个推得出来，休眠是人给的 —— 归档那一层落地时才有）。 */
-export type NodeState = "running" | "waiting" | "resting";
+/**
+ * 状态：在动 / 等我 —— 两个都推得出来。**休眠不在这里**：它是人给的（归档那一层落地时再谈，DESIGN §7），
+ * 现在没有任何代码能产出它，所以也不留一格空位。
+ */
+export type NodeState = "running" | "waiting";
 
 export interface LineProps {
   /** 人给的名字（或由代码取他第一句的前几个字）—— 不许模型生成摘要冒充它。 */
