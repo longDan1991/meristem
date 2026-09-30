@@ -35,17 +35,19 @@ export const SUMMARY_FORK: RoleId = "summary-fork";
 const roles = new Map<RoleId, Role>();
 
 /**
- * 装载角色（含包内内置角色）：`dir` = 角色目录，`skillDirs` = 技能根。
+ * 装载角色（含包内内置角色）：`dir` = 额外的角色目录（**可缺省** —— 没给就只有内置的那些），
+ * `skillDirs` = 技能根。
  * 语法 / 引用（手名、技能名）/ 冲突 / 连接有问题当场抛错。
  *
  * **作业的三只共享手由这里无条件并入**（`JOB_LIST` / `JOB_OUTPUT` / `JOB_CANCEL`，见 `jobs/hands.ts`）：
  * 它们属于执行机制，不是某块能力的开关 —— 所以不需要在 xml 里点名，也不许被关掉
  * （模型看不见作业，就不知道一手跑没跑完、也没法看进度，作业就成了隐形的东西）。
  */
-export async function start(dir: string, skillDirs: readonly string[]): Promise<void> {
+export async function start(dir: string | undefined, skillDirs: readonly string[]): Promise<void> {
   const available = { hands: BUILTIN_HANDS, skills: discovered(skillDirs) };
+  const extra = dir === undefined ? [] : xmlFiles(dir);
   const drafts = await Promise.all(
-    [...xmlFiles(dir), ...xmlFiles(BUILTIN_DIR)].map((path) => parseFile(path, available)),
+    [...extra, ...xmlFiles(BUILTIN_DIR)].map((path) => parseFile(path, available)),
   );
 
   // MCP 还没接上（没有时间参数那些手的兜底值也还没定，DESIGN §7）：声明了服务的角色**不成立**，

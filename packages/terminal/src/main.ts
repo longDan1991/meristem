@@ -1,7 +1,7 @@
 /**
  * 装配：配置 → 账 → 角色 → 传输 → 树 → 界面，返回退出码。
  *
- * 这是唯一把包拼起来的地方，也是**唯一解释 `.env` 的地方**：读一次配置，按各包声明过的需要
+ * 这是唯一把包拼起来的地方，也是**唯一解释环境的地方**：读一次配置，按各包声明过的需要
  * 分头交过去 —— 这棵树的账文件给 atree（`load(cfg.tree)`）、角色目录与技能根给 roles（装载）、
  * 模型引用 / 端点覆盖 / 钥匙给传输（`createClient`）。harness 的 `start` 只收端口（树 / 角色 / 传输），
  * 一个配置值都不收。
@@ -38,8 +38,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     await startRoles(cfg.roleDir, cfg.skillDirs);
     const llm = createClient({
       model: cfg.model,
+      ...(cfg.modelId === undefined ? {} : { modelId: cfg.modelId }),
       ...(cfg.baseUrl === undefined ? {} : { baseUrl: cfg.baseUrl }),
-      credential: loadCredential(cfg),
+      credential: loadCredential(),
     });
     store = await load<LineProps, WireMessage>(cfg.tree);
     const tree = startTree({ store, llm, role: get });

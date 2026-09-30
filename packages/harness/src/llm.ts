@@ -73,6 +73,11 @@ export interface Credential {
 export interface TransportInput {
   /** 用哪个模型：`provider/model`（模式串，只在第一个 `/` 上断）。 */
   readonly model: string;
+  /**
+   * 真正发给端点的模型 id（可选）：目录里那份只负责"怎么发"（wire api 与元数据），
+   * 换了名字的部署（自建网关 / 搬迁到别家）用它说出端点认的那串。不填就用目录里那份的 id。
+   */
+  readonly modelId?: string;
   /** 端点覆盖（可选）：走代理 / 自建网关才需要；不填就用该 provider 自带的端点。 */
   readonly baseUrl?: string;
   readonly credential: Credential;
@@ -95,7 +100,7 @@ export interface LlmClient {
  * `models` 缺省就是 pi-ai 的内置目录；显式传的那份是**测试留的口子**（假 provider 也走同一条路）。
  */
 export function createClient(input: TransportInput, models: Models = builtinModels()): LlmClient {
-  const model = resolve(models, input.model, input.baseUrl);
+  const model = resolve(models, input.model, input.baseUrl, input.modelId);
   return {
     async chat(wire, hands, on) {
       const context: Context = {
@@ -141,7 +146,12 @@ export function createClient(input: TransportInput, models: Models = builtinMode
 }
 
 /** 引用 → 模型：解析不出来当场炸，并说清这家 provider 有哪些模型（不静默换一个）。 */
-function resolve(models: Models, reference: string, baseUrl: string | undefined): Model<Api> {
+function resolve(
+  models: Models,
+  reference: string,
+  baseUrl: string | undefined,
+  sentId: string | undefined,
+): Model<Api> {
   const cut = reference.indexOf("/");
   if (cut <= 0 || cut === reference.length - 1) {
     throw new Error(`模型引用要写成 provider/model（例如 deepseek/deepseek-flash），收到的是：${reference}`);
@@ -157,8 +167,12 @@ function resolve(models: Models, reference: string, baseUrl: string | undefined)
         : `模型目录里 ${provider} 没有这个模型：${id}（它有：${known.join(" / ")}）`,
     );
   }
-  // 端点覆盖是这一层的输入，而 pi 把端点挂在模型上 —— 复制一份，不动目录里那份。
-  return baseUrl === undefined ? model : { ...model, baseUrl };
+  // 端点覆盖与"发出去的 id"都是这一层的输入，而 pi 把它们挂在模型上 —— 复制一份，不动目录里那份。
+  return {
+    ...model,
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(sentId === undefined ? {} : { id: sentId }),
+  };
 }
 
 /** 账里的形状 → provider 的形状：**挑键**的地方（记账字段一个都不发，临时 id 现造）。 */
