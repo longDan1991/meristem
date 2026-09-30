@@ -24,7 +24,7 @@
  */
 
 export type { LineProps, LineStore } from "./props.ts";
-export type { ChatRole, JsonSchema, ToolCall, Usage, Wire, WireMessage } from "./shape.ts";
+export type { ChatRole, JsonSchema, Reply, ToolCall, ToolSpec, Usage, Wire, WireMessage } from "./shape.ts";
 
 export type { Event } from "./events.ts";
 

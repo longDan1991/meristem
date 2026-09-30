@@ -49,6 +49,21 @@ export interface WireMessage {
   readonly by?: string;
 }
 
+/**
+ * 模型回的那条：正文 / 思考 / 它伸出的手。
+ *
+ * **没有 id** —— id 是写账那一刻由我们定死的（`WireMessage.id`）：一条回复进了账才算"账里的一条"。
+ * 传输层因此不需要（也不许）编一个 id 出来。
+ */
+export type Reply = Omit<WireMessage, "id">;
+
+/** 这次伸得出的手（发给模型的那一面）：名字 + 一段描述 + 参数 schema。执行不在这一层。 */
+export interface ToolSpec {
+  readonly name: string;
+  readonly description: string;
+  readonly schema: JsonSchema;
+}
+
 /** 一次调用发出去的东西：一段 system + 平铺对话。 */
 export interface Wire {
   readonly system: string;

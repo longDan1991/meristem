@@ -69,7 +69,7 @@ import { born } from "./fork.ts";
 import type { LlmClient } from "./llm.ts";
 import { actionable } from "./plan.ts";
 import type { LineProps, LineStore } from "./props.ts";
-import type { ToolCall, WireMessage } from "./shape.ts";
+import type { Reply, ToolCall, WireMessage } from "./shape.ts";
 
 /** 装配输入：**只有端口**，没有值。 */
 export interface StartInput {
@@ -137,7 +137,7 @@ export function start(input: StartInput): Tree {
   }
 
   /** 写账：`id` 由**我们**定死（传输层给的临时 id 不进账，见 DESIGN §9.6）。 */
-  function append(id: NodeId, messages: readonly Omit<WireMessage, "id">[]): void {
+  function append(id: NodeId, messages: readonly Reply[]): void {
     input.store.append(
       id,
       messages.map((message) => ({ ...message, id: randomUUID() })),
@@ -174,11 +174,11 @@ export function start(input: StartInput): Tree {
    * `messages` 显式传进来，是因为总结分叉那一轮看的**不是**新线自己看得见的东西（见 `fork`）。
    */
   async function speak(id: NodeId, role: Role, messages: readonly WireMessage[], by?: string): Promise<void> {
-    let reply: WireMessage;
+    let reply: Reply;
     try {
       reply = await input.llm.chat(
         { system: role.system(), messages },
-        role.hands().map((hand) => hand.schema),
+        role.hands(),
         {
           onText: (delta) => sink.emit({ type: "message", node: id, channel: "text", delta }),
           onReasoning: (delta) => sink.emit({ type: "message", node: id, channel: "thought", delta }),

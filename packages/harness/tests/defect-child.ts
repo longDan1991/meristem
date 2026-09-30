@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { load } from "@meristem/atree";
 import type { Hand, Role } from "@meristem/roles";
 import type { LlmClient } from "../src/llm.ts";
+import type { Reply } from "../src/shape.ts";
 import type { LineProps } from "../src/props.ts";
 import type { WireMessage } from "../src/shape.ts";
 import { start } from "../src/tree.ts";
@@ -38,8 +39,8 @@ const work: Role = {
     : { kind: "missing", answer: `没有叫 ${name} 的手` }),
 };
 const transport: LlmClient = {
-  async chat(): Promise<WireMessage> {
-    return { id: "临时", role: "assistant", content: "", toolCalls: [{ name: "broken", arguments: {} }] };
+  async chat(): Promise<Reply> {
+    return { role: "assistant", content: "", toolCalls: [{ name: "broken", arguments: {} }] };
   },
 };
 const tree = start({ store, llm: transport, role: () => work });

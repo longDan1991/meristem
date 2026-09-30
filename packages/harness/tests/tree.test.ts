@@ -17,7 +17,7 @@ import { start } from "../src/tree.ts";
 import type { Tree } from "../src/tree.ts";
 import { actionable } from "../src/plan.ts";
 import type { LineStore } from "../src/props.ts";
-import type { Wire, WireMessage } from "../src/shape.ts";
+import type { Reply, Wire, WireMessage } from "../src/shape.ts";
 
 const dirs: string[] = [];
 
@@ -46,7 +46,7 @@ async function ticks(count = 50): Promise<void> {
 }
 
 /** 脚本化传输：第 n 次调用返回第 n 条回复；把收到的 wire 全记下来供断言。 */
-function scripted(replies: readonly WireMessage[]): LlmClient & { readonly wires: Wire[] } {
+function scripted(replies: readonly Reply[]): LlmClient & { readonly wires: Wire[] } {
   const wires: Wire[] = [];
   let at = 0;
   return {
@@ -61,9 +61,8 @@ function scripted(replies: readonly WireMessage[]): LlmClient & { readonly wires
   };
 }
 
-function reply(content: string, calls: readonly { name: string; args?: unknown }[] = []): WireMessage {
+function reply(content: string, calls: readonly { name: string; args?: unknown }[] = []): Reply {
   return {
-    id: "transport-tmp-id",
     role: "assistant",
     content,
     ...(calls.length === 0
@@ -147,7 +146,7 @@ interface Booted {
   readonly events: Event[];
 }
 
-async function boot(replies: readonly WireMessage[], roles: readonly Role[]): Promise<Booted> {
+async function boot(replies: readonly Reply[], roles: readonly Role[]): Promise<Booted> {
   return bootWith(scripted(replies), roles);
 }
 
@@ -303,7 +302,7 @@ describe("手：起手一条回话、结束一条消息", () => {
   });
 
   test("吐字期间人说的话：排在它后面（账上的顺序就是事情发生的顺序）", async () => {
-    const { promise: pending, resolve: answer } = Promise.withResolvers<WireMessage>();
+    const { promise: pending, resolve: answer } = Promise.withResolvers<Reply>();
     let calls = 0;
     const wires: Wire[] = [];
     const transport: LlmClient & { readonly wires: Wire[] } = {
@@ -336,7 +335,7 @@ describe("手：起手一条回话、结束一条消息", () => {
   });
 
   test("没有谁等谁：A 的一轮还没回来，B 的话照样被接上", async () => {
-    const { promise: pending, resolve: answer } = Promise.withResolvers<WireMessage>();
+    const { promise: pending, resolve: answer } = Promise.withResolvers<Reply>();
     let calls = 0;
     const wires: Wire[] = [];
     const transport: LlmClient & { readonly wires: Wire[] } = {
