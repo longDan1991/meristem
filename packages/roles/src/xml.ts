@@ -122,6 +122,17 @@ export function parse(xml: string, available: Available, source: string): Draft 
         about,
         system: () => compose(preamble, all, skills),
         hands: () => all,
+        findHand(name) {
+          const hand = all.find((candidate) => candidate.name === name);
+          if (hand !== undefined) return { kind: "hand", hand };
+          const names = all.map((candidate) => candidate.name).join(" / ");
+          return {
+            kind: "missing",
+            answer:
+              `这条线上没有叫 ${name} 的手。你手上的手是：${names}（见 system 的 tools 一节）` +
+              " —— 用里面有的名字重来。",
+          };
+        },
       };
     },
   };

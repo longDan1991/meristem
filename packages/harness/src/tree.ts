@@ -51,7 +51,8 @@
  *      + `Event.transport_error`（不入账、不自动重试，§9.8）。
  *
  *   绝不做的：判断这一手会长不长（§9.3）；生成任何文本（消息内容一律来自 `job.report()`）；
- *   设统一超时（§9.9）；轮询；重试；因为作业多就限并发；**替模型编交代**（缺陷 → 打穿进程，见 `deliver`）。
+ *   设统一超时（§9.9）；轮询；重试；因为作业多就限并发；**替模型编交代**
+ *   （点了没有的手 → roles 给一句话回给它；手自己起不来 → 缺陷，打穿进程，见 `deliver`）。
  *
  * 它不认识工具 / 技能 / 提示词分节 / MCP —— 那些词全在角色端口后面。
  *
@@ -202,19 +203,17 @@ export function start(input: StartInput): Tree {
 
   /** 把一次调用变成一次执行：起手一条回话，结束一条消息（§9.5）。 */
   async function startHand(id: NodeId, role: Role, call: ToolCall): Promise<void> {
-    const hand = role.hands().find((candidate) => candidate.name === call.name);
-    if (hand === undefined) {
-      // 模型只该点给它的手（schema 就在 wire 里）：点了没有的 = 传下去的手与它看到的不一致 ——
-      // 那是缺陷，当场炸。**不替它编一条交代**：harness 一个字的文本都不写（§9.2）。
-      throw new Error(
-        `模型点了没有的手：${call.name}（这条线的角色是 ${role.id}，它的手只有：${role
-          .hands()
-          .map((candidate) => candidate.name)
-          .join(" / ")}）`,
-      );
+    const lookup = role.findHand(call.name);
+    if (lookup.kind === "missing") {
+      // 模型点了没有的手：它点错很正常，所以不是缺陷 —— 但那条 `tool_calls` 也得有条回音。
+      // 这句话由 roles 给（harness 一个字的文本都不写）；说完再让这条线自己看要不要接着说。
+      append(id, [{ role: "tool", content: lookup.answer }]);
+      void deliver(id, () => maybeSpeak(id));
+      return;
     }
+    const hand = lookup.hand;
 
-    // 手自己起不来（`run` 抛出）也是缺陷：交代是手写的东西，不由这里编（见底座的两个原语）。
+    // 手自己起不来（`run` 抛出）是缺陷：交代是手写的东西，不由这里编（见底座的两个原语）。
     const job: Job = await hand.run(call.arguments, {
       outputRoot: node(id).props.outputRoot,
       space: id,

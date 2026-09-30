@@ -1,5 +1,5 @@
 /**
- * 缺陷场景的子进程（给 `tree.test.ts` 用）：模型点了一把它没有的手。
+ * 缺陷场景的子进程（给 `tree.test.ts` 用）：一只手的 `run` 抛出（起不来）。
  *
  * 这里证明两件事：账里**没有**替它编出来的回话；缺陷**不被吞** —— 它带着真实的栈打在进程上。
  * 单独一个子进程是因为"把进程打穿"这件事在测试进程里没法验证（会把整个测试跑一起带走）。
@@ -10,7 +10,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { load } from "@meristem/atree";
-import type { Role } from "@meristem/roles";
+import type { Hand, Role } from "@meristem/roles";
 import type { LlmClient } from "../src/llm.ts";
 import type { LineProps } from "../src/props.ts";
 import type { WireMessage } from "../src/shape.ts";
@@ -19,10 +19,27 @@ import { start } from "../src/tree.ts";
 const store = await load<LineProps, WireMessage>(
   join(mkdtempSync(join(tmpdir(), "meristem-defect-")), "tree.jsonl"),
 );
-const work: Role = { id: "work", title: "干活", about: "干活", system: () => "你是干活的", hands: () => [] };
+const broken: Hand = {
+  name: "broken",
+  description: "起不来的那一只",
+  schema: { type: "object", properties: {} },
+  async run() {
+    throw new Error("我起不来");
+  },
+};
+const work: Role = {
+  id: "work",
+  title: "干活",
+  about: "干活",
+  system: () => "你是干活的",
+  hands: () => [broken],
+  findHand: (name) => (name === broken.name
+    ? { kind: "hand", hand: broken }
+    : { kind: "missing", answer: `没有叫 ${name} 的手` }),
+};
 const transport: LlmClient = {
   async chat(): Promise<WireMessage> {
-    return { id: "临时", role: "assistant", content: "", toolCalls: [{ name: "没这把", arguments: {} }] };
+    return { id: "临时", role: "assistant", content: "", toolCalls: [{ name: "broken", arguments: {} }] };
   },
 };
 const tree = start({ store, llm: transport, role: () => work });

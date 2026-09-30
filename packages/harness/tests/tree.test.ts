@@ -73,7 +73,19 @@ function reply(content: string, calls: readonly { name: string; args?: unknown }
 }
 
 function role(id: RoleId, hands: readonly Hand[]): Role {
-  return { id, title: id, about: id, system: () => `你是 ${id}`, hands: () => hands };
+  return {
+    id,
+    title: id,
+    about: id,
+    system: () => `你是 ${id}`,
+    hands: () => hands,
+    findHand(name) {
+      const hand = hands.find((candidate) => candidate.name === name);
+      if (hand !== undefined) return { kind: "hand", hand };
+      const names = hands.map((candidate) => candidate.name).join(" / ");
+      return { kind: "missing", answer: `没有叫 ${name} 的手（你有：${names || "一把都没有"}）` };
+    },
+  };
 }
 
 /** 立刻结束的手（`read` / `write` 那一类）。 */
@@ -265,12 +277,29 @@ describe("手：起手一条回话、结束一条消息", () => {
     tree.stop();
   });
 
-  test("模型点了一把没有的手：账里不编回话，而且它把进程打穿（子进程里真跑一遍）", () => {
+  test("模型点了一把没有的手：roles 给一句话回给它，这条线接着说（不是缺陷）", async () => {
+    const { store, tree, transport } = await boot(
+      [reply("", [{ name: "没这把" }]), reply("知道了")],
+      [role("work", [])],
+    );
+    const node = await tree.fork({ parent: null, role: "work", inputText: "随便", dir: tmp() });
+    await until(() => contents(store, node).length === 4, "回话 + 接着说");
+
+    const messages = contents(store, node);
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(messages[2]?.content).toBe("没有叫 没这把 的手（你有：一把都没有）");
+    expect(messages[2]?.by).toBeUndefined();
+    expect(transport.wires).toHaveLength(2);
+
+    tree.stop();
+  });
+
+  test("手自己起不来（run 抛出）：那是缺陷，把进程打穿（子进程里真跑一遍）", () => {
     const child = Bun.spawnSync([process.execPath, "run", join(import.meta.dir, "defect-child.ts"), tmp()]);
 
     expect(child.exitCode).toBe(7);
     expect(String(child.stdout)).toContain("账里的话：user,assistant");
-    expect(String(child.stderr)).toContain("模型点了没有的手");
+    expect(String(child.stderr)).toContain("我起不来");
   });
 
   test("吐字期间人说的话：排在它后面（账上的顺序就是事情发生的顺序）", async () => {

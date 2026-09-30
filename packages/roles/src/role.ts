@@ -32,7 +32,21 @@ export interface Role {
 
   /** 这次伸得出哪些手：内置手与 MCP 手在这里没有区别。 */
   hands(): readonly Hand[];
+
+  /**
+   * 按名字找一只手：找到给手，**找不到给一句话**。
+   *
+   * 模型点了没有的手是**正常的事**（它可以点错），所以这不是缺陷 —— 但那条 `tool_calls` 也得有条回音，
+   * 不能装作没发生。**"没有这把"的话住这一层**：谁有哪些手、说这句话怎么说，都是能力的事；
+   * harness 一个字的文本都不写（DESIGN §9.2）。
+   */
+  findHand(name: string): HandLookup;
 }
+
+/** 找手的结果：要么这只手，要么**回给模型的那一句话**（说清它手上有哪些）。 */
+export type HandLookup =
+  | { readonly kind: "hand"; readonly hand: Hand }
+  | { readonly kind: "missing"; readonly answer: string };
 
 /** 一只手：名字 + 一段描述 + schema + 一次执行（语义只有一份，没有第二处说明）。 */
 export interface Hand {

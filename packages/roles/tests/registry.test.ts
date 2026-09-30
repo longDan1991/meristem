@@ -203,6 +203,25 @@ describe("注册表：装载、查、清单", () => {
     await expect(start(dir, [])).rejects.toThrow("MCP 还没接上");
   });
 
+  test("按名字找手：找得到给手，找不到给一句话（那句话就是回给模型的东西）", async () => {
+    const dir = roleDir({
+      "a.xml": `<role id="work" title="干活"><about>干活</about><hands>read</hands></role>`,
+    });
+    await start(dir, []);
+    const work = get("work");
+
+    const found = work.findHand("read");
+    expect(found.kind).toBe("hand");
+    if (found.kind === "hand") expect(found.hand.name).toBe("read");
+
+    const missing = work.findHand("bsah");
+    expect(missing.kind).toBe("missing");
+    if (missing.kind === "missing") {
+      expect(missing.answer).toContain("没有叫 bsah 的手");
+      expect(missing.answer).toContain("read");
+    }
+  });
+
   test("没有这个角色 / 技能根不存在：当场抛错，不静默降级", async () => {
     const dir = roleDir({ "a.xml": `<role id="aaa" title="甲"><about>甲</about></role>` });
     await start(dir, []);
