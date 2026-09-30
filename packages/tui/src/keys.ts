@@ -1,20 +1,19 @@
-/** @jsxImportSource @opentui/react */
 /**
- * 一整屏的外壳：占满终端，并把**键的形状**归一化后交给调用方。
+ * 键的注册与归一化：**tui 只统一键的形状，键是什么意思全归调用方**。
  *
- * 键位语义（哪个键是什么意思、要不要拦）全归调用方 —— 这里只做形状上的统一，
- * 所以不拦键、不做 `preventDefault` 之外的分支。
+ * 每个关心按键的组件自己调一次 `useKeys` —— opentui 的 `useKeyboard` 是"每次调用挂一个监听"，
+ * 多个组件各挂各的、都会收到每一次按键，所以"这个键归哪个组件"由组件自己声明（谁在意谁接），
+ * 这里只保证大家看到的是同一种形状：`ctrl+b` / `alt+up` / `up` / 打得出来的字。
  *
- * 变因：键的归一化规则与外壳本身（终端尺寸怎么用）。
+ * 传进来的函数**永远是最新的那个**（opentui 内部用 `useEffectEvent` 转接，只挂一次监听），
+ * 所以调用方不必操心"订阅要不要重挂"。
+ *
+ * 变因：键的归一化规则（哪些 opentui 事件算哪个键）。
  */
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import type { KeyEvent } from "@opentui/core";
-import type { ReactNode } from "react";
+import { useKeyboard } from "@opentui/react";
 
-export interface FrameProps {
-  readonly children: ReactNode;
-  readonly onKey?: (key: string) => void;
-}
+export type KeyHandler = (key: string) => void;
 
 /** opentui 的键名 → 归一化后的名字。没在这张表里的就是可打印字符（含中文 / 标点）。 */
 const KEY_NAMES: Readonly<Record<string, string>> = {
@@ -35,12 +34,32 @@ const KEY_NAMES: Readonly<Record<string, string>> = {
   space: " ",
 };
 
+/**
+ * 命令键：这些名字不是"人打的字"。
+ * 空格不在里面 —— 它既是名字表里的词，也真的是一个字。
+ */
+const COMMANDS: ReadonlySet<string> = new Set([
+  "enter",
+  "backspace",
+  "delete",
+  "escape",
+  "tab",
+  "up",
+  "down",
+  "left",
+  "right",
+  "home",
+  "end",
+  "pageup",
+  "pagedown",
+]);
+
 /** 控制字符不是"人打的字"：终端给的原始序列（ESC 开头）靠它挡掉。 */
 const CONTROL = /[\p{Cc}\p{Cs}]/u;
 
 /**
  * 归一化后的键：可打印字符原样（`"a"` / `"你"` / `" "`），特殊键取名字表里的词，
- * 带修饰键就是 `ctrl+b` / `alt+b` / `shift+tab` 这种小写形状。认不出来的键往上递没有意义（返回 null）。
+ * 带修饰键就是 `ctrl+b` / `alt+up` 这种小写形状。认不出来的键往上递没有意义（返回 null）。
  */
 function normalizeKey(event: KeyEvent): string | null {
   const named = KEY_NAMES[event.name];
@@ -56,16 +75,13 @@ function normalizeKey(event: KeyEvent): string | null {
   return [...mods, key].join("+");
 }
 
-export function Frame({ children, onKey }: FrameProps): ReactNode {
-  const { width, height } = useTerminalDimensions();
+export function useKeys(handler: KeyHandler): void {
   useKeyboard((event) => {
-    if (onKey === undefined) return;
     const key = normalizeKey(event);
-    if (key !== null) onKey(key);
+    if (key !== null) handler(key);
   });
-  return (
-    <box width={width} height={height} flexDirection="column">
-      {children}
-    </box>
-  );
+}
+
+export function isPrintable(key: string): boolean {
+  return key.length > 0 && !key.includes("+") && !COMMANDS.has(key);
 }

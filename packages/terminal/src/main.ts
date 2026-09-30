@@ -25,7 +25,7 @@ import { load } from "@meristem/atree";
 import type { LineProps, LineStore, WireMessage } from "@meristem/harness";
 import { createClient, start as startTree } from "@meristem/harness";
 import { get, list, start as startRoles } from "@meristem/roles";
-import { mount } from "./app.tsx";
+import { mount } from "./mount.tsx";
 import { parseArgs } from "./cli.ts";
 import { loadConfig, loadCredential } from "./config.ts";
 
@@ -46,7 +46,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     const tree = startTree({ store, llm, role: get });
     tree.resume();
     try {
-      await mount({ store, tree, roles: list(), workspace: cfg.workspace, at: args.at });
+      await mount({ session: { store, tree, roles: list(), workspace: cfg.workspace }, at: args.at });
     } finally {
       tree.stop();
     }

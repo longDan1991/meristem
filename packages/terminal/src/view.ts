@@ -2,13 +2,14 @@
  * 视图：**纯函数** —— 只读账 → 行。不认识账怎么写、不认识事件、不认识 tui。
  *
  * 展示的变因住这一层：树怎么折、选中谁、一行里放什么字。
- * 颜色 / 布局 / 键位归 `app.tsx`（那头才认识外壳）。
+ * 颜色归 `style.ts`、键位归各区自己（`components/`）、布局与接线归 `app.tsx`（那几处才认识外壳）。
  *
  * 变因：展示（出哪些行、每行标什么）。
  */
 import type { NodeId } from "@meristem/atree";
-import type { LineStore } from "@meristem/harness";
+import type { LineStore, Usage } from "@meristem/harness";
 import type { Job } from "@meristem/roles";
+import type { Tail } from "./providers/tail.tsx";
 
 /** 行的语义标签：只说"这是什么行"，颜色由 app 定。 */
 export type RowTag = "title" | "dim" | "user" | "model" | "thought" | "hand" | "error";
@@ -170,3 +171,120 @@ export function lineRows(store: LineStore, node: NodeId, tail: readonly Row[]): 
 
   return [...rows, ...tail];
 }
+
+// ---- 派生成"给人看的行 / 文案"：账 + 吐字 + 在跑什么，纯函数，不认识 tui / React ----
+
+/** 树条带最多铺几行（选中行永远在窗口里，其余靠折叠与滚动）。 */
+export const STRIP_ROWS = 8;
+
+/** 树条带窗口：只铺 `size` 行、让选中行落在窗口里；`selectable` 是**全部**可选中行（↑/↓ 走它）。 */
+export function treeWindow(
+  rows: readonly TreeRow[],
+  size: number,
+): { readonly window: readonly TreeRow[]; readonly selectable: readonly NodeId[] } {
+  const at = rows.findIndex((row) => row.selected);
+  const start = windowOffset(at, rows.length, size);
+  return {
+    window: rows.slice(start, start + size),
+    selectable: rows.flatMap((row) => (row.id === null ? [] : [row.id])),
+  };
+}
+
+/** 让选中的那一行落在窗口里（树条带只铺 `size` 行）。 */
+function windowOffset(at: number, total: number, size: number): number {
+  if (total <= size || at < 0) return 0;
+  const half = Math.floor(size / 2);
+  return Math.min(Math.max(at - half, 0), total - size);
+}
+
+/** `ctrl+o` 收起时，把一串思考压成一行说明（**看得见的限制**，不是静默丢字）。 */
+export function foldThoughts(rows: readonly Row[]): readonly Row[] {
+  const folded: Row[] = [];
+  let run = 0;
+  const flush = (): void => {
+    if (run > 0) folded.push({ text: `▸ 思考 ${run} 行（ctrl+o 展开）`, tag: "dim" });
+    run = 0;
+  };
+  for (const row of rows) {
+    if (row.tag === "thought") {
+      run += 1;
+      continue;
+    }
+    flush();
+    folded.push(row);
+  }
+  flush();
+  return folded;
+}
+
+/** 正在吐的字里账里还没有的那部分（assistant 那条一进账，它整段就都在账里了）。 */
+export function unaccounted(store: LineStore, node: NodeId, tail: Tail | null): Tail | null {
+  if (tail === null || tail.node !== node) return null;
+  const last = store.content(node).at(-1);
+  if (last === undefined || last.role !== "assistant") return tail;
+  return {
+    node,
+    base: tail.base,
+    text: last.content.endsWith(tail.text) ? "" : tail.text,
+    thought: (last.reasoning ?? "").endsWith(tail.thought) ? "" : tail.thought,
+  };
+}
+
+/** 一段字按行拆成带标签的 Row（空串不铺）。 */
+export function split(text: string, tag: RowTag): readonly Row[] {
+  return text === "" ? [] : text.split("\n").map((line) => ({ text: line, tag }));
+}
+
+/**
+ * 状态条两行文案。没有根时**更**要说清楚：人正要打第一句话，这时按回车没反应最像"界面卡住了"。
+ */
+export function statusText(
+  store: LineStore,
+  node: NodeId | null,
+  jobCount: number,
+  usage: Usage | undefined,
+  notice: string,
+): { readonly left: string; readonly right: string } {
+  if (node === null) {
+    return {
+      left: notice === "" ? "还没有根 —— 说一句什么，就以它开第一条线" : notice,
+      right: "enter 说话 · ctrl+c 退出",
+    };
+  }
+  const facts = store.get(node)?.props;
+  const left = [
+    facts === undefined ? node : `${facts.name} · ${facts.role} · ${shortPath(facts.outputRoot)}`,
+    jobCount > 0 ? `在跑 ${jobCount}` : undefined,
+    notice === "" ? undefined : notice,
+  ]
+    .filter((part) => part !== undefined)
+    .join(" · ");
+  const keys = ["enter 说话", "ctrl+b 分叉", "tab 作业", jobCount > 0 ? "esc 取消" : undefined, "ctrl+c 退出"].filter(
+    (part) => part !== undefined,
+  );
+  return { left, right: [usageLine(usage), keys.join(" · ")].filter((part) => part !== undefined).join("  ") };
+}
+
+/** 一行里放不下整条路径：留住最后一段，省略**看得见**（状态条是给人扫一眼的，不是账）。 */
+function shortPath(path: string): string {
+  const parts = path.split("/").filter((part) => part !== "");
+  const tail = parts.at(-1) ?? path;
+  return path.length <= 24 || parts.length <= 1 ? path : `…/${tail}`;
+}
+
+function usageLine(usage: Usage | undefined): string | undefined {
+  if (usage === undefined) return undefined;
+  return `↑${tokens(usage.prompt)} ↓${tokens(usage.completion)}（思考 ${tokens(usage.reasoning)} / 缓存 ${tokens(usage.cached)}）`;
+}
+
+function tokens(count: number): string {
+  return count < 1000 ? String(count) : `${(count / 1000).toFixed(1)}k`;
+}
+
+/** 输入行的 placeholder。 */
+export function placeholder(node: NodeId | null, root: NodeId | null): string {
+  if (node === null) return "说一句什么（没有根就以这一句开第一条线）";
+  if (root === null) return "说一句什么";
+  return "跟这条线说一句（回车进账）";
+}
+
