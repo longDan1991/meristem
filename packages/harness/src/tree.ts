@@ -62,7 +62,7 @@ import type { Node, NodeId } from "@meristem/atree";
 import type { Job, Role, RoleId } from "@meristem/roles";
 import { SUMMARY_FORK, all as allJobs } from "@meristem/roles";
 import { createSink } from "./events.ts";
-import type { Event, EventSink } from "./events.ts";
+import type { Event } from "./events.ts";
 import type { ForkInput } from "./fork.ts";
 import { born } from "./fork.ts";
 import type { LlmClient } from "./llm.ts";
@@ -122,7 +122,7 @@ export interface Tree {
 }
 
 export function start(input: StartInput): Tree {
-  const sink: EventSink = createSink();
+  const sink = createSink();
   /** 模型接口失败过的线：**只在内存里**（§9.8 说账里一个字都不多），人重试 / 再开口时清掉。 */
   const failed = new Set<NodeId>();
   /** 每条线一条自己的串行链：投给它的按顺序做，**节点 ID 就是隔离键**。 */
@@ -158,8 +158,10 @@ export function start(input: StartInput): Tree {
    * 这就是全部的并发控制：没有状态机、没有锁 —— 隔离靠"这件事属于哪个节点"，由这条线自己按顺序做。
    * 头尾各刷一次状态（开始动 / 动完），界面因此看得见它什么时候在动。
    *
-   * 出了缺陷（模型点了没有的手 / 手自己起不来 / 传输面用错）：**不回话、不兜底、不咽下去** ——
-   * 扔回进程（定时器里抛 = 未捕获异常），让它带着真实的栈倒下去。
+   * 出了缺陷（模型点了没有的手 / 手自己起不来 / 传输面用错）：**不回话、不兜底、不咽下去**。
+   * 这里不直接 `throw`：我们正站在 async 链的续体里，直接抛只会变成"这条链的 rejection"，
+   * 等着这条链的人（`say` / `fork` / 内部那个 `void deliver`）就能把它吞掉 —— 而缺陷必须打穿进程。
+   * 扔进一个新任务里抛，它是**未捕获异常**，由运行时按崩溃处理，带着真实的栈。
    */
   function deliver(id: NodeId, work: () => Promise<void>): Promise<void> {
     const previous = chains.get(id) ?? Promise.resolve();
@@ -168,9 +170,9 @@ export function start(input: StartInput): Tree {
       try {
         await work();
       } catch (error) {
-        setTimeout(() => {
+        queueMicrotask(() => {
           throw error;
-        }, 0);
+        });
       }
       refresh(id);
     });
@@ -269,7 +271,6 @@ export function start(input: StartInput): Tree {
     },
 
     say(id: NodeId, text: string): Promise<void> {
-      node(id);
       return deliver(id, async () => {
         append(id, [{ role: "user", content: text }]);
         // 人又开口了，这条线就再试一次（§9.8 的重试是人的事）。
