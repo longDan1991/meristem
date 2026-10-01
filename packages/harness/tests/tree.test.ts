@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { load } from "@meristem/atree";
 import type { NodeId } from "@meristem/atree";
 import type { Hand, Job, Role, RoleId } from "@meristem/roles";
-import { SUMMARY_FORK, background, settled } from "@meristem/roles";
+import { Builtin, background, settled } from "@meristem/roles";
 import type { Event } from "../src/events.ts";
 import type { LlmClient } from "../src/llm.ts";
 import { start } from "../src/tree.ts";
@@ -75,7 +75,6 @@ function role(id: RoleId, hands: readonly Hand[]): Role {
   return {
     id,
     title: id,
-    about: id,
     system: () => `你是 ${id}`,
     hands: () => hands,
     findHand(name) {
@@ -435,7 +434,7 @@ describe("总结分叉", () => {
   test("三步：造线 → 穿总结角色抽底（by=乙）→ 穿过人选的角色回应（by=丙）", async () => {
     const { store, tree, transport } = await boot(
       [reply("父线的第一句回答"), reply("父亲这一枝做过的事"), reply("按你说的办")],
-      [role("talk", []), role("other", []), role(SUMMARY_FORK, [])],
+      [role("talk", []), role("other", []), role(Builtin.SummaryFork, [])],
     );
     tree.resume();
 
@@ -452,14 +451,14 @@ describe("总结分叉", () => {
 
     const messages = contents(store, child);
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
-    expect(messages[1]?.by).toBe(SUMMARY_FORK);
+    expect(messages[1]?.by).toBe(Builtin.SummaryFork);
     expect(messages[1]?.content).toBe("父亲这一枝做过的事");
     expect(messages[2]?.by).toBeUndefined();
     expect(messages[2]?.content).toBe("按你说的办");
 
     // 乙 那一轮看的是"父线看得见的历史 + 这条新消息"；丙 那一轮看的是新线自己看得见的。
     const summaryWire = transport.wires.at(-2);
-    expect(summaryWire?.system).toContain(SUMMARY_FORK);
+    expect(summaryWire?.system).toContain(Builtin.SummaryFork);
     expect(summaryWire?.messages.map((message) => message.role)).toEqual([
       "user",
       "assistant",

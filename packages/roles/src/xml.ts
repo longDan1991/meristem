@@ -5,7 +5,6 @@
  *
  * ```xml
  * <role id="code" title="编程">
- *   <about>读 / 写 / 跑命令，把代码改到能跑</about>
  *   <prompt>                <!-- 系统提示词的正文，纯文本，程序不改一个字 -->
  *     你是……                 <!-- 手是什么、什么时候用哪把，直接写在这里 -->
  *   </prompt>
@@ -25,13 +24,14 @@
  *   skills    = 名字 / 描述 / 路径 + 一句"怎么读"（用 `read` 按路径读，技能没有专门的手）
  *
  * 约定：
- *   · `id` / `title` / `about` 必填（后两样是**给人看的那两行**：挑角色时只看它们）；
+ *   · `id` / `title` 必填（`title` 是**给人看的那一行**：挑角色时只看它）；
  *   · `id` 必填且唯一（跟内置角色同名当场报错，不覆盖不并存）；
  *   · `<hands>` 点名的手必须是已知内置手，`<skills>` 点名的技能必须真存在
  *     （拼错当场报错，不静默少一把手 / 一个技能）；
  *   · 声明了技能就必须给 `read` 或 `bash`（不然模型知道有技能却读不到）→ 没给当场报错；
- *   · 作业的三只共享手（`job_list` / `job_output` / `job_cancel`）**不用点名**：装载器无条件并入
- *     —— 它们属于执行机制（所有角色都有），不是某块能力的开关；点名它们反而当场报错；
+ *   · 作业的三只共享手（`job_list` / `job_output` / `job_cancel`）**不用点名**：**点了手的角色**
+ *     都无条件并入 —— 它们属于执行机制，不是某块能力的开关；点名它们反而当场报错。
+ *     一只手都不点的角色（全关）连它们也不给：没有手可伸，也就没有作业可看；
  *   · `<prompt>` 可以整个不写（那就是"纯对话线"，零提示词也合法）；
  *   · `<prompt>` 里**不用解释“异步 / 后台 / 作业”这套机制**：模型侧看不见区别（一次执行而已）。
  *     要讲的纪律（“别拿 `job_output` 当轮询”）住在 schema 的 `description` 里，不在这里重复；
@@ -63,7 +63,6 @@ export interface Available {
 export interface Draft {
   readonly id: RoleId;
   readonly title: string;
-  readonly about: string;
   /** xml 里声明的服务（`start` 据此连；连不上那个角色就不成立）。 */
   readonly mcp: readonly McpServerDecl[];
   /** 补上 MCP 手之后的最终角色（system 不受影响：MCP 手没有 snippet）。 */
@@ -91,12 +90,11 @@ export function parse(xml: string, available: Available, source: string): Draft 
 
   const root = own(doc, "role", source);
   dropBlankText(root, source, "role");
-  known(root, ["@_id", "@_title", "about", "prompt", "hands", "skills", "mcp"], source, "role");
+  known(root, ["@_id", "@_title", "prompt", "hands", "skills", "mcp"], source, "role");
 
   const id = required(root, "@_id", source).trim();
   if (id === "" || /\s/.test(id)) throw new Error(`${source}: id 必填，而且不能带空格`);
   const title = required(root, "@_title", source).trim();
-  const about = required(root, "about", source).trim();
 
   const hands = resolveHands(root["hands"], available.hands, source);
   const skills = resolveSkills(root["skills"], available, source);
@@ -109,22 +107,52 @@ export function parse(xml: string, available: Available, source: string): Draft 
 
   const preamble = typeof root["prompt"] === "string" ? root["prompt"].trim() : "";
 
+  return built(id, title, mcp, preamble, hands, skills);
+}
+
+/** 读一个 xml 文件 → `Draft`（随包发布的内置角色也走这条路）。 */
+export async function parseFile(path: string, available: Available): Promise<Draft> {
+  return parse(await readFile(path, "utf8"), available, path);
+}
+
+/**
+ * 什么都不带的角色（提示词 / 手 / 技能 / 服务全空）—— **内置的基础角色**走这条路
+ * （`registry.ts` 的 `Builtin.Bare`：它在代码里建，没有 xml）。跟 xml 出来的角色同一条造法。
+ */
+export function empty(id: RoleId, title: string): Draft {
+  return built(id, title, [], "", [], []);
+}
+
+/** 一个角色的所有组成部分 → `Draft`（`parse` 与 `empty` 共用，只有这一处把它们拼起来）。 */
+function built(
+  id: RoleId,
+  title: string,
+  mcp: readonly McpServerDecl[],
+  preamble: string,
+  hands: readonly Hand[],
+  skills: readonly SkillInfo[],
+): Draft {
   return {
     id,
     title,
-    about,
     mcp,
     role(extra = []) {
-      const all = [...hands, ...extra];
+      // 一只手都没有的角色（点名的与 MCP 的都算）连作业那三只也不带：没有手可伸，作业无从谈起。
+      const all = hands.length + extra.length === 0 ? [] : [...hands, ...JOB_HANDS, ...extra];
       return {
         id,
         title,
-        about,
         system: () => compose(preamble, all, skills),
         hands: () => all,
         findHand(name) {
           const hand = all.find((candidate) => candidate.name === name);
           if (hand !== undefined) return { kind: "hand", hand };
+          if (all.length === 0) {
+            return {
+              kind: "missing",
+              answer: `这条线上你一只手动不了（没有手可伸），${name} 调不了，也没有别的手可换。`,
+            };
+          }
           const names = all.map((candidate) => candidate.name).join(" / ");
           return {
             kind: "missing",
@@ -136,11 +164,6 @@ export function parse(xml: string, available: Available, source: string): Draft 
       };
     },
   };
-}
-
-/** 读一个 xml 文件 → `Draft`（随包发布的内置角色也走这条路）。 */
-export async function parseFile(path: string, available: Available): Promise<Draft> {
-  return parse(await readFile(path, "utf8"), available, path);
 }
 
 /** system 的拼法（顺序即契约，DESIGN §8）：人写的原文 → tools → rules → skills。 */
@@ -174,15 +197,18 @@ function section(name: string, content: string): string {
   return content === "" ? "" : `<${name}>\n${content}\n</${name}>`;
 }
 
-/** 点名的手 → 手对象，按写的顺序（重复写只算一次）。 */
+/**
+ * 点名的手 → 手对象，按写的顺序（重复写只算一次）。作业那三只**不在这里**：它们由 `built`
+ * 按"这个角色有没有手"并进来（点了手的角色都自动带上，见 DESIGN §9.2）。
+ */
 function resolveHands(given: unknown, catalog: readonly Hand[], source: string): readonly Hand[] {
-  if (given === undefined) return merged([]);
+  if (given === undefined) return [];
   const names = words(given, "hands", source);
   const job = new Set(JOB_HANDS.map((hand) => hand.name));
   const chosen: Hand[] = [];
   for (const name of names) {
     if (job.has(name)) {
-      throw new Error(`${source}: <hands> 不用点名 ${name} —— 作业的三只共享手由装载器无条件并入`);
+      throw new Error(`${source}: <hands> 不用点名 ${name} —— 点了手的角色都自动带上作业那三只共享手`);
     }
     const hand = catalog.find((candidate) => candidate.name === name);
     if (hand === undefined) {
@@ -191,12 +217,7 @@ function resolveHands(given: unknown, catalog: readonly Hand[], source: string):
     }
     if (!chosen.includes(hand)) chosen.push(hand);
   }
-  return merged(chosen);
-}
-
-/** 内置手 + 作业共享手（后者无条件并入，DESIGN §9.2）。 */
-function merged(chosen: readonly Hand[]): readonly Hand[] {
-  return [...chosen, ...JOB_HANDS];
+  return chosen;
 }
 
 /** 点名的技能 → 技能信息，按写的顺序；声明了技能就必须给得到手的读法。 */

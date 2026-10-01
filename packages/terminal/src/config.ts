@@ -28,7 +28,7 @@ export interface Config {
    * 缺省 `<workspace>/.tree/ledger.jsonl`（从数据根推出来，不是从代码位置推）。
    */
   readonly tree: string;
-  /** 额外角色目录（可选）：一个 xml 一个角色。没给 = 只有随包发布的内置角色（`summary-fork`）。 */
+  /** 额外角色目录（可选）：一个 xml 一个角色。没给 = 只有内建角色（`summary-fork` 与 `bare`，见 roles 的 `Builtin`）。 */
   readonly roleDir?: string;
   /** 技能根（可选，`:` 分隔）：`SKILL.md` 非递归扫描，同名 first-wins。没给 = 没有技能根。 */
   readonly skillDirs: readonly string[];

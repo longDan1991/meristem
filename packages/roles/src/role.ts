@@ -18,9 +18,8 @@ export type RoleId = string;
 export interface Role {
   readonly id: RoleId;
 
-  /** 人面：给人看的两行（挑角色时只看这两行）。 */
+  /** 人面：给人看的那一行（挑角色时只看它）。 */
   readonly title: string;
-  readonly about: string;
 
   /**
    * 这条线的 system：角色那份 xml 填空后的字符串。

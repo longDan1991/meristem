@@ -61,7 +61,7 @@
 import { randomUUID } from "node:crypto";
 import type { Node, NodeId } from "@meristem/atree";
 import type { Job, Role, RoleId } from "@meristem/roles";
-import { SUMMARY_FORK, all as allJobs } from "@meristem/roles";
+import { Builtin, all as allJobs } from "@meristem/roles";
 import { createSink } from "./events.ts";
 import type { Event } from "./events.ts";
 import type { ForkInput } from "./fork.ts";
@@ -284,9 +284,9 @@ export function start(input: StartInput): Tree {
         const history = parent === null ? [] : input.store.assemble(parent.id);
         await speak(
           created,
-          input.role(SUMMARY_FORK),
+          input.role(Builtin.SummaryFork),
           [...history, ...input.store.content(created)],
-          SUMMARY_FORK,
+          Builtin.SummaryFork,
         );
         // 丙：回应用户那句话（常规一轮：组装这条线看得见的 msgs）。
         await speak(created, input.role(choice.role), input.store.assemble(created));

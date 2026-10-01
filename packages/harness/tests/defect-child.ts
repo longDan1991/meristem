@@ -31,7 +31,6 @@ const broken: Hand = {
 const work: Role = {
   id: "work",
   title: "干活",
-  about: "干活",
   system: () => "你是干活的",
   hands: () => [broken],
   findHand: (name) => (name === broken.name

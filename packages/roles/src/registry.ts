@@ -9,8 +9,9 @@
  * 当场抛错 —— 那个角色就不成立（不静默跳过一台，也不产出半个清单）。
  * 装载是**整个换掉**：`start` 就是这一次的那一份（同一个进程只在开树时叫一次）。
  *
- * `SUMMARY_FORK` 的 id 与它的 xml 都住这里：id 只有这一份定义（不许在别处写字符串），
- * 角色本体是随代码发布的 xml（`registry/`，见 AGENTS §7 那条"包内只读资产"的例外）。
+ * **代码按名字找的角色 id 都住这里**（`Builtin` 这个枚举，字符串只写这一份）：住本包的是总结分叉
+ * （随代码发布的 xml，`registry/`，见 AGENTS §7 那条"包内只读资产"的例外）与基础角色
+ * （在代码里建，见 `xml.ts` 的 `empty`）。
  *
  * 数据就在这个包里（一份列表），不请别人代存。
  *
@@ -21,27 +22,36 @@ import { join } from "node:path";
 import type { Role, RoleId } from "./role.ts";
 import { discovered } from "./skills/index.ts";
 import { ALL as BUILTIN_HANDS } from "./tools/index.ts";
-import { parseFile } from "./xml.ts";
+import { empty, parseFile } from "./xml.ts";
 
 /** 随代码发布的角色目录（与代码同生共死，不是部署配置）。 */
 const BUILTIN_DIR = join(import.meta.dir, "..", "registry");
 
 /**
- * 包内自带的**总结分叉**角色（分叉时先抽一份底的那位，乙）。harness 用它把"总结分叉"接上。
- * 它的职责与两条硬纪律写在 `registry/summary-fork.xml` 里（提示词就在那儿，不在代码里）。
+ * 代码按名字找的那几个角色（**它们本身不特殊**，就是普通角色，只是这个 id 得有个唯一出处）：
+ *   · `SummaryFork` —— 分叉时程序自己穿的总结角色（乙）。它的职责与两条硬纪律写在
+ *     `registry/summary-fork.xml` 里（提示词就在那儿，不在代码里）；
+ *   · `Bare` —— 什么都不带的基础角色（全关）：**在代码里建，没有 xml**（`xml.ts` 的 `empty`），
+ *     一个角色目录都没配时清单里也总有它（见 `start` 收工时的那次核对）。
  */
-export const SUMMARY_FORK: RoleId = "summary-fork";
+export enum Builtin {
+  Bare = "bare",
+  SummaryFork = "summary-fork",
+}
+
+/** 基础角色给人看的那一行。 */
+const BARE_TITLE = "空角色";
 
 const roles = new Map<RoleId, Role>();
 
 /**
  * 装载角色（含包内内置角色）：`dir` = 额外的角色目录（**可缺省** —— 没给就只有内置的那些），
- * `skillDirs` = 技能根。
+ * `skillDirs` = 技能根。**基础角色（`Builtin.Bare`）无条件在**，它不走 xml。
  * 语法 / 引用（手名、技能名）/ 冲突 / 连接有问题当场抛错。
  *
- * **作业的三只共享手由这里无条件并入**（`JOB_LIST` / `JOB_OUTPUT` / `JOB_CANCEL`，见 `jobs/hands.ts`）：
- * 它们属于执行机制，不是某块能力的开关 —— 所以不需要在 xml 里点名，也不许被关掉
- * （模型看不见作业，就不知道一手跑没跑完、也没法看进度，作业就成了隐形的东西）。
+ * **点了手的角色都并入作业那三只共享手**（`JOB_LIST` / `JOB_OUTPUT` / `JOB_CANCEL`，见
+ * `jobs/hands.ts`）：它们属于执行机制，不是某块能力的开关 —— 所以不需要在 xml 里点名。
+ * 一只手都不点的角色（基础角色就是这样）连它们也不给：没有手可伸，作业无从谈起。
  */
 export async function start(dir: string | undefined, skillDirs: readonly string[]): Promise<void> {
   const available = { hands: BUILTIN_HANDS, skills: discovered(skillDirs) };
@@ -61,11 +71,20 @@ export async function start(dir: string | undefined, skillDirs: readonly string[
   }
 
   const loaded = new Map<RoleId, Role>();
+  // 基础角色先落座：谁写一个同 id 的 xml 都会在下面撞上它（一份语义只允许一份实现）。
+  loaded.set(Builtin.Bare, empty(Builtin.Bare, BARE_TITLE).role());
   for (const draft of drafts) {
     if (loaded.has(draft.id)) {
       throw new Error(`角色 id 重了：${draft.id}（一份语义只允许一份实现）`);
     }
     loaded.set(draft.id, draft.role());
+  }
+
+  // 代码按名字找的那几个角色一个都不能少（`Builtin`）：少了这棵树的前提就不成立，当场说清是哪个
+  // —— 别等跑到一半才在 `get` 那里炸（那时已经过了一堆无关的事）。
+  const absent = Object.values(Builtin).filter((id) => !loaded.has(id));
+  if (absent.length > 0) {
+    throw new Error(`内建角色没装上：${absent.join(" / ")}（装载到的：${[...loaded.keys()].join(" / ")}）`);
   }
 
   roles.clear();
