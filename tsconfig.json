@@ -15,7 +15,7 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
 
-    // AGENTS.md §12 的等价物：未使用的 import / 局部变量（ruff F401 / F841）由编译器报错。
+    // AGENTS.md §4 的等价物：未使用的 import / 局部变量（ruff F401 / F841）由编译器报错。
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
