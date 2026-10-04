@@ -73,6 +73,22 @@ bun run typecheck    # 两套 tsconfig
 bun test             # 无头用例（要真进程的那条自带子进程夹具）
 ```
 
+## 设计（dev）
+
+两份技能（`.agents/skills/prototype-design` / `ui-visual-design`）各管一档，产物**零代码关系**：
+
+| 路径 | 是什么 |
+|---|---|
+| `docs/prototype/` | **原型**（线框）：三个面描述产品 —— **屏幕**（`screens/S0…S12`）· **组件**（`components/M1…M12`）· **命令**（`commands/A…Q`），三处都只写**两家**（先例原样）。`overview.md` = 总体（41 个模块 + 两家对照 + **功能模块优先级**）。**我们自己的原型**住 `ours/`：`P0.md` = **总体规划的索引**（七个承重决策 + 九节目录），细节在 `P0/`（`01-stories` 用户故事 · `02-screens` 屏幕清单与进屏三条路 · `03-layout` 全局布局 · `04-tiers` 内容区三档 · `05-side` 侧边 · `06-switching` 切换 · `07-rules` 全局规则 · `08-handoff` 交接 · `09-open` 待定）。逐条证据住 `reference/` |
+| `packages/tui/dev/visual/` | **视觉**：同一个屏画成什么样（参看原型那份 md，自己从零写；不 import 它） |
+
+视觉那一档要真帧 —— 帧由**真渲染器**画出来、经终端模拟器读回格子，就是"这棵树在终端里长什么样"：
+
+```bash
+bun run packages/tui/dev/preview/serve.ts packages/tui/dev/visual/five-regions.tsx --cols 120 --rows 40   # 浏览器，改文件即刷新，按 w 切线框
+bun run packages/tui/dev/preview/frame.ts packages/tui/dev/visual/five-regions.tsx --cols 120 --rows 40    # 打进真终端：最终真相
+```
+
 ## License
 
 MIT
