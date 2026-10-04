@@ -5,15 +5,21 @@
  * 多个组件各挂各的、都会收到每一次按键，所以"这个键归哪个组件"由组件自己声明（谁在意谁接），
  * 这里只保证大家看到的是同一种形状：`ctrl+b` / `alt+up` / `up` / 打得出来的字。
  *
+ * **接了的键要"拿走"**：返回 `true` = 这个键我处理了，于是 `preventDefault()`。opentui 的派发顺序是
+ * 全局监听（就是这里）先过、焦点里的那个可编辑件（`<input>` / `<textarea>`）后过，看到
+ * `defaultPrevented` 就不动手 —— 不然同一次 `ctrl+b` 会既被我们拿去分叉、又被输入框当成"光标左移"。
+ * 没处理的键（返回 `false` / 什么都不返回）原样落到焦点件上，所以打字、删除、左右移动仍然是它的。
+ *
  * 传进来的函数**永远是最新的那个**（opentui 内部用 `useEffectEvent` 转接，只挂一次监听），
  * 所以调用方不必操心"订阅要不要重挂"。
  *
- * 变因：键的归一化规则（哪些 opentui 事件算哪个键）。
+ * 变因：键的归一化规则（哪些 opentui 事件算哪个键）与"谁拿走这个键"的约定。
  */
 import type { KeyEvent } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 
-export type KeyHandler = (key: string) => void;
+/** 处理一个归一化后的键；返回 `true` 表示这个键归调用方，不再往下递给焦点里的可编辑件。 */
+export type KeyHandler = (key: string) => boolean | void;
 
 /** opentui 的键名 → 归一化后的名字。没在这张表里的就是可打印字符（含中文 / 标点）。 */
 const KEY_NAMES: Readonly<Record<string, string>> = {
@@ -34,34 +40,17 @@ const KEY_NAMES: Readonly<Record<string, string>> = {
   space: " ",
 };
 
-/**
- * 命令键：这些名字不是"人打的字"。
- * 空格不在里面 —— 它既是名字表里的词，也真的是一个字。
- */
-const COMMANDS: ReadonlySet<string> = new Set([
-  "enter",
-  "backspace",
-  "delete",
-  "escape",
-  "tab",
-  "up",
-  "down",
-  "left",
-  "right",
-  "home",
-  "end",
-  "pageup",
-  "pagedown",
-]);
-
 /** 控制字符不是"人打的字"：终端给的原始序列（ESC 开头）靠它挡掉。 */
 const CONTROL = /[\p{Cc}\p{Cs}]/u;
+
+/** 归一化只看这几个字段（opentui 的 `KeyEvent` 满足它；这样这条规矩也能单独测）。 */
+export type PressedKey = Pick<KeyEvent, "name" | "ctrl" | "meta" | "option" | "shift" | "sequence">;
 
 /**
  * 归一化后的键：可打印字符原样（`"a"` / `"你"` / `" "`），特殊键取名字表里的词，
  * 带修饰键就是 `ctrl+b` / `alt+up` 这种小写形状。认不出来的键往上递没有意义（返回 null）。
  */
-function normalizeKey(event: KeyEvent): string | null {
+export function normalizeKey(event: PressedKey): string | null {
   const named = KEY_NAMES[event.name];
   const printable = event.sequence.length > 0 && !CONTROL.test(event.sequence) ? event.sequence : null;
   const base = named ?? printable ?? (event.name.length === 1 && !CONTROL.test(event.name) ? event.name : null);
@@ -78,10 +67,7 @@ function normalizeKey(event: KeyEvent): string | null {
 export function useKeys(handler: KeyHandler): void {
   useKeyboard((event) => {
     const key = normalizeKey(event);
-    if (key !== null) handler(key);
+    if (key === null) return;
+    if (handler(key) === true) event.preventDefault();
   });
-}
-
-export function isPrintable(key: string): boolean {
-  return key.length > 0 && !key.includes("+") && !COMMANDS.has(key);
 }

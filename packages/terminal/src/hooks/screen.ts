@@ -29,7 +29,7 @@ export interface Screen {
   /** 写一句回执。 */
   notify(text: string): void;
   /**
-   * 说话：投给 `target`；`target === null`（还没有根）时，这一句就是开树的那句。
+   * 说话：投给 `target`；`target === null` 时，这一句就是开树的那句。
    * 成功后选中落在写入的那条线上；失败写进回执并回 `false`（调用方据此决定要不要清草稿）。
    */
   send(target: NodeId | null, text: string, role: RoleId): Promise<boolean>;
@@ -47,12 +47,15 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 人一开始站在哪条线上（`--at`）由装配层给。 */
+/**
+ * 人一开始站在哪条线上（`--at`）由装配层给；**没给（`null`）就站在根**（树的入口）。
+ * 空树（连根都还没有）时无处可站，`selected` 才是 `null` —— 那时第一句话就是开树的那句。
+ */
 export function useScreen(at: NodeId | null): Screen {
   const { store, roles, workspace } = useSession();
   const actions = useTreeActions();
   const { errors, clearError } = useFacts();
-  const [selected, setSelected] = useState<NodeId | null>(at);
+  const [selected, setSelected] = useState<NodeId | null>(() => at ?? store.root());
   // 一个可挑的角色都没有时，一进来就把话说清楚：不然按了回车像是界面卡住了
   const [notice, setNotice] = useState(() => (pickers(roles).length === 0 ? NO_CHOICE : ""));
 
@@ -69,7 +72,7 @@ export function useScreen(at: NodeId | null): Screen {
       try {
         const node = target ?? store.root();
         if (node === null) {
-          // 还没有根：这一句就是开树的那句（造根 = 一次没有父的分叉，目录用数据根）
+          // target 为 null：这一句就是开树的那句（造根 = 一次没有父的分叉，目录用数据根）
           const born = await actions.fork({ parent: null, mode: "inherit", role, text, dir: workspace });
           setSelected(born);
         } else {

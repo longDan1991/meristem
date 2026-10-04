@@ -2,13 +2,16 @@
 /**
  * 一只手的卡片：名字 + 参数 + 输出 + 状态，外面一个边框盒子。
  *
- * 输出**原文照铺**（不裁剪、不折叠）：长输出靠外层滚动容纳，卡片自己不改内容。
+ * 它住 terminal 而不是 tui：**"手"与"已跑 / 已结束"是这一屏的词**（DESIGN §9.2 说界面显示什么），
+ * 换个应用就没有这张卡片。通用件只到"条带 / 状态条"那一层（见 `@meristem/tui` 的说明）。
+ *
+ * 输出**原文照铺**（不裁剪、不折叠）：长输出靠外面那个滚动盒容纳，卡片自己不改内容。
  * 失败不单独分类（它是交代里的一段文本，DESIGN §9.3），所以卡片按状态画两态就够。
  *
  * 变因：手卡片的画法与状态词。
  */
 import { TextAttributes } from "@opentui/core";
-import { tone } from "./tone.ts";
+import { tone } from "@meristem/tui";
 import type { ReactNode } from "react";
 
 /**
@@ -41,7 +44,9 @@ export function HandCard({ name, args, output, state, secs }: HandCardProps): Re
         <text fg={state === "running" ? tone.running : tone.dim}>{stateText(state, secs)}</text>
       </box>
       {(output ?? []).map((line, index) => (
-        <text key={index}>{line}</text>
+        <text key={index} wrapMode="char">
+          {line}
+        </text>
       ))}
     </box>
   );
