@@ -30,8 +30,10 @@
 每节一个同名 XML 标签，节恒在、生命周期内不变；工具 schema 是工具语义的唯一来源（模型的每只手都从 schema 与描述长出来，没有第二份定义要同步）。
 
 **3. 屏幕、Loop、能力、账，各归各的包。**
-`tui` 只画屏幕（按**格**数、贴底、宽字符不许只露一半），`harness` 只管唯一的 Loop 与传输，
-`roles` 管角色与手（含作业机制），`atree` 管账（append-only + 可 resume）。装配是 `terminal` 的事。
+`tui` 只放**通用零件**（树条带 / 状态条 / 键的形状 / 渲染器生命周期 / 一处配色）：换一个应用也照样用，
+而且 **opentui 已有的就不自己写**（编辑器用它自带的、滚动与折行也用它自带的）；一屏怎么摆、业务词
+（手 / 思考 / 线）怎么画住 `terminal`。`harness` 只管唯一的 Loop 与传输，`roles` 管角色与手
+（含作业机制），`atree` 管账（append-only + 可 resume）。装配是 `terminal` 的事。
 
 ## 代码地图
 
@@ -40,9 +42,10 @@ packages/
   atree/      账：节点形状 + append-only 的 JSONL 账本（写入即账，能 resume）
   harness/    唯一的 Loop + 传输（把模型的话与手的结果接上）+ 缺陷节点
   roles/      角色（一个 xml 一个角色）、手（工具）、技能、作业表、MCP（未接）
-  tui/        屏幕：五区组件各一文件（树条带 / 消息流 / 实时卡片 / 状态条 / 输入行）
-  terminal/   装配与交互：配置（.env）→ 账 → 角色 → 传输 → 树 → 界面
+  tui/        通用零件：树条带 / 状态条 / 键的形状 / 渲染器与终端还原 / 一处配色
+  terminal/   装配与交互：配置（.env）→ 账 → 角色 → 传输 → 树 → 界面（一屏五区，各一文件）
 docs/DESIGN.md    这棵树的设计（为什么长这样、哪些是不变量）
+docs/prototype/   原型档（线框）：三个面描述产品 —— 屏幕（screens/）· 组件（components/）· 命令（commands/）+ 两家先例清单（reference/）；我们自己的原型住 ours/
 AGENTS.md         本仓库的硬约束禁令清单
 ```
 

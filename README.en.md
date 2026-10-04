@@ -38,9 +38,12 @@ are the single source of tool semantics -- every hand is grown from its schema a
 no second definition to keep in sync.
 
 **3. Screen, loop, capability and ledger each live in their own package.**
-`tui` only draws (cell widths, pinned to the bottom, wide glyphs never cut in half), `harness` owns
-the single Loop and the transport, `roles` owns roles and hands (including the job mechanism), and
-`atree` owns the ledger (append-only, resumable). Assembly belongs to `terminal`.
+`tui` holds only **generic parts** (tree strip / status bar / key shapes / renderer lifecycle / one
+palette): reusable in any app, and **anything OpenTUI already ships is not written again** (its
+editor, its scrolling, its wrapping). How a screen is arranged and how domain words (hand / thought
+/ line) are drawn belong to `terminal`. `harness` owns the single Loop and the transport, `roles`
+owns roles and hands (including the job mechanism), and `atree` owns the ledger (append-only,
+resumable). Assembly belongs to `terminal`.
 
 ## Code map
 
@@ -49,8 +52,8 @@ packages/
   atree/      ledger: node shape + append-only JSONL (written as it happens, resumable)
   harness/    the single Loop + transport (model words and hand results) + the defect node
   roles/      roles (one xml per role), hands (tools), skills, job table, MCP (not wired yet)
-  tui/        the screen: one file per component (tree strip / stream / live card / status / input)
-  terminal/   assembly and interaction: config (.env) -> ledger -> roles -> transport -> tree -> UI
+  tui/        generic parts: tree strip / status bar / key shapes / renderer and terminal restore / one palette
+  terminal/   assembly and interaction: config (.env) -> ledger -> roles -> transport -> tree -> UI (one file per region)
 docs/DESIGN.md    the design of this tree (why it looks like this, what is invariant)
 AGENTS.md         this repo's hard constraints
 ```
