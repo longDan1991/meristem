@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>design preview</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0d10;
+        color: #9aa4b2;
+        font: 12px/1.6 Menlo, "SF Mono", monospace;
+      }
+      header {
+        display: flex;
+        gap: 14px;
+        align-items: baseline;
+        padding: 10px 14px 6px;
+      }
+      header b {
+        color: #4ea1ff;
+        font-weight: 600;
+      }
+      #failure {
+        margin: 0;
+        padding: 0 14px 8px;
+        color: #e5484d;
+        white-space: pre-wrap;
+      }
+      #screen {
+        padding: 6px 14px 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <b>design preview</b>
+      <span id="meta">连接中…</span>
+      <span>按 w 切换 线框 / 配色</span>
+    </header>
+    <pre id="failure"></pre>
+    <div id="screen"></div>
+    <script src="/vendor/xterm.js"></script>
+    <script>
+      // 一面真屏幕：宽字符、折行、属性、光标都交给 xterm.js（我们自己不去数格子）。
+      const term = new Terminal({
+        cols: 100,
+        rows: 40,
+        fontSize: 14,
+        fontFamily: 'Menlo, "SF Mono", monospace',
+        theme: { background: "#0b0d10", foreground: "#d6dae2" },
+        cursorBlink: false,
+        disableStdin: true,
+        convertEol: true,
+        scrollback: 0,
+      });
+      term.open(document.getElementById("screen"));
+
+      const meta = document.getElementById("meta");
+      const failure = document.getElementById("failure");
+      let shown = null;
+      let wireframe = false;
+
+      function draw() {
+        if (shown === null) return;
+        const frame = shown.frame;
+        term.resize(frame.cols, frame.rows);
+        term.reset();
+        term.write(wireframe ? frame.text : frame.ansi);
+        meta.textContent = `${frame.cols}×${frame.rows} · ${wireframe ? "线框" : "配色"}`;
+        // 错挂在帧旁边：屏幕停住不动，错看得见 —— 不假装这一帧是好的。
+        failure.textContent = shown.failure === null ? "" : shown.failure;
+      }
+
+      async function load() {
+        shown = await (await fetch("/frame", { cache: "no-store" })).json();
+        draw();
+      }
+
+      addEventListener("keydown", (event) => {
+        if (event.key !== "w") return;
+        wireframe = !wireframe;
+        draw();
+      });
+
+      new EventSource("/events").onmessage = () => void load();
+      void load();
+    </script>
+  </body>
+</html>
