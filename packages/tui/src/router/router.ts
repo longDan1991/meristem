@@ -21,6 +21,10 @@ import type { RouteIndex } from "./table.ts";
 export interface Router<R extends readonly RouteObject[]> {
   /** 当前那一屏：默认那一屏在栈底，所以永远有（不是 `null`）。 */
   readonly current: ScreenRef<R>;
+  /** 现在压着几层屏（`1` = 就在默认那一屏上）。谁要问"还回得上去吗"（`esc` 收掉眼前这一层）看它。 */
+  readonly depth: number;
+  /** 当前那一屏自带的那一小块（见 `ScreenRoute.Composer`）：布局把它摆自己的位置上，没有就是 `undefined`。 */
+  readonly Composer: (() => ReactNode) | undefined;
   /** 进屏。无参屏一个参数都不要，有参屏必填；名字不在表里过不了编译。 */
   open<N extends Names<R>>(
     name: N,
@@ -66,8 +70,13 @@ export function RouterProvider<R extends readonly RouteObject[]>(props: RouterPr
   );
 
   const current = stack[stack.length - 1] ?? initial;
+  const depth = stack.length;
+  const Composer = index.byName[current.name]?.route.Composer;
   const node = useMemo(() => renderScreen(index, current, back), [index, current, back]);
-  const router = useMemo<Router<R>>(() => ({ current, open, replace, back }), [current, open, replace, back]);
+  const router = useMemo<Router<R>>(
+    () => ({ current, depth, Composer, open, replace, back }),
+    [current, depth, Composer, open, replace, back],
+  );
 
   return createElement(RouterContext.Provider, { value: router }, node);
 }
