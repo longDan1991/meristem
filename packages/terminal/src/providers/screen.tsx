@@ -1,25 +1,31 @@
 /**
- * 这一屏的共享状态，与"人的动作落到状态和账上"的编排 —— 屏幕的**店主**，由 `app.tsx` 调一次。
+ * 这一屏的共享状态，与"人的动作落到状态和账上"的编排 —— 屏幕的**店主**。
+ *
+ * **为什么是个 provider**：屏住在路由表里（`screens/table.ts`），离装配很远，拿到店主的路只有
+ * context；仓库里"被多处读的共享状态"就是 provider（端口 / 事件两片都是这个形状），所以它不再是一个
+ * 只给 `app.tsx` 调的 hook。装配层只负责把 `--at` 这一件外面来的东西递进来。
  *
  * 共享状态只有两样（都被多个区读，所以由这一层持有、按区以 props 下发）：
  *   · **我站在哪条线**（`selected`）—— 树条带 / 消息流 / 实时区 / 状态条都读；
  *   · **上一动作的回执**（`notice`）—— 状态条读。
  *
  * 其余状态不住这里：各区自己的视图状态（思考展不展、滚到哪、在第几张卡片、草稿、分叉角色）
- * 由区自己持有 —— 那些的写者与读者都在同一处；吐字与作业事实来自事件，住 `providers/`。
+ * 由区自己持有 —— 那些的写者与读者都在同一处；吐字与作业事实来自事件，住 `providers/tail.tsx` /
+ * `providers/facts.tsx`。
  *
  * 编排 = 把人的动作接到上面的状态与写账上（`hooks/tree-actions.ts`）：说话 / 分叉成功后把选中
  * 落到新线上，失败把那句话写进回执 —— 动作本身不吞错，这一层负责把它变成**给人看的一件事**。
  *
  * 变因：这一屏的共享状态与动作编排。
  */
-import { useCallback, useState } from "react";
+import { createContext, useCallback, useContext, useState } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { NodeId } from "@meristem/atree";
 import type { RoleId } from "@meristem/roles";
-import { useFacts } from "../providers/facts.tsx";
-import { useSession } from "../providers/session.tsx";
-import { NO_CHOICE, pickers } from "./fork-role.ts";
-import { useTreeActions } from "./tree-actions.ts";
+import { useFacts } from "./facts.tsx";
+import { useSession } from "./session.tsx";
+import { NO_CHOICE, pickers } from "../hooks/fork-role.ts";
+import { useTreeActions } from "../hooks/tree-actions.ts";
 
 export interface Screen {
   readonly selected: NodeId | null;
@@ -43,15 +49,22 @@ export interface Screen {
   cancel(job: string, name: string): void;
 }
 
+export interface ScreenProps {
+  /**
+   * 人一开始站在哪条线上（`--at`）；**没给（`null`）就站在根**（树的入口）。
+   * 空树（连根都还没有）时无处可站，`selected` 才是 `null` —— 那时第一句话就是开树的那句。
+   */
+  readonly at: NodeId | null;
+  readonly children: ReactNode;
+}
+
+const ScreenContext = createContext<Screen | null>(null);
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * 人一开始站在哪条线上（`--at`）由装配层给；**没给（`null`）就站在根**（树的入口）。
- * 空树（连根都还没有）时无处可站，`selected` 才是 `null` —— 那时第一句话就是开树的那句。
- */
-export function useScreen(at: NodeId | null): Screen {
+export function ScreenProvider({ at, children }: ScreenProps): ReactElement {
   const { store, roles, workspace } = useSession();
   const actions = useTreeActions();
   const { errors, clearError } = useFacts();
@@ -129,5 +142,16 @@ export function useScreen(at: NodeId | null): Screen {
     [actions],
   );
 
-  return { selected, notice, select, notify, send, fork, stop, retry, cancel };
+  return (
+    <ScreenContext.Provider value={{ selected, notice, select, notify, send, fork, stop, retry, cancel }}>
+      {children}
+    </ScreenContext.Provider>
+  );
+}
+
+/** 缺席就抛（不是返回默认值）：装配错要当场炸，不降级。 */
+export function useScreen(): Screen {
+  const screen = useContext(ScreenContext);
+  if (screen === null) throw new Error("useScreen 必须在 ScreenProvider 里面用");
+  return screen;
 }
