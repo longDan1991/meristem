@@ -98,6 +98,8 @@ function pipedScreen(root: Root, flush: () => Promise<void>, capture: () => stri
 }
 
 export async function openScreen(): Promise<Screen> {
+  // 两条路给同一个契约：`ctrl+c` **归界面自己**（命令表里有这条），引擎不许抢先退出 ——
+  // 真终端那条本来就关着，管道 / 测试这条也得关（不然一按 `ctrl+c` 屏幕就没了，界面再也没机会收尾）。
   if (process.stdout.isTTY === true) {
     const renderer = await createCliRenderer({ exitOnCtrlC: false });
     return ttyScreen(
@@ -105,7 +107,7 @@ export async function openScreen(): Promise<Screen> {
       () => renderer.destroy(),
     );
   }
-  const test = await createTestRenderer({ width: PIPED_WIDTH, height: PIPED_HEIGHT });
+  const test = await createTestRenderer({ width: PIPED_WIDTH, height: PIPED_HEIGHT, exitOnCtrlC: false });
   return pipedScreen(
     createRoot(test.renderer),
     () => test.flush(),
