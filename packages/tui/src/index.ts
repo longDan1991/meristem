@@ -1,5 +1,5 @@
 /**
- * `@meristem/tui` 的对外面：**只吃 props 的通用件** + **键的注册** + **屏幕** + **一处配色**。
+ * `@meristem/tui` 的对外面：**只吃 props 的通用件** + **键的注册** + **屏幕** + **路由** + **一处配色**。
  *
  * 这个包不认识任何 agent 数据结构、不认识角色、不认识账 —— 它连 `@meristem/atree` 都不依赖。
  * 留在这一面的东西有两条硬判据：
@@ -25,12 +25,15 @@
  */
 
 export { useKeys } from "./keys.ts";
+export { RouterProvider, ScreenOutlet, useRouter } from "./router/router.ts";
 export { tone } from "./tone.ts";
 export { TreeStrip } from "./tree-strip.tsx";
 export { StatusBar } from "./status-bar.tsx";
 export { openScreen } from "./screen.ts";
 
 export type { KeyHandler } from "./keys.ts";
+export type { Router, RouterProviderProps } from "./router/router.ts";
+export type { AnyScreen, LayoutRoute, RouteObject, ScreenRef, ScreenRoute, ScreenViewProps } from "./router/route.ts";
 export type { TreeStripItem, TreeStripProps } from "./tree-strip.tsx";
 export type { StatusBarProps } from "./status-bar.tsx";
 export type { Screen } from "./screen.ts";
