@@ -1,0 +1,29 @@
+# 命令模块的用例表（`packages/tui/src/command/example/two-layers.tsx` 读它）——
+# 格式与真实应用的那份一模一样：只有展示的字段，没有"谁接 / 什么条件下接 / 做什么"。
+version: 1
+
+commands:
+  # 两层各接一条 `app.close`：谁后出现谁排在队尾，`esc` 就先问谁。
+  - id: app.close
+    name: close
+    desc: 收掉最后出现的那一层
+    hint: 收掉这一层
+    keys: [{ key: escape }]
+
+  - id: app.quit
+    name: quit
+    desc: 退出
+    keys: [{ key: ctrl+c }]
+
+  # 用整层通配接（`demo.*`）：一条订阅接住这一层里的全部命令。
+  - id: demo.outer
+    name: outer
+    desc: 外层做的一件事
+    hint: 外层
+    keys: [{ key: alt+o }]
+
+  - id: demo.inner
+    name: inner
+    desc: 内层做的一件事
+    hint: 内层
+    keys: [{ key: alt+i }]

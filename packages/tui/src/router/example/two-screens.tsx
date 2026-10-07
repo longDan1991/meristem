@@ -17,8 +17,21 @@
  */
 import { useState } from "react";
 import type { ReactNode } from "react";
-import { RouterProvider, ScreenOutlet, tone, useKeys, useRouter } from "../../index.ts";
+import { useKeyboard } from "@opentui/react";
+import { normalizeKey } from "../../command/keys.ts";
+import { RouterProvider, ScreenOutlet, tone, useRouter } from "../../index.ts";
 import type { RouteObject, ScreenViewProps } from "../../index.ts";
+
+/**
+ * 这一份用例演示的是**路由**，它那两个演示键直接用渲染层的按键事件就够了
+ * （真应用里按键归命令模块：`CommandBusProvider` 收口，组件只订命令 —— 见 `../command/example/`）。
+ */
+function useDemoKeys(handle: (key: string) => boolean): void {
+  useKeyboard((event) => {
+    const key = normalizeKey(event);
+    if (key !== null && handle(key) === true) event.preventDefault();
+  });
+}
 
 /** 默认那一屏：`index: true` 那一屏，进来就站在它上面。 */
 function Main(_props: ScreenViewProps<void>): ReactNode {
@@ -32,7 +45,7 @@ function Main(_props: ScreenViewProps<void>): ReactNode {
 
 /** 关于：无参屏。`esc` 或 `enter` 都是"回来"，什么都不改。 */
 function About({ back }: ScreenViewProps<void>): ReactNode {
-  useKeys((key) => {
+  useDemoKeys((key) => {
     if (key !== "escape" && key !== "enter") return false;
     back();
     return true;
@@ -50,7 +63,7 @@ function Pick({ params, back }: ScreenViewProps<{ readonly items: readonly strin
   const [at, setAt] = useState(0);
   const count = params.items.length;
 
-  useKeys((key) => {
+  useDemoKeys((key) => {
     const move = (step: number): void => setAt((now) => (count === 0 ? 0 : (now + step + count) % count));
     switch (key) {
       case "up":
@@ -85,7 +98,7 @@ function Shell(): ReactNode {
   const router = useRouter<Screens>();
 
   // 进屏的那两个键归壳；`esc` 归屏自己 —— 一个键在同一处只有一个含义（`07-rules.md` §2）
-  useKeys((key) => {
+  useDemoKeys((key) => {
     switch (key) {
       case "ctrl+a":
         router.open("about");
