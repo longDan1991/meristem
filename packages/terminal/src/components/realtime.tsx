@@ -1,19 +1,21 @@
+/** @jsxImportSource @opentui/react */
 /**
- * 实时区：这一轮正在吐的**思考**（`ThoughtLine`）＋ 选中的那张**手卡片**（`HandCard`，
+ * 实时区：这一轮正在吐的**思考**（`ThoughtLine`）＋**在跑的每一手各一张卡片**（`HandCard`，
  * 输出自己遍历 `Job.stream()`，原文不裁剪）。
  *
- * 卡片游标归它自己：`tab` 在"这条线上在跑的作业"里轮、`esc` 取消选中的那张 —— 它知道
- * 选中的是哪一张，所以只把作业报出去（`onCancel`）。
+ * **这一片不接键**：卡片游标那个概念没有了（`tab` 换卡片是旧实现的残留，命令表里没有这条命令）。
+ * 在跑的每一手都画出来 —— 有 N 手就是 N 张卡片，"手上还有几件活"从卡片的数量上一眼看得出，
+ * 不用再记一个游标。取消归 `esc`（命令表里的 `app.close` → 收掉眼前这一层，落到最底层时取消
+ * 选中的那条线上在跑的那一手），所以这里也不再管 `esc`。
  *
- * 换了一条线就把游标归零（同消息流的滚动位置，渲染期直接改状态）。
+ * 卡片长在**内容区末尾**（对话的下方）：它还没进账，是"正在发生"的那一段（P0 故事 3）。
  *
- * 变因：这一区画什么、它要的 props 从哪来、它接哪些键。
+ * 变因：这一区画什么（思考与在跑的卡片）。
  */
 import type { NodeId } from "@meristem/atree";
 import type { Job } from "@meristem/roles";
-import { useKeys } from "@meristem/tui";
-import { memo, useState } from "react";
-import type { ReactElement } from "react";
+import { memo } from "react";
+import type { ReactNode } from "react";
 import { useJobOutput, useNow } from "../hooks/job-output.ts";
 import { unaccounted } from "../lib/inflight.ts";
 import { split } from "../lib/rows.ts";
@@ -21,77 +23,41 @@ import { useFacts } from "../providers/facts.tsx";
 import { useSession } from "../providers/session.tsx";
 import { useTail } from "../providers/tail.tsx";
 import { HandCard } from "./hand-card.tsx";
-import type { HandCardProps } from "./hand-card.tsx";
 import { ThoughtLine } from "./thought-line.tsx";
-
-/** 这一片要的 props：正在吐的思考、在跑的作业清单与选中的那一张。 */
-interface LiveData {
-  /** 这一轮正在吐的思考。 */
-  readonly thoughts: readonly string[];
-  /** 这条线上在跑的作业数（`tab` 在它们中间轮）。 */
-  readonly jobCount: number;
-  /** 选中的那一个（`esc` 取消它）；没有在跑的作业时 `null`。 */
-  readonly current: Job | null;
-  /** 那张卡片的 props；没有在跑的作业时 `null`。 */
-  readonly card: Omit<HandCardProps, "state"> | null;
-}
-
-/** 读账 + 正在吐的字 + 作业事实，算成这一片要的思考与卡片。 */
-function useLive(node: NodeId | null, jobCursor: number): LiveData {
-  const { store, tree } = useSession();
-  const { hands } = useFacts();
-  const tail = useTail();
-  const jobs = node === null ? [] : tree.jobs().filter((job) => job.space === node);
-  const current = jobs[Math.min(jobCursor, jobs.length - 1)] ?? null;
-  const output = useJobOutput(current);
-  const now = useNow(current !== null);
-  const live = node === null ? null : unaccounted(store, node, tail);
-  const card =
-    current === null
-      ? null
-      : {
-          name: current.name,
-          args: hands.get(current.id)?.args,
-          output,
-          secs: (now - current.at) / 1000,
-        };
-  return { thoughts: split(live?.thought ?? "", "thought").map((row) => row.text), jobCount: jobs.length, current, card };
-}
 
 export interface LiveRegionProps {
   readonly node: NodeId | null;
-  /** `esc`：取消这张卡片代表的作业。 */
-  readonly onCancel: (job: string, name: string) => void;
 }
 
-export const LiveRegion = memo(function LiveRegion({ node, onCancel }: LiveRegionProps): ReactElement {
-  const [jobCursor, setJobCursor] = useState(0);
-  const [viewed, setViewed] = useState(node);
-  if (viewed !== node) {
-    setViewed(node);
-    setJobCursor(0);
-  }
-
-  const { thoughts, jobCount, current, card } = useLive(node, jobCursor);
-
-  useKeys((key) => {
-    if (key === "tab") {
-      if (jobCount === 0) return false;
-      setJobCursor((cursor) => (cursor + 1) % jobCount);
-      return true;
-    }
-    if (key === "escape") {
-      if (current === null) return false;
-      onCancel(current.id, current.name);
-      return true;
-    }
-    return false;
-  });
-
+export const LiveRegion = memo(function LiveRegion({ node }: LiveRegionProps): ReactNode {
+  const { store, tree } = useSession();
+  const tail = useTail();
+  if (node === null) return null;
+  const live = unaccounted(store, node, tail);
+  const thoughts = split(live?.thought ?? "", "thought").map((row) => row.text);
+  const jobs = tree.jobs().filter((job) => job.space === node);
   return (
     <>
       {thoughts.length > 0 ? <ThoughtLine rows={thoughts} open /> : null}
-      {card === null ? null : <HandCard {...card} state="running" />}
+      {jobs.map((job) => (
+        <RunningCard key={job.id} job={job} />
+      ))}
     </>
   );
 });
+
+/** 一张在跑的卡片：它吐出来的原文，一直长（不裁剪、不折叠）。 */
+function RunningCard({ job }: { readonly job: Job }): ReactNode {
+  const { hands } = useFacts();
+  const output = useJobOutput(job);
+  const now = useNow(true);
+  return (
+    <HandCard
+      name={job.name}
+      args={hands.get(job.id)?.args}
+      output={output}
+      secs={(now - job.at) / 1000}
+      state="running"
+    />
+  );
+}

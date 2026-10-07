@@ -11,6 +11,7 @@
  */
 import type { NodeId } from "@meristem/atree";
 import { openScreen } from "@meristem/tui";
+import type { Commands } from "@meristem/tui";
 import type { ReactElement } from "react";
 import { App } from "./app.tsx";
 import type { Session } from "./providers/session.tsx";
@@ -19,13 +20,15 @@ export interface MountProps {
   /** 端口：不含 `onExit` —— 退出这一声由这里接（谁创建屏幕谁管还原）。 */
   readonly session: Omit<Session, "onExit">;
   readonly at: NodeId | null;
+  /** 认得的命令（装配那里从 yaml 建一次）。 */
+  readonly commands: Commands;
 }
 
 export async function mount(props: MountProps): Promise<void> {
   const screen = await openScreen();
   const exit = Promise.withResolvers<void>();
   const element: ReactElement = (
-    <App session={{ ...props.session, onExit: () => exit.resolve() }} at={props.at} />
+    <App session={{ ...props.session, onExit: () => exit.resolve() }} at={props.at} commands={props.commands} />
   );
   try {
     screen.render(element);

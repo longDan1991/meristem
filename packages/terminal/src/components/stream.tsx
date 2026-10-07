@@ -2,8 +2,10 @@
 /**
  * 消息流：选中那条线的账（人 / 模型 / 思考 / 手的过程）＋ 末尾"正在吐、还没进账"的字。
  *
- * **看的位置不在这一片**：滚动归首页那个滚动盒（`app.tsx`），这里只画"选中这条线上的行"。
- * 这一片自己只接一条键：`ctrl+o` 展开 / 收起账里的思考（展不展是这一片的视图状态）。
+ * **看的位置不在这一片**：滚动归主屏那个滚动盒，这里只画"选中这条线上的行"。
+ * **思考展不展**是"看的东西"的状态（挂在店主上：`screen.thoughts`），而**换它那一下**
+ * （命令表里 `view.expand`）就近挂在这一片里 —— 收的正是这一片里的思考行；这一片不在（档 ③）
+ * 就没有接的人，底下那行也就不写这个键。
  *
  * **模型的原话整段交给 markdown 渲染件**（`<markdown>`）：标题 / 列表 / 代码围栏这些结构是
  * 一整段才认得出来的，所以它不按行拆；其余的行（人的话 / 手的交代 / 思考 / 接口失败）都是一行文字。
@@ -11,16 +13,17 @@
  * **这一区的展示规则归这里**：账怎么平铺成行（`lineRows`）、思考怎么收起（`foldThoughts`）——
  * 纯函数，只服务这一片。
  *
- * 变因：这一区画什么（哪些行、思考折不折、模型那段怎么画）、它要的 props 从哪来、它接哪些键。
+ * 变因：这一区画什么（哪些行、思考折不折、模型那段怎么画）与它要的事实从哪来。
  */
 import type { NodeId } from "@meristem/atree";
 import type { LineStore } from "@meristem/harness";
-import { useKeys } from "@meristem/tui";
-import { memo, useState } from "react";
+import { useCommand } from "@meristem/tui";
+import { memo } from "react";
 import type { ReactNode } from "react";
 import { unaccounted } from "../lib/inflight.ts";
 import { asBlock, FOLD, split } from "../lib/rows.ts";
 import type { Row } from "../lib/rows.ts";
+import { useScreen } from "../providers/screen.tsx";
 import { useSession } from "../providers/session.tsx";
 import { useTail } from "../providers/tail.tsx";
 import { colorByTag, syntaxStyle } from "../style.ts";
@@ -131,16 +134,13 @@ export interface StreamRegionProps {
 }
 
 export const StreamRegion = memo(function StreamRegion({ node }: StreamRegionProps): ReactNode {
-  const [thoughtsOpen, setThoughtsOpen] = useState(false);
-  const { rows } = useStream(node, thoughtsOpen);
+  // 展不展挂在店主上（`view.expand` 是"看的东西"那一档的事）—— 这一片只照它画。
+  const screen = useScreen();
+  const { rows } = useStream(node, screen.thoughts);
 
-  useKeys((key) => {
-    if (key === "ctrl+o") {
-      setThoughtsOpen((open) => !open);
-      return true;
-    }
-    return false;
-  });
+  // 这一条就近挂在这儿：`ctrl+o` 收的正是这一片里的思考行（别的屏/别的档没有它，
+  // 所以挂上来与否等于"这一片在不在"—— 底下那行的键提示据此写得出）。
+  useCommand("view.expand", () => screen.toggleThoughts());
 
   // 普通行一行一条（折行归引擎的 `wrapMode="char"`，不切半个宽字）；
   // 模型的原话整段交给 markdown 渲染件。滚动归外面的滚动盒。

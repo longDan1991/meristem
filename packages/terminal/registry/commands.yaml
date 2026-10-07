@@ -1,0 +1,142 @@
+# meristem · 命令表 —— 一件事一行；四个消费者读同一份：
+#   ① 输入行上方的命令名单（敲 `/` 弹出、边打边过滤）  ② 键位分发（壳与眼前那份名单的树）
+#   ③ 键位表屏（/help）                              ④ 底下那行右端"这会儿能按什么"
+#
+# **id 就是作用域路径**（点串起来）：第一段是作用面，它自带"归谁接、进哪一屏"——
+#   screen.<屏名>   换屏（第二段就是屏名，屏名以 routes.ts 的表为准）
+#   app.<名字>      整个应用：收掉眼前这一层、退出
+#   turn.<名字>     我站着的这条线：说话 / 分叉 / 收手 / 重试
+#   view.<名字>     看的东西：档、侧边、折叠
+#   list.<名字>     眼前那份名单里的走位：归名单自己接（壳不接）
+# 所以**没有** site / when / opens / does 这些字段：作用面写在 id 里，可用条件写在那个 id 的实现旁边
+# （packages/terminal/src/lib/dispatch.ts）。
+#
+# 有快捷键的照例也有斜杠名字：两条挂在同一个 id 下，不许有第二份定义。
+# `hint` = 值得写在底下那行右端的几个字（P0 §7 规则 7）：只有做事的那几条写它，进屏的那些走 `/` 名单。
+#   **顺序就是底下那行的顺序**，所以把常按的排在前面（分叉 / 收手 / 换档 / 侧边），框架性的
+#   （收掉这一层 / 退出）排在后面 —— 挤不下时先留住前面那几条。
+# 键的写法 = packages/tui/src/keys.ts 归一化后的那套（ctrl+x / alt+m / up）；**裸字符不许写在这里**
+# （那是打字，归输入件）。
+# 装载 fail-closed：id 形状 / 名字或别名重复 / 同一个键挂两条 / 裸字符键 / 非 screen 命令没有实现
+# —— 都在装载时当场抛。
+#
+# 不进这张表的三类：编辑器自己的键（打字 / 退格 / 左右 / 行首行尾 / 粘贴，归 opentui 的输入件）；
+#   提交（回车说这句话，是输入件自己的 onSubmit）；命令名单浮层里的 ↑↓（那是浮层这个控件自己的键）。
+
+version: 1
+
+commands:
+  # ── 换屏：进第二段写的那一屏；esc 回来，回来时是原档、原侧边态 ────────────
+  - id: screen.role
+    name: role
+    desc: 挑角色（分叉前换一套注意力与手）
+    keys: [{ key: alt+a }]
+
+  - id: screen.model
+    name: model
+    aliases: [models]
+    desc: 挑模型（满屏名单，选中即回）
+    args: "[provider/model]"
+    keys: [{ key: alt+m }]              # 照抄 omp 的 app.model.select
+
+  - id: screen.keys
+    name: help
+    aliases: ["?", commands]
+    desc: 键位表（这一屏的数据就是这份表）
+
+  - id: screen.copy
+    name: copy
+    desc: 选中一段拿出来（人的话 / 它的话 / 一手 / 一整条线）
+    keys: [{ key: alt+y }]              # 照抄 jcode
+
+  - id: screen.search
+    name: search
+    desc: 在这一条线里找一句话
+    args: "<要搜的话>"
+    keys: [{ key: ctrl+r }]
+
+  - id: screen.about
+    name: changelog
+    aliases: [version]
+    desc: 变更日志与关于（这一版改了什么、版本号）
+
+  - id: screen.diagnostics
+    name: debug
+    aliases: [log]
+    desc: 诊断现场（请求原文 / 日志 / 终端能力），只读
+
+  # ── 我站着的这条线：壳接 ──────────────────────────────────────────────
+  - id: turn.fork
+    name: fork
+    desc: 从这条线分叉，我站到新线上（草稿里那句话就是新线的开头）
+    hint: 分叉
+    args: "<新线的第一句话>"
+    keys:
+      - { key: ctrl+b, arg: inherit }
+      - { key: alt+b, arg: summarize }  # 先总结再开局
+
+  - id: turn.stop
+    name: stop
+    desc: 收手 —— 不再叫任何线，在跑的作业全取消（交代照样进账）
+    hint: 收手
+    keys: [{ key: ctrl+x }]
+
+  - id: turn.retry
+    name: retry
+    desc: 这条线接口挂了，重新放回推进
+    hint: 重试
+    keys: [{ key: alt+r }]
+
+  # ── 看的东西：壳接 ───────────────────────────────────────────────────
+  - id: view.tier
+    name: tier
+    desc: 内容区换一档 —— 这段对话 → 盯住一条 → 整棵树
+    hint: 换档
+    keys: [{ key: alt+t }]
+
+  - id: view.side
+    name: side
+    desc: 侧边换一态 —— 收起 → 分成两栏 → 占满全屏
+    hint: 侧边
+    keys: [{ key: alt+s }]
+
+  - id: view.side-page
+    name: side-page
+    desc: 侧边换一页（材料 / 图 / 改动 / 回望 / 这一手的原文）
+    hint: 换页
+    keys: [{ key: alt+p }]
+
+  - id: view.expand
+    name: expand
+    desc: 展开正文里那张卡片（这一手吐的原文，不裁剪）
+    hint: 展开卡片
+    keys: [{ key: ctrl+o }]             # 照抄 omp 的 app.tools.expand
+
+  # ── 整个应用：壳接（排在后面：底下那行右端挤的时候，先留住做事的那几条）──
+  - id: app.close
+    name: close
+    desc: 收掉眼前这一层（名单 → 屏 → 侧边全屏 → 档 → 在跑的那一手）
+    hint: 收掉这一层
+    keys: [{ key: escape }]
+
+  - id: app.quit
+    name: quit
+    desc: 退出
+    hint: 退出
+    keys: [{ key: ctrl+c }]
+
+  # ── 名单里的走位：眼前那份名单自己接（照看那两条排在最后）────────────────
+  - id: list.prev
+    desc: 往上走一位（树 / 名单里）
+    hint: 上一位
+    keys: [{ key: up }]
+
+  - id: list.next
+    desc: 往下走一位
+    hint: 下一位
+    keys: [{ key: down }]
+
+  - id: list.enter
+    desc: 切到选中的那条线 / 选中名单里的这一项
+    hint: 切过去 / 选中
+    keys: [{ key: enter }]

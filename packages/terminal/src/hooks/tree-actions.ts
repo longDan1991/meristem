@@ -1,6 +1,8 @@
 /**
- * 写账：人的三个结构动作（**说话 / 分叉 / 收手**）与两个照看动作（**取消一个作业 / 重试**）——
+ * 写账：人的三个结构动作（**说话 / 分叉 / 收手**）与一个照看动作（**重试**）——
  * 全落在 `Tree` 上，这是界面唯一写账的口子。
+ *
+ * **只有"收手"（停整条线）**：人不能单独取消某一手（`esc` 只管视线层），所以这个面上没有"取消一个作业"。
  *
  * 参数**显式**：这里不读任何界面状态（站在哪条线、草稿里有什么都由调用方给），
  * 失败也**不吞**（原样抛给调用方，由它决定给不给回执）。
@@ -33,8 +35,6 @@ export interface TreeActions {
   stop(): void;
   /** 重试：把这条线放回推进（只用于"模型接口失败"）。 */
   retry(node: NodeId): void;
-  /** 取消一个在跑的作业（结局仍是一条交代，不是特殊状态）。 */
-  cancel(job: string): void;
 }
 
 /** 只有一样依赖（`session.tree`），所以没有 provider，也不是共享状态。 */
@@ -53,7 +53,6 @@ export function useTreeActions(): TreeActions {
         } satisfies ForkInput),
       stop: () => tree.stop(),
       retry: (node: NodeId) => tree.retry(node),
-      cancel: (job: string) => tree.cancel(job),
     }),
     [tree],
   );

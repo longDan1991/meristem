@@ -1,32 +1,22 @@
 /**
- * 树条带：每条线一行（人写的名字 + 角色 + 在跑的记号 + 接口失败），`↑` / `↓` 切节点、`ctrl+t` 重试。
+ * 树的两件纯计算：**折哪些**（`treeRows`）与**铺哪几行**（`treeWindow`）。
  *
- * 它是**列表控件**，所以箭头键归它自己：可选清单在它手里（`useStrip`），"下一个是谁"它自己算，
- * 只把结果报给店主（`onSelect`）。`ctrl+t`（重试选中的线）也归它 —— 那条线的接口失败正是画在
- * 这一片上的红字。
+ * 与画法分开：这里是"同一份账 + 同一个选中 → 永远是同一屏"的那部分，谁画（档 ② 的一小段、
+ * 档 ③ 的整块、`/help` 那种名单）由调用方定，铺几行也由调用方给（窗口预算是业务）。
  *
- * **这一区的展示规则也归这里**：树怎么折（`treeRows`）、窗口怎么切（`treeWindow`）—— 纯函数，
- * 只服务这一片。
- *
- * 变因：这一区画什么（折树规则、窗口）、它要的 props 从哪来、它接哪些键。
+ * 变因：折树规则与窗口怎么跟着选中走。
  */
 import type { NodeId } from "@meristem/atree";
 import type { LineStore } from "@meristem/harness";
 import type { Job } from "@meristem/roles";
-import { TreeStrip, useKeys } from "@meristem/tui";
-import type { TreeStripItem } from "@meristem/tui";
-import { memo } from "react";
-import type { ReactElement } from "react";
-import { FOLD } from "../lib/rows.ts";
-import { useFacts } from "../providers/facts.tsx";
-import { useSession } from "../providers/session.tsx";
+import { FOLD } from "./rows.ts";
 
 /** 一层的缩进与两种记号（展示的字面量只在这里定一份）。 */
 const INDENT = "  ";
 const MARK = "▶ ";
 
 /**
- * 树条带的一行。`id === null` 表示这一行是被折起来的子树（不可选中）。
+ * 树的一行。`id === null` 表示这一行是被折起来的子树（不可选中）。
  *
  * `key` 与 `id` 分开：折起来的那些行没有节点（`id === null`），但**每一行都得有自己的身份**
  * （React 按它认"还是这一行"）—— 一屏里可能有好几行折起来的子树，共用空 key 会串。
@@ -41,21 +31,10 @@ export interface TreeRow {
 }
 
 /**
- * 树条带最多铺几行（选中行永远在窗口里，其余靠折叠与滚动）。
- *
- * **为什么不挂一个 `<scrollbox>` 让它滚**：条带是个**固定高度的窗口**（8 行），"选中那一行在窗口里"
- * 是个纯计算（下面那个 `treeWindow`），什么时候都对、也不依赖排版跑完 —— 而滚动盒把这一行带进视野
- * `scrollChildIntoView()` 得等排版算完才有坐标（挂载那一次调用正好在排版之前，会静默不动）。
- * 8 行的固定窗口用不着滚动盒那一套（滚轮、滚动条、跟随），所以这里自己切窗口。
- * **一页里真正会滚的是外面那个盒**（`app.tsx`）。
- */
-export const STRIP_ROWS = 8;
-
-/**
- * 树条带：每条线一行 —— **人写的名字 + 角色**（都在节点的 `props` 里），缩进自己拼进 `text`。
+ * 树：每条线一行 —— **人写的名字 + 角色**（都在节点的 `props` 里），缩进自己拼进 `text`。
  *
  * 返回 id 而不是纯行，是因为**这是张地图不是一段文字**：界面靠 `id === null` 认出"这一行是被折起来的
- * 子树"（不可选中、不可当选中线），靠 `selected` 认出人现在站在哪。
+ * 子树"（不可选中、不可当选中线），靠 `selected` 认出人现在盯/站在哪。
  *
  * 折的规矩（确定性的：同一份账 + 同一个选中，永远是同一屏）：
  *   · **看得见** = 选中路径（根 → 选中的线，含它自己）+ 选中线的直接子节点 +
@@ -129,7 +108,7 @@ export function treeRows(
   return rows;
 }
 
-/** 树条带窗口：只铺 `size` 行、让选中行落在窗口里；`selectable` 是**全部**可选中行（↑/↓ 走它）。 */
+/** 树窗口：只铺 `size` 行、让选中行落在窗口里；`selectable` 是**全部**可选中行（↑/↓ 走它）。 */
 export function treeWindow(
   rows: readonly TreeRow[],
   size: number,
@@ -142,64 +121,9 @@ export function treeWindow(
   };
 }
 
-/** 让选中的那一行落在窗口里（树条带只铺 `size` 行）。 */
+/** 让选中的那一行落在窗口里（窗口只铺 `size` 行，跟着选中滚 —— P0 §4 规则 4）。 */
 function windowOffset(at: number, total: number, size: number): number {
   if (total <= size || at < 0) return 0;
   const half = Math.floor(size / 2);
   return Math.min(Math.max(at - half, 0), total - size);
 }
-
-/** 这一片要的 props：窗口里的行（含接口失败的红字）与 ↑/↓ 走的可选清单。 */
-interface StripData {
-  readonly items: readonly TreeStripItem[];
-  /** ↑/↓ 走的那份（与 `items` 出自同一次 `treeRows`，折叠语义一致）。 */
-  readonly selectable: readonly NodeId[];
-}
-
-/** 读账 + 作业事实，算成这一片要的行；作业表每变一次（`errors` / `tree.jobs()`）就重算一遍。 */
-function useStrip(selected: NodeId | null): StripData {
-  const { store, tree } = useSession();
-  const { errors } = useFacts();
-  const rows = treeRows(store, selected, tree.jobs());
-  const { window, selectable } = treeWindow(rows, STRIP_ROWS);
-  const items = window.map((row) => {
-    const failure = row.id === null ? undefined : errors.get(row.id);
-    const mark = [row.mark, failure === undefined ? undefined : "✗ 接口失败"].filter((part) => part !== undefined).join(" ");
-    return { key: row.key, text: row.text, selected: row.selected, mark: mark === "" ? undefined : mark };
-  });
-  return { items, selectable };
-}
-
-export interface TreeStripRegionProps {
-  readonly selected: NodeId | null;
-  readonly onSelect: (node: NodeId | null) => void;
-  /** `ctrl+t`：把选中的线放回推进（只对"模型接口失败"有效）。 */
-  readonly onRetry: () => void;
-}
-
-export const TreeStripRegion = memo(function TreeStripRegion({
-  selected,
-  onSelect,
-  onRetry,
-}: TreeStripRegionProps): ReactElement {
-  const { items, selectable } = useStrip(selected);
-
-  useKeys((key) => {
-    if (key === "up" || key === "down") {
-      if (selectable.length === 0) return false;
-      const delta = key === "up" ? -1 : 1;
-      const at = selected === null ? -1 : selectable.indexOf(selected);
-      const next =
-        at < 0 ? (delta > 0 ? 0 : selectable.length - 1) : Math.min(Math.max(at + delta, 0), selectable.length - 1);
-      onSelect(selectable[next] ?? null);
-      return true;
-    }
-    if (key === "ctrl+t") {
-      onRetry();
-      return true;
-    }
-    return false;
-  });
-
-  return <TreeStrip items={items} />;
-});

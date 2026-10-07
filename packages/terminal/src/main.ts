@@ -25,14 +25,41 @@ import { load } from "@meristem/atree";
 import type { LineProps, LineStore, WireMessage } from "@meristem/harness";
 import { createClient, start as startTree } from "@meristem/harness";
 import { get, list, start as startRoles } from "@meristem/roles";
+import { Commands } from "@meristem/tui";
 import { mount } from "./mount.tsx";
 import { parseArgs } from "./cli.ts";
 import { loadConfig, loadCredential } from "./config.ts";
+import { COMMANDS_PATH, LAYERS } from "./registry.ts";
+import { indexScreen, screenNames } from "./routes.ts";
+
+/**
+ * 命令表与路由表互相指得对：两边都是**数据**（一个 yaml，一个数组），编译器看不见它们的关系，
+ * 所以在这里核两遍 —— 写错一个屏名，等于按了没反应，那是装载错误，不该等到人按下去才发现：
+ *   · 命令表 `screen.*` 指到的屏都得在路由表里；
+ *   · 除了默认那一屏，每一屏都得有一条进它的命令（`screen.<屏名>`）。
+ *
+ * **"每条命令有没有人接"不在这里核**：执行是各层自己就近挂上来的（`useCommand`，随组件进出），
+ * 装载期看不到全貌 —— 硬核就得再抄一份清单（两份记载，会漂）。它由交互测试兜着
+ * （`tests/screens.test.tsx`：真渲染器按键，按下去要真的有动静）。
+ */
+function checkCommandTable(commands: Commands): void {
+  const names = screenNames();
+  const missing = commands.missingScreens(names);
+  if (missing.length > 0) throw new Error(`命令表指不到这些屏：${missing.join("、")}（命令表里要有一条 screen.<屏名>）`);
+  const index = indexScreen();
+  const unentered = names.filter((name) => name !== index && commands.byScreen(name) === undefined);
+  if (unentered.length > 0) {
+    throw new Error(`这些屏没有进它的命令：${unentered.join("、")}（命令表里要有一条 screen.<屏名>）`);
+  }
+}
 
 export async function main(argv: readonly string[]): Promise<number> {
   let store: LineStore | null = null;
   try {
     const args = parseArgs(argv);
+    // 命令表建一次：装载校验（fail-closed）在这里，路由表与它的对应关系也在这里核。
+    const commands = new Commands(COMMANDS_PATH, LAYERS);
+    checkCommandTable(commands);
     const cfg = loadConfig();
     // 角色先装：它不成立（xml 有问题 / 声明了没接上的东西）就没必要往下走
     await startRoles(cfg.roleDir, cfg.skillDirs);
@@ -46,7 +73,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     const tree = startTree({ store, llm, role: get });
     tree.resume();
     try {
-      await mount({ session: { store, tree, roles: list(), workspace: cfg.workspace }, at: args.at });
+      await mount({ session: { store, tree, roles: list(), workspace: cfg.workspace }, at: args.at, commands });
     } finally {
       tree.stop();
     }
