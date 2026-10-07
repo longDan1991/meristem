@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-04T02:58:15Z",
-  "updated_at": "2026-10-07T08:15:35Z",
+  "updated_at": "2026-10-07T08:25:52Z",
   "files": {
     ".env.example": {
       "role": "index",
@@ -1133,9 +1133,9 @@
     },
     "packages/tui/src/row-list.tsx": {
       "role": "index",
-      "sha256": "91b104f356415e4e60563d03bf58162a898160977cf704cf5422a303e3fd419b",
-      "size": 2599,
-      "normalized_sha256": "91b104f356415e4e60563d03bf58162a898160977cf704cf5422a303e3fd419b"
+      "sha256": "5c83cb51e6b2fa734fdba0eb71b8b331f4814c2311c45ab66d0b1def5c729ea4",
+      "size": 2574,
+      "normalized_sha256": "5c83cb51e6b2fa734fdba0eb71b8b331f4814c2311c45ab66d0b1def5c729ea4"
     },
     "packages/tui/src/screen.ts": {
       "role": "index",
