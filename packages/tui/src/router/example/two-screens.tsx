@@ -118,7 +118,7 @@ function Shell(): ReactNode {
     <box flexDirection="column" width="100%" height="100%">
       <ScreenOutlet />
       <box style={{ flexGrow: 1 }} />
-      {/* 底下那行：这会儿能用的键（`07-rules.md` §7：能用的键只说这一处） */}
+      {/* 键行：这会儿能用的键（`07-rules.md` §7：能用的键只说这一处） */}
       <text fg={tone.dim}>
         {router.current.name === "main" ? "ctrl+a 关于 · ctrl+p 挑一挑" : "ctrl+n 换一屏 · esc 回来"}
       </text>

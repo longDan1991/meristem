@@ -12,6 +12,7 @@
  */
 import { tone, useCommands } from "@meristem/tui";
 import type { ReactNode } from "react";
+import { KeyLine } from "./status.tsx";
 
 export interface UnspecifiedProps {
   /** 屏名：与路由表、命令表 `screen.*` 的第二段是同一个词。 */
@@ -25,11 +26,14 @@ export function Unspecified({ screen }: UnspecifiedProps): ReactNode {
   const names = command.words.map((word) => `/${word}`).join(" ");
   const keys = command.keys.map((binding) => binding.key).join(" / ");
   return (
-    <box flexDirection="column" width="100%" height="100%" style={{ paddingX: 1 }}>
-      <text fg={tone.accent}>{command.desc}</text>
-      <text fg={tone.dim}>{`怎么进：${keys === "" ? names : `${names}（${keys}）`}`}</text>
-      <text fg={tone.dim}>这一屏的内部还没定（P0 §2.2 的「细节在哪」写着待写）—— 定了再往里填</text>
-      <text fg={tone.dim}>esc 回来：回来时是原档、原侧边态</text>
+    <box flexDirection="column" width="100%" height="100%">
+      <box flexDirection="column" flexGrow={1} width="100%" style={{ paddingX: 1 }}>
+        <text fg={tone.accent}>{command.desc}</text>
+        <text fg={tone.dim}>{`怎么进：${keys === "" ? names : `${names}（${keys}）`}`}</text>
+        <text fg={tone.dim}>这一屏的内部还没定（P0 §2.2 的「细节在哪」写着待写）—— 定了再往里填</text>
+        <text fg={tone.dim}>esc 回来：回来时是原档、原侧边态</text>
+      </box>
+      <KeyLine />
     </box>
   );
 }

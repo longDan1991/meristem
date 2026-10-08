@@ -16,18 +16,22 @@
  * **一条命令只跑一个**：`ask` 从队尾往回问第一个接的人（`registry.ts`）—— 谁后挂上来谁先被问。
  * 于是"同一件事有两份实现"在结构上不可能，而 `esc` 收的正是最后出现的那一层。
  *
- * **`active` = 我这儿这会儿有没有这一层**：订阅只在 `active` 为真时挂着（翻转时才挂 / 摘），
- * 所以**挂上来的时刻就是那层出现的时刻** —— 次序由此自动等于"出现的次序"（P0 §1 决策 4）。
- * 别处一般不写 `active`（它作用的东西一直在）；"有没有可做的事"由处理器自己说清
- * （比如分叉在草稿为空时写一句"要有那句新话"，而不是让键静默失效）。
+ * **"接命令"这件事不在这里**：这一面只给原语（`useBus`：`subscribe` / `changed` / `ask` / `live`），
+ * 把"什么时候挂、什么时候摘"留给接的人。那件事要问两样东西：**我这一层在不在**（应用自己的条件）
+ * 与**我这一屏是不是被盖住了**（路由的激活，见 `router.ts` 的 `onActivated`）—— 两样都只有调用点
+ * 知道，所以合成那一下写在**应用**那一边（`hooks/commands.ts` 的 `useCommand`）。于是命令模块
+ * 不认识路由模块，路由模块也不认识命令模块。
  *
- * **`live(id)` 与 `ask` 共用同一个判据**：谁挂上来谁就有接的人 —— 所以"底下那行写着的键"与
+ * **次序 = 出现的次序**：订阅挂上来就排在队尾，`ask` 从队尾往回问第一个接的人 —— 所以"这一层刚
+ * 出现"与"它排在最后"是同一件事（P0 §1 决策 4）。摘掉一层再挂回来，它自然又回到队尾。
+ *
+ * **`live(id)` 与 `ask` 共用同一个判据**：谁挂着谁就有接的人 —— 所以"键行写着的键"与
  * "按下去真的会不会动"不可能对不上。
  *
- * 变因：按键怎么收口、订阅怎么跟组件生命周期绑在一起。
+ * 变因：按键怎么收口、一套订阅原语长什么样。
  */
 import { useKeyboard } from "@opentui/react";
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { Commands } from "./commands.ts";
 import { normalizeKey } from "./keys.ts";
@@ -42,12 +46,17 @@ export interface CommandBusProps {
   readonly children: ReactNode;
 }
 
+/** 总线本体：问一条命令、看它有没有人接、挂上去、以及订阅增减之后喊那一声。 */
+export interface Bus extends CommandBus {
+  /** 挂一条订阅；返回摘掉它的函数。**位置 = 挂上来的时刻**（队尾，所以后出现的先被问）。 */
+  readonly subscribe: (pattern: string, handling: Handling) => () => void;
+  /** 订阅增减之后喊一声：读 `live()` 的那些人（键行）要重画。 */
+  readonly changed: () => void;
+}
+
 interface Internals {
   readonly table: Commands;
-  readonly bus: CommandBus;
-  readonly subscribe: (pattern: string, handling: Handling) => () => void;
-  /** 订阅增减之后喊一声：读 `live()` 的那些人（底下那行）要重画。 */
-  readonly changed: () => void;
+  readonly bus: Bus;
 }
 
 const BusContext = createContext<Internals | null>(null);
@@ -62,14 +71,17 @@ export function CommandBusProvider({ table, children }: CommandBusProps): ReactN
       bus: {
         ask: (id, arg) => registry.ask(id, arg),
         live: (id) => registry.live(id),
+        subscribe: (pattern, handling) => registry.subscribe(pattern, handling),
+        changed: () => setVersion((current) => current + 1),
       },
-      subscribe: (pattern, handling) => registry.subscribe(pattern, handling),
-      changed: () => setVersion((current) => current + 1),
     }),
     [registry, table],
   );
-  // 上下文的值每次都换一个（`version` 一变就换）：底下那行这类只读 `live()` 的消费者才会重画。
-  const value = useMemo<Internals>(() => ({ ...internals, bus: { ...internals.bus } }), [internals, version]);
+  // 上下文的值每次都换一个（`version` 一变就换）：读 `live()` 的那些人（键行）才会重画。
+  // **但 `bus` 本身保持同一个身份**：订阅那一层把 `bus` 写进依赖（`hooks/commands.ts`），
+  // 每次重画换一个身份就会变成"挂上 → changed → 重画 → 身份变了 → 摘掉再挂"的自激。
+  // 要重画的是这个上下文值，不是 bus 的身份。
+  const value = useMemo<Internals>(() => ({ ...internals }), [internals, version]);
 
   // 界面唯一的按键监听：按键 → 归一化 → 查表 → 问谁接。接住了就吃掉这个键。
   useKeyboard((event) => {
@@ -90,32 +102,16 @@ function useInternals(where: string): Internals {
 }
 
 /**
- * 我接这几条（模式可以是一条，也可以是整层 `screen.*`）。
+ * 总线本体：**只有"接命令"的那个口（和应用里的 `useCommand`、示例）才用它**。
  *
- * `handling` 每次渲染都是新的闭包（它读最新的状态），但**订阅不重挂** —— 挂在一只只读盒子里，
- * 次序只在 `active` 真的翻转时才变。这就是"次序 = 出现的次序"能成立的原因。
+ * "什么时候挂、什么时候摘"由接的人自己决定 —— 应用里那件事写在一处
+ * （`packages/terminal/src/hooks/commands.ts`），它还要问路由"这一屏是不是被盖住了"。
  */
-export function useCommand(pattern: string, handling: Handling, active = true): void {
-  const { subscribe, changed } = useInternals("useCommand");
-  const latest = useRef(handling);
-  latest.current = handling;
-  useEffect(() => {
-    if (!active) return;
-    const off = subscribe(pattern, (id, arg) => latest.current(id, arg));
-    changed();
-    return () => {
-      off();
-      changed();
-    };
-  }, [subscribe, changed, pattern, active]);
+export function useBus(): Bus {
+  return useInternals("useBus").bus;
 }
 
-/** 问一次（按一个键的那一刻用）／问"有接的人吗"（底下那行用）。 */
-export function useCommandBus(): CommandBus {
-  return useInternals("useCommandBus").bus;
-}
-
-/** 认得的那些命令（命令名单、键位表、底下那行的提示都要读它）。 */
+/** 认得的那些命令（命令名单、键位表、键行的提示都要读它）。 */
 export function useCommands(): Commands {
   return useInternals("useCommands").table;
 }

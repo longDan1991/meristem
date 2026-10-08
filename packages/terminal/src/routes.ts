@@ -13,13 +13,12 @@
  * **默认那一屏是标了 `index: true` 的那一屏**（web 里 `"/"` 对应的页面）—— 打开就站在它上面，
  * `back()` 回到它。没有"主屏"这个特例：它就是表里的一项。
  *
- * **`Composer` 是屏自带的一小块**：只有要说话的那一屏需要输入行（其余屏在那儿放的是它自己的键），
- * 所以写在那一屏自己头上，位置由布局给。
+ * **屏自带的行由屏自己画**：布局不留插槽（它只画壳那一行）—— 主屏自带状态行、事实行与输入行，
+ * 别的屏什么都没有（P0 §3：跟着"我这条线"走的那几行只在要说话的屏上有意义）。
  *
- * 变因：有哪几屏、屏名、屏与布局怎么挂、哪一屏自带输入行。
+ * 变因：有哪几屏、屏名、屏与布局怎么挂。
  */
 import type { RouteObject } from "@meristem/tui";
-import { Composer } from "./components/composer.tsx";
 import { Shell } from "./layout/shell.tsx";
 import { AboutScreen } from "./screens/about.tsx";
 import { CopyScreen } from "./screens/copy.tsx";
@@ -34,7 +33,7 @@ export const SCREENS = [
   {
     Component: Shell,
     children: [
-      { name: "main", index: true, Component: MainScreen, Composer },
+      { name: "main", index: true, Component: MainScreen },
       { name: "role", Component: RoleScreen },
       { name: "model", Component: ModelScreen },
       { name: "keys", Component: KeysScreen },

@@ -17,7 +17,6 @@ import { memo } from "react";
 import type { ReactNode } from "react";
 import { FOLD } from "../lib/rows.ts";
 import { useFacts } from "../providers/facts.tsx";
-import { useScreen } from "../providers/screen.tsx";
 import { useSession } from "../providers/session.tsx";
 
 /** 最多铺几行（其余折成一行「还有 N 条」—— P0 §3）。 */
@@ -49,10 +48,14 @@ export function actives(
   });
 }
 
-export const WhoRunning = memo(function WhoRunning(): ReactNode {
+export interface WhoRunningProps {
+  /** 我站着的那条线（那一行带 `▌`）。 */
+  readonly selected: NodeId | null;
+}
+
+export const WhoRunning = memo(function WhoRunning({ selected }: WhoRunningProps): ReactNode {
   const { store, tree } = useSession();
   const { errors } = useFacts();
-  const screen = useScreen();
 
   const lines = actives(store, tree.jobs(), errors);
   if (lines.length === 0) return null;
@@ -65,7 +68,7 @@ export const WhoRunning = memo(function WhoRunning(): ReactNode {
         items={shown.map((line) => ({
           key: line.id,
           // `▌` 钉住"我站着的这条线"；其余行首留出同样一格，名字才对得齐。
-          text: `${line.id === screen.selected ? "▌" : " "}${line.name} · ${line.role}`,
+          text: `${line.id === selected ? "▌" : " "}${line.name} · ${line.role}`,
           selected: false,
           mark: [line.failed ? "✗ 出错" : undefined, line.jobs > 0 ? `▶${line.jobs}` : undefined]
             .filter((part) => part !== undefined)

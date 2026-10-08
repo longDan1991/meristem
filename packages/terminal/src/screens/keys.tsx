@@ -14,6 +14,7 @@
 import { RowList, tone, useCommands } from "@meristem/tui";
 import type { Command, Layer, ScreenViewProps } from "@meristem/tui";
 import type { ReactNode } from "react";
+import { KeyLine } from "../components/status.tsx";
 
 const GROUPS: readonly { readonly title: string; readonly layers: readonly Layer[] }[] = [
   { title: "进一屏", layers: ["screen"] },
@@ -24,27 +25,30 @@ const GROUPS: readonly { readonly title: string; readonly layers: readonly Layer
 export function KeysScreen(_props: ScreenViewProps<void>): ReactNode {
   const table = useCommands();
   return (
-    <box flexDirection="column" width="100%" height="100%" style={{ paddingX: 1 }}>
-      <scrollbox flexGrow={1} verticalScrollbarOptions={{ visible: false }}>
-        {GROUPS.map((group) => (
-          <box key={group.title} flexDirection="column" width="100%">
-            <text fg={tone.accent}>{group.title}</text>
-            <RowList
-              items={table.all
-                .filter((command) => group.layers.includes(command.layer))
-                .map((command) => ({
-                  key: command.id,
-                  text: `${namesOf(command)}${command.hint ?? command.desc}`,
-                  selected: false,
-                  mark: command.keys.map((binding) => binding.key).join(" / ") || undefined,
-                }))}
-            />
-          </box>
-        ))}
-        <text fg={tone.dim}>
-          编辑器自己的键（打字 / 退格 / 左右 / 行首行尾 / 粘贴）归输入件，不在上面这张表里
-        </text>
-      </scrollbox>
+    <box flexDirection="column" width="100%" height="100%">
+      <box flexDirection="column" flexGrow={1} width="100%" style={{ paddingX: 1 }}>
+        <scrollbox flexGrow={1} verticalScrollbarOptions={{ visible: false }}>
+          {GROUPS.map((group) => (
+            <box key={group.title} flexDirection="column" width="100%">
+              <text fg={tone.accent}>{group.title}</text>
+              <RowList
+                items={table.all
+                  .filter((command) => group.layers.includes(command.layer))
+                  .map((command) => ({
+                    key: command.id,
+                    text: `${namesOf(command)}${command.hint ?? command.desc}`,
+                    selected: false,
+                    mark: command.keys.map((binding) => binding.key).join(" / ") || undefined,
+                  }))}
+              />
+            </box>
+          ))}
+          <text fg={tone.dim}>
+            编辑器自己的键（打字 / 退格 / 左右 / 行首行尾 / 粘贴）归输入件，不在上面这张表里
+          </text>
+        </scrollbox>
+      </box>
+      <KeyLine />
     </box>
   );
 }

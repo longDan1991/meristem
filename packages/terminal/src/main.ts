@@ -73,7 +73,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     const tree = startTree({ store, llm, role: get });
     tree.resume();
     try {
-      await mount({ session: { store, tree, roles: list(), workspace: cfg.workspace }, at: args.at, commands });
+      await mount({
+        session: { store, tree, roles: list(), workspace: cfg.workspace, at: args.at },
+        commands,
+      });
     } finally {
       tree.stop();
     }

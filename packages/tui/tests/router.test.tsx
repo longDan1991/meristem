@@ -3,19 +3,19 @@
  * 路由：**站在哪一屏怎么变**（默认那一屏在栈底、`open` 压栈、`replace` 不压栈、`back` 弹栈），
  * 以及**表怎么摊平**（布局里的屏也算数、哪些表要当场炸）。
  *
- * 走位写在屏自己的 effect 里：**每次挂载走一步**（一次 effect 里连做几步会被 React 合批，
+ * 走位写在屏自己的 `onActivated` 里：**它每次露头走一步**（一次里连做几步会被 React 合批，
  * 中间那几屏根本不渲染，脚印就少了几笔），`walkOnce` 保证同一步只走一次 —— 否则回到默认那一屏时
- * 它又开一次屏，成了环。判断看的是**脚印**（一串屏名 + 参数），它比读帧里的像素可靠：非 TTY 的
+ * 它又开一次屏，成了环。屏不卸载（被盖住的只是藏起来），所以"露头"不等于"挂载"：拿挂载当这一步的
+ * 时机，被盖住的那几屏会在每次重渲染时又记一笔脚印。判断看的是**脚印**（一串屏名 + 参数），它比读帧里的像素可靠：非 TTY 的
  * 渲染器在**挂载后**更新时画的帧会缺行（见 `dev/preview/render.ts` 那条路径）。布局 + `ScreenOutlet`
  * 的渲染路径另有一条**静态**帧测试（那种情况读帧是准的）。
  */
 import { beforeEach, describe, expect, test } from "bun:test";
-import { useEffect } from "react";
+import { onActivated, RouterProvider, ScreenOutlet, useRouter } from "../src/router/router.ts";
+import type { LayoutRoute, RouteObject, ScreenRoute, ScreenViewProps } from "../src/router/route.ts";
 import type { ReactNode } from "react";
 import { renderFrame } from "../dev/preview/render.ts";
 import type { Frame } from "../dev/preview/render.ts";
-import { RouterProvider, ScreenOutlet, useRouter } from "../src/router/router.ts";
-import type { LayoutRoute, RouteObject, ScreenRoute, ScreenViewProps } from "../src/router/route.ts";
 import { indexRoutes } from "../src/router/table.ts";
 
 /** 帧里那几行字（样式不管，只看写了什么）。 */
@@ -59,19 +59,19 @@ const OPEN_ONLY = [
         index: true,
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof OPEN_ONLY>();
-          useEffect(() => {
+          onActivated(() => {
             note("main");
             if (walkOnce("open:main")) router.open("pick", { items: ["一", "二"] });
-          });
+          }, []);
           return <text>主屏</text>;
         },
       },
       {
         name: "pick",
         Component: ({ params }: ScreenViewProps<{ readonly items: readonly string[] }>): ReactNode => {
-          useEffect(() => {
+          onActivated(() => {
             note(`pick:${params.items.join(",")}`);
-          });
+          }, []);
           return <text>挑</text>;
         },
       },
@@ -89,10 +89,10 @@ const OPEN_BACK = [
         index: true,
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof OPEN_BACK>();
-          useEffect(() => {
+          onActivated(() => {
             note("main");
             if (walkOnce("back:main")) router.open("pick");
-          });
+          }, []);
           return <text>主屏</text>;
         },
       },
@@ -100,10 +100,10 @@ const OPEN_BACK = [
         name: "pick",
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof OPEN_BACK>();
-          useEffect(() => {
+          onActivated(() => {
             note("pick");
             if (walkOnce("back:pick")) router.back();
-          });
+          }, []);
           return <text>挑</text>;
         },
       },
@@ -121,19 +121,19 @@ const BACK_AT_BOTTOM = [
         index: true,
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof BACK_AT_BOTTOM>();
-          useEffect(() => {
+          onActivated(() => {
             note("main");
             if (walkOnce("bottom:main")) router.back();
-          });
+          }, []);
           return <text>主屏</text>;
         },
       },
       {
         name: "pick",
         Component: (_props: ScreenViewProps<void>): ReactNode => {
-          useEffect(() => {
+          onActivated(() => {
             note("pick");
-          });
+          }, []);
           return <text>挑</text>;
         },
       },
@@ -151,10 +151,10 @@ const REPLACE_THEN_BACK = [
         index: true,
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof REPLACE_THEN_BACK>();
-          useEffect(() => {
+          onActivated(() => {
             note("main");
             if (walkOnce("replace:main")) router.open("pick");
-          });
+          }, []);
           return <text>主屏</text>;
         },
       },
@@ -162,10 +162,10 @@ const REPLACE_THEN_BACK = [
         name: "pick",
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof REPLACE_THEN_BACK>();
-          useEffect(() => {
+          onActivated(() => {
             note("pick");
             if (walkOnce("replace:pick")) router.replace("about");
-          });
+          }, []);
           return <text>挑</text>;
         },
       },
@@ -173,10 +173,10 @@ const REPLACE_THEN_BACK = [
         name: "about",
         Component: (_props: ScreenViewProps<void>): ReactNode => {
           const router = useRouter<typeof REPLACE_THEN_BACK>();
-          useEffect(() => {
+          onActivated(() => {
             note("about");
             if (walkOnce("replace:about")) router.back();
-          });
+          }, []);
           return <text>关于</text>;
         },
       },

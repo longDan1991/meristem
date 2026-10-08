@@ -32,8 +32,8 @@ describe("这一份表", () => {
     expect(TABLE.byKey("alt+m")?.command.id).toBe("screen.model");
     expect(TABLE.byKey("ctrl+r")?.command.id).toBe("screen.search");
     expect(TABLE.byKey("alt+a")?.command.id).toBe("screen.role");
-    expect(TABLE.byKey("alt+t")?.command.id).toBe("view.tier");
-    expect(TABLE.byKey("alt+s")?.command.id).toBe("view.side");
+    expect(TABLE.byKey("alt+l")?.command.id).toBe("view.tier");
+    expect(TABLE.byKey("alt+k")?.command.id).toBe("view.side");
     expect(TABLE.byKey("alt+p")?.command.id).toBe("view.side-page");
     expect(TABLE.byKey("alt+r")?.command.id).toBe("turn.retry");
     expect(TABLE.byKey("up")?.command.id).toBe("list.prev");

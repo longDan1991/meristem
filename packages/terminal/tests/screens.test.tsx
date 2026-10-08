@@ -31,7 +31,8 @@ let dir: string;
 /** 退出那一声被喊了几次（`app.quit` 就是喊它）。 */
 let exits: number;
 
-beforeEach(async () => {
+/** 起一屏：`seed = false` 就是空树（第一次打开那一下，P0 故事 1）。 */
+async function boot(seed: boolean): Promise<void> {
   // 每个用例一条新账：`create` 是写账的，且同一份账只允许一个写者（文件级测试同进程串着跑）。
   dir = `${DIR}-${crypto.randomUUID()}`;
   exits = 0;
@@ -43,20 +44,25 @@ beforeEach(async () => {
     },
   } as unknown as LlmClient;
   const tree = startTree({ store, llm, role: get });
-  // 两条线：档 ② 要"我以外的线"才存在（只有一条线时 ①③ 直接来回）。
-  store.create({ parent: null, props: { name: "我", role: "bare", outputRoot: dir } });
-  const root = store.root() as NodeId;
-  store.create({ parent: root, props: { name: "整理 DESIGN", role: "bare", outputRoot: dir } });
+  if (seed) {
+    // 两条线：档 ② 要"我以外的线"才存在（只有一条线时 ①③ 直接来回）。
+    store.create({ parent: null, props: { name: "我", role: "bare", outputRoot: dir } });
+    const root = store.root() as NodeId;
+    store.create({ parent: root, props: { name: "整理 DESIGN", role: "bare", outputRoot: dir } });
+  }
   setup = await testRender(
     createElement(App, {
-      session: { store, tree, roles: list(), workspace: dir, onExit: () => (exits += 1) },
-      at: null,
+      session: { store, tree, roles: list(), workspace: dir, at: null, onExit: () => (exits += 1) },
       commands: COMMANDS,
     }),
     // `ctrl+c` 归界面自己（命令表里那条 `app.quit`），所以引擎不许抢先退出 —— 不然一按屏幕就没了。
     { width: 100, height: 24, exitOnCtrlC: false },
   );
   await settle();
+}
+
+beforeEach(async () => {
+  await boot(true);
 });
 
 afterEach(async () => {
@@ -113,36 +119,50 @@ const TREE = "整理 DESIGN · bare";
 const SIDE = "材料";
 
 describe("打开", () => {
-  test("壳那两行在，内容区是这段对话（档 ①）", () => {
-    expect(frame()).toContain("树在休息");
-    expect(frame()).toContain("我 · bare");
+  test("主屏自带的那几行在（含它自己的键行），内容区是这段对话（档 ①）", () => {
+    expect(frame()).toContain("树在休息"); // 状态行
+    expect(frame()).toContain("我 · bare"); // 事实行
+    expect(frame()).toContain("换档"); // 键行：主屏自己那条（`view.tier` 只挂在这一屏）
     expect(frame()).not.toContain(TREE);
   });
 });
 
+describe("空树（第一次打开，P0 故事 1）", () => {
+  beforeEach(async () => {
+    await boot(false);
+  });
+
+  test("只有输入行与它那条键行：没有状态行、没有事实行", () => {
+    expect(frame()).toContain("这句话就是开树的那句"); // 输入行的占位
+    expect(frame()).not.toContain("树在休息"); // 状态行整条不出现：还没有线，没有"正在发生的事"
+    expect(frame()).not.toContain("bare"); // 事实行也不出现：那会儿没有线可交代
+    expect(frame()).toContain("分叉"); // 键行照旧在（它是"眼前这一层能按什么"）
+  });
+});
+
 describe("档与侧边（都长在主屏里）", () => {
-  test("alt+t 循环三档：①→②→③→①", async () => {
-    await press("t", { meta: true }); // ② 树的一小段
+  test("alt+l 循环三档：①→②→③→①", async () => {
+    await press("l", { meta: true }); // ② 树的一小段
     expect(frame()).toContain(TREE);
-    await press("t", { meta: true }); // ③ 整棵树
+    await press("l", { meta: true }); // ③ 整棵树
     expect(frame()).toContain(TREE);
-    await press("t", { meta: true }); // ① 回到这段对话
+    await press("l", { meta: true }); // ① 回到这段对话
     expect(frame()).not.toContain(TREE);
   });
 
-  test("alt+s 循环三态；alt+p 换页（页留在那儿，切态不动它）", async () => {
-    await press("s", { meta: true });
+  test("alt+k 循环三态；alt+p 换页（页留在那儿，切态不动它）", async () => {
+    await press("k", { meta: true });
     expect(frame()).toContain(SIDE);
     await press("p", { meta: true });
     expect(frame()).toContain("图与 PDF");
-    await press("s", { meta: true }); // 占满全屏
+    await press("k", { meta: true }); // 占满全屏
     expect(frame()).toContain("图与 PDF"); // 态换了，页没变
-    await press("s", { meta: true }); // 收起
+    await press("k", { meta: true }); // 收起
     expect(frame()).not.toContain(SIDE);
   });
 
-  test("换档不动壳：状态行与底下那行还在原位", async () => {
-    await press("t", { meta: true });
+  test("换档不动那几行：状态行与事实行还在原位", async () => {
+    await press("l", { meta: true });
     expect(frame()).toContain("树在休息");
     expect(frame()).toContain("我 · bare");
   });
@@ -150,9 +170,9 @@ describe("档与侧边（都长在主屏里）", () => {
 
 describe("esc：收掉最后出现的那一层（P0 §1 决策 4）", () => {
   test("先换档、后开侧边 → esc 先收侧边，档还在", async () => {
-    await press("t", { meta: true }); // 档 ②（先出现）
-    await press("s", { meta: true }); // 分成两栏
-    await press("s", { meta: true }); // 占满全屏（后出现）
+    await press("l", { meta: true }); // 档 ②（先出现）
+    await press("k", { meta: true }); // 分成两栏
+    await press("k", { meta: true }); // 占满全屏（后出现）
     await escape(); // 收"占满全屏"这一层
     expect(frame()).toContain(SIDE);
     expect(frame()).toContain(TREE); // 档还开着
@@ -162,9 +182,9 @@ describe("esc：收掉最后出现的那一层（P0 §1 决策 4）", () => {
   });
 
   test("先开侧边、后换档 → esc 先收档", async () => {
-    await press("s", { meta: true }); // 分成两栏（先出现）
-    await press("s", { meta: true }); // 占满全屏
-    await press("t", { meta: true }); // 档 ②（后出现）
+    await press("k", { meta: true }); // 分成两栏（先出现）
+    await press("k", { meta: true }); // 占满全屏
+    await press("l", { meta: true }); // 档 ②（后出现）
     await escape(); // 收档
     expect(frame()).not.toContain(TREE);
     expect(frame()).toContain(SIDE); // 侧边那一层还在
@@ -194,7 +214,7 @@ describe("输入行与命令名单", () => {
   });
 
   test("esc 先收名单：档照旧留着（名单是后出现的那一层）", async () => {
-    await press("t", { meta: true });
+    await press("l", { meta: true });
     await type("/");
     expect(frame()).toContain("/help");
     await escape();
@@ -203,7 +223,7 @@ describe("输入行与命令名单", () => {
   });
 
   test("名单开着时 ↑↓ 归名单，不归树（一层只跑一个）", async () => {
-    await press("t", { meta: true }); // 树在，走位本来是它的
+    await press("l", { meta: true }); // 树在，走位本来是它的
     await type("/");
     await act(async () => {
       setup.mockInput.pressArrow("down");
@@ -233,11 +253,49 @@ describe("进屏与回屏（修饰键这条路）", () => {
   });
 
   test("屏压着时 esc 的次序：先退屏，别动主屏的档", async () => {
-    await press("t", { meta: true }); // 档 ②
+    await press("l", { meta: true }); // 档 ②
     await press("m", { meta: true }); // 压一屏（后出现，但它不是主屏里的层）
     expect(frame()).toContain("挑模型");
     await escape();
     expect(frame()).toContain("树在休息");
     expect(frame()).toContain(TREE); // 主屏的档没被动（退屏那一层收掉了就停）
+  });
+
+  test("进屏后主屏自带的那几行退场，壳那一行照旧写着怎么出去", async () => {
+    await press("m", { meta: true });
+    expect(frame()).toContain("挑模型");
+    expect(frame()).not.toContain("树在休息"); // 状态行归主屏
+    expect(frame()).not.toContain("我 · bare"); // 事实行归主屏
+    expect(frame()).toContain("收掉这一层"); // 键行归壳：屏压着时它写的正是 `esc`
+  });
+
+  test("被盖住的主屏不再接它那几条键，打字也进不去那只藏起来的输入行", async () => {
+    await press("a", { meta: true }); // 挑角色压上来
+    expect(frame()).toContain("挑角色");
+    expect(frame()).not.toContain("收手"); // 主屏那几条的提示跟着它一起退场
+    await press("x", { ctrl: true }); // `ctrl+x` 没人接（主屏退到后面了），什么都不会发生
+    await type("zzz");
+    await escape();
+    expect(frame()).not.toContain("已收手"); // 那一行回执没写
+    expect(frame()).not.toContain("zzz"); // 也没有悄悄进到输入行里
+    expect(frame()).toContain("树在休息"); // 还是原来那一屏
+  });
+
+  test("回来之后输入行还拿着焦点（打字照旧进那一行）", async () => {
+    await type("/he");
+    await escape(); // 先收掉名单
+    await press("m", { meta: true }); // 压一屏
+    await escape(); // 回来
+    await type("接着说的话");
+    expect(frame()).toContain("接着说的话");
+  });
+
+  test("回来之后还是原档（屏没卸载，主屏原来那个实例还在）", async () => {
+    await press("l", { meta: true }); // 档 ②
+    await press("k", { meta: true }); // 分成两栏
+    await press("m", { meta: true }); // 压一屏
+    await escape();
+    expect(frame()).toContain(TREE); // 档还在
+    expect(frame()).toContain(SIDE); // 侧边还在那一态
   });
 });

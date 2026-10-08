@@ -1,6 +1,6 @@
 /**
  * 命令表：**一份 yaml 进来，界面认得的全部命令出去** —— 斜杠名字、别名、键、参数提示、
- * 底下那行写的几个字。它是命令模块的"展示那一半"（另一半是 `bus.tsx`：谁按了、归谁做）。
+ * 键行写的几个字。它是命令模块的"展示那一半"（另一半是 `bus.tsx`：谁按了、归谁做）。
  *
  * **从路径建一份表**（不是一个写死路径的模块单例）：表是随应用发布的数据，路径由装载它的那一方给
  * （`packages/terminal` 给 `<包>/registry/commands.yaml`）—— 本包不认识任何应用把文件放哪。
@@ -45,7 +45,7 @@ export interface Command {
   /** 匹配用的那些字（名字在最前，含别名）。**从 name 与 aliases 读出来**，不是表里的字段。 */
   readonly words: readonly string[];
   readonly desc: string;
-  /** 底下那行右端写的那几个字（`null` = 不进底下那行）。只有"做事"的那几条写它。 */
+  /** 键行右端写的那几个字（`null` = 不进键行）。只有"做事"的那几条写它。 */
   readonly hint: string | null;
   /** 给人看的参数提示（`[provider/model]`），不解析。 */
   readonly args: string | null;

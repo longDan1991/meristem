@@ -12,21 +12,21 @@
  * 这一块占**恰好 `size` 行**（档 ② 的预算 / 档 ③ 的整块高）：高度是显式给的，不靠内容撑。
  *
  * **键从命令表来**：这一片认领的是表里 `list.*` 那几条（键写在 `registry/commands.yaml`），
- * 不在这里再写一遍键名 —— 键位表屏与底下那行读的是同一份；**挂上来与否就是"这份名单在不在"**。
+ * 不在这里再写一遍键名 —— 键位表屏与键行读的是同一份；**挂上来与否就是"这份名单在不在"**。
  *
  * 变因：树的窗口与实况这两处画法（折树与窗口预算是 `lib/tree.ts` 的纯计算）。
  */
 import type { NodeId } from "@meristem/atree";
-import { RowList, useCommand } from "@meristem/tui";
+import { RowList } from "@meristem/tui";
 import type { RowListItem } from "@meristem/tui";
 import { memo } from "react";
 import type { ReactNode } from "react";
+import { useCommand } from "../hooks/commands.ts";
 import { useNow } from "../hooks/job-output.ts";
 import { unaccounted } from "../lib/inflight.ts";
 import { treeRows, treeWindow } from "../lib/tree.ts";
 import type { TreeRow } from "../lib/tree.ts";
 import { useFacts } from "../providers/facts.tsx";
-import { useScreen } from "../providers/screen.tsx";
 import { useSession } from "../providers/session.tsx";
 import { useTail } from "../providers/tail.tsx";
 
@@ -41,6 +41,10 @@ export interface TreeViewProps {
   readonly size: number;
   /** 选中那行下面就地展开它的实况（档 ②）。 */
   readonly detail: boolean;
+  /** 树上选中的那条、换它那一下、以及"切到这条线"（走位与切换归主屏那一份状态）。 */
+  readonly cursor: NodeId | null;
+  readonly moveCursor: (node: NodeId | null) => void;
+  readonly enterLine: (node: NodeId) => void;
 }
 
 /** 一行树（带折起来的那种不可选中的行）。 */
@@ -54,30 +58,35 @@ function itemsOf(rows: readonly TreeRow[], errors: ReadonlyMap<NodeId, string>):
   });
 }
 
-export const TreeView = memo(function TreeView({ size, detail }: TreeViewProps): ReactNode {
+export const TreeView = memo(function TreeView({
+  size,
+  detail,
+  cursor,
+  moveCursor,
+  enterLine,
+}: TreeViewProps): ReactNode {
   const { store, tree } = useSession();
   const { errors } = useFacts();
-  const screen = useScreen();
 
-  const rows = treeRows(store, screen.cursor, tree.jobs());
+  const rows = treeRows(store, cursor, tree.jobs());
   const windowSize = Math.max(1, detail ? size - DETAIL_ROWS : size);
   const { window, selectable } = treeWindow(rows, windowSize);
-  const facts = useDetail(detail ? screen.cursor : null);
+  const facts = useDetail(detail ? cursor : null);
 
   // 走位（`list.*`）就近挂在这儿：这一片在，走位就归它（挂上来的时刻 = 树出现的时刻 ——
   // 命令名单浮层若也开着，它挂得更晚，于是 `↑↓` 归名单，P0 §1 决策 4）。
   useCommand("list.*", (id) => {
     if (selectable.length === 0) return;
-    const at = screen.cursor === null ? -1 : selectable.indexOf(screen.cursor);
+    const at = cursor === null ? -1 : selectable.indexOf(cursor);
     if (id === "list.enter") {
       const chosen = selectable[at < 0 ? 0 : at];
-      if (chosen !== undefined) screen.enterLine(chosen);
+      if (chosen !== undefined) enterLine(chosen);
       return;
     }
     const delta = id === "list.prev" ? -1 : 1;
     const next =
       at < 0 ? (delta > 0 ? 0 : selectable.length - 1) : Math.min(Math.max(at + delta, 0), selectable.length - 1);
-    screen.moveCursor(selectable[next] ?? null);
+    moveCursor(selectable[next] ?? null);
   });
 
   // 实况就插在选中那行下面（accordion：不是另开一块，也没有第二个盒子）。

@@ -8,9 +8,10 @@
  *      作用面（id 的第一段）是**应用自己的词** —— 这一份用例用的是 `app` / `demo`，模块只负责卡住它。
  *   ② **没有任何组件碰按键**：`CommandBusProvider` 是唯一监听的地方（按键 → 查表 → 问谁接）。
  *      没被认领的键（`j` / 退格 / 中文）原样落到焦点里的输入件上 —— 这里没有输入件，所以什么也不发生。
- *   ③ **谁作用谁订阅**：`useCommand(模式, 处理器, active?)` 写在作用那块东西自己的文件里。
- *      `active` 就是"这一层在不在"：只在它为真时挂着，**翻转时才重挂** —— 所以挂上来的时刻
- *      就是那层出现的时刻，次序由此恒等于出现的次序。
+ *   ③ **谁作用谁订阅，而合成那一下写在调用点**：这一面只给原语（`useBus`），`useLayer`（本文件里
+ *      那十几行）把"什么时候挂、什么时候摘"补上。`active` 就是"这一层在不在"：只在它为真时挂着，
+ *      **翻转时才重挂** —— 所以挂上来的时刻就是那层出现的时刻，次序由此恒等于出现的次序。
+ *      （真应用里那一层写在 `packages/terminal/src/hooks/commands.ts`：它还要问路由"这一屏被盖住了吗"。）
  *   ④ **一条命令只跑一个，从队尾往回问**：这里的 `esc` 有三层——内层、外层、壳上那条"退屏"
  *      （最后一条要真压了一屏才有）。**后出现的那层排在队尾**，所以先按 `alt+o` 再按 `alt+i`
  *      时，`esc` 收的是内层；反过来按，收的就是外层。
@@ -20,17 +21,39 @@
  * 跑起来看：`bun run packages/tui/dev/preview/frame.ts packages/tui/src/command/example/two-layers.tsx --wireframe`
  */
 import { join } from "node:path";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { CommandBusProvider, Commands, tone, useCommand, useCommandBus, useCommands } from "../../index.ts";
-import type { CommandBus } from "../../index.ts";
+import { CommandBusProvider, Commands, tone, useBus, useCommands } from "../../index.ts";
+import type { CommandBus, Handling } from "../../index.ts";
 
 /** ① 表从路径建：整棵树共用这一份（真实应用建在装配那一层）。作用面词表也是这一份用例自己的。 */
 const TABLE = new Commands(join(import.meta.dir, "commands.yaml"), ["app", "demo"]);
 
+/**
+ * ③ **接一条命令**：这一面（`bus.tsx`）只给原语，所以"什么时候挂、什么时候摘"写在这儿。
+ *
+ * 真应用里这一下合成在**应用**那一层（`packages/terminal/src/hooks/commands.ts` 的 `useCommand`），
+ * 因为它还要问路由"这一屏被盖住了吗"（`onActivated`）—— 那时屏不卸载，光看挂载/卸载不够。
+ * 这一份用例只有一层浮层、不涉及路由，所以按 `active` 挂就够了。
+ */
+function useLayer(pattern: string, handling: Handling, active = true): void {
+  const bus = useBus();
+  const latest = useRef(handling);
+  latest.current = handling;
+  useEffect(() => {
+    if (!active) return;
+    const off = bus.subscribe(pattern, (id, arg) => latest.current(id, arg));
+    bus.changed();
+    return () => {
+      off();
+      bus.changed();
+    };
+  }, [bus, pattern, active]);
+}
+
 /** 一层：它在，就接住 `esc`（`onClose` 是"收掉我"）。 */
 function Layer({ what, onClose }: { readonly what: string; readonly onClose: () => void }): ReactNode {
-  useCommand("app.close", () => onClose());
+  useLayer("app.close", () => onClose());
   return <text fg={tone.running}>{`▌ ${what}：这一层在 —— 现在 esc 收我`}</text>;
 }
 
@@ -39,16 +62,16 @@ function Panel(): ReactNode {
   const [outer, setOuter] = useState(false);
   const [inner, setInner] = useState(false);
   const [notice, setNotice] = useState("");
-  const bus = useCommandBus();
+  const bus = useBus();
   const table = useCommands();
 
   // ⑤ 一条订阅接住整层；处理器拿得到具体的 id。
-  useCommand("demo.*", (id) => {
+  useLayer("demo.*", (id) => {
     setNotice(`有人接了 ✓ ${id}`);
     if (id === "demo.outer") setOuter(true);
     if (id === "demo.inner") setInner(true);
   });
-  useCommand("app.quit", () => setNotice("退出：真应用在这里收终端"));
+  useLayer("app.quit", () => setNotice("退出：真应用在这里收终端"));
 
   return (
     <box flexDirection="column" width="100%" paddingX={1}>

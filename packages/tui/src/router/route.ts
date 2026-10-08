@@ -34,14 +34,6 @@ export interface ScreenRoute<P = void> {
    * 的话 `open` 会以为它要一个 `unknown` 参数 —— 因为"没有参数"这件事在类型上读不出来。
    */
   readonly Component: (props: ScreenViewProps<P>) => ReactNode;
-  /**
-   * 这一屏**自带的一小块**：布局替它摆位置，摆哪儿由布局定。**不吃 props** —— 它要什么自己从
-   * 状态里取（`useScreen` / 命令表），布局只负责位置。
-   *
-   * 为什么有这么个东西：**不是每一屏都需要同一些零件**。比如输入行只有"说话"的那一屏需要，
-   * 其余屏（键位表、挑角色…）在那儿放的是它自己的键；所以它是屏自带的，不是壳的固定件。
-   */
-  readonly Composer?: () => ReactNode;
 }
 
 /** 一层布局：没有名字，只画壳；`children` 是画在它里面的路由对象。 */

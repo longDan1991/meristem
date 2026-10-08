@@ -1,5 +1,5 @@
 /**
- * 底下那行右端的键提示：**有接的人才写**（问总线），且最多占给定格数（左端"我在哪条线"不许被挤没）。
+ * 键行的键提示：**有接的人才写**（问总线），且最多占给定格数（放不下掐尾巴补 `…`）。
  *
  * 表用的是**随代码发布的那一份**（提示那一条依赖表里的 `hint` 字段，所以拿真表验才有意义）；
  * 总线是一份**假的**（只回 `live`）：提示只依赖"谁挂上来了"，不依赖谁去做。
@@ -30,15 +30,15 @@ describe("keyHints", () => {
     const hints = keyHints(TABLE, busOf("turn.fork", "turn.stop", "app.close", "app.quit", "view.tier"), ROOM);
     expect(hints).toContain("ctrl+b 分叉");
     expect(hints).toContain("ctrl+x 收手");
-    expect(hints).toContain("alt+t 换档");
+    expect(hints).toContain("alt+l 换档");
     expect(hints).not.toContain("alt+m");
     expect(hints).not.toContain("/");
   });
 
   test("档与侧边只在主屏上写：主屏不在（没人接 `view.*`）就不写它们，壳上的那几条照写", () => {
     const elsewhere = keyHints(TABLE, busOf("turn.stop", "app.close", "app.quit"), ROOM);
-    expect(elsewhere).not.toContain("alt+t");
-    expect(elsewhere).not.toContain("alt+s");
+    expect(elsewhere).not.toContain("alt+l");
+    expect(elsewhere).not.toContain("alt+k");
     expect(elsewhere).toContain("ctrl+x 收手");
     expect(elsewhere).toContain("escape 收掉这一层");
   });
@@ -51,7 +51,7 @@ describe("keyHints", () => {
   test("顺序就是命令表里的顺序（分叉 → 收手 → 换档，表里怎么写就怎么排）", () => {
     const hints = keyHints(TABLE, busOf("turn.fork", "turn.stop", "view.tier"), ROOM);
     expect(hints.indexOf("ctrl+b 分叉")).toBeLessThan(hints.indexOf("ctrl+x 收手"));
-    expect(hints.indexOf("ctrl+x 收手")).toBeLessThan(hints.indexOf("alt+t 换档"));
+    expect(hints.indexOf("ctrl+x 收手")).toBeLessThan(hints.indexOf("alt+l 换档"));
   });
 
   test("放不下就掐掉并说出来；一条都放不下也说一声", () => {
