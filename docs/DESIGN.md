@@ -170,7 +170,7 @@ Monorepo（Bun workspaces），五个包。主坐标轴宣布为：**谁的命�
 | 包 | 变因（谁让它改） | 对外只有这一面 | 内部依赖 |
 |---|---|---|---|
 | `@meristem/atree` | 数据结构与存取机制 | **一棵通用的树（参考 DOM）**：节点（父 / 不透明的 `props` / 边界 / 出生顺序）+ 每个节点自己的内容数组 + 沿枝拼接（`assemble`）+ append-only 账。对外只有 `load(path)`（有树折出来，没有就是空的内存树，真写入才落盘）/ 两类操作 / `close()`。**不含任何业务语义**：`props` 与内容都是上层给的类型，一个字段都不解释；落盘格式是内部机制 | 无 |
-| `@meristem/tui` | 通用件的实现（**不含业务词汇**） | 只吃 props 的通用件（名单 `RowList`：一行 = 文本 + 右端记号 + 选中底色 / 状态条）+ 两个功能模块（`command/`：**命令模块**——一份 yaml 当表、按键只在这儿收口、谁作用谁订阅；`router/`：一屏怎么进怎么出）+ 渲染器生命周期 + 一处配色。**opentui 已有的不自己写**：单行编辑器用它自带的 `<input>`、滚动用 `<scrollbox>`、折行用 `wrapMode="char"`；一沾业务词（手 / 思考 / 线）就住 terminal | 无 |
+| `@meristem/tui` | 通用件的实现（**不含业务词汇**） | 只吃 props 的通用件（名单 `RowList`：一行 = 文本 + 右端记号 + 选中底色 / 状态条）+ 两个功能模块（`command/`：**命令模块**——一份 yaml 当表、按键只在这儿收口、订阅原语；`router/`：一屏怎么进怎么出、以及"在不在眼前"那条生命周期）+ 渲染器生命周期 + 一处配色。**opentui 已有的不自己写**：单行编辑器用它自带的 `<input>`、滚动用 `<scrollbox>`、折行用 `wrapMode="char"`；一沾业务词（手 / 思考 / 线）就住 terminal | 无 |
 | `@meristem/roles` | 能力（一块能力因什么而变：它的提示词、它的手、它的技能） | **只有两个面**：LLM 面（`Role`：`system()` / `hands()` / **`findHand()`**（找不到就给一句回给模型的话），外加**作业的形状** `Job` 与三只作业共享手）+ 人面（`start` / `list` / `get`） | 无 |
 | `@meristem/harness` | 生命周期（开 / 恢复 / 推进 / 等人 / 出生 / 收手：唤醒、上下文组装、错误处置、出生与调度规则） | **操作 + 事件**：`Tree`（`resume` / `say` / `fork` / `stop` / `jobs` / `cancel` / `retry`）+ `subscribe`；另露**上层词汇**（`LineProps` / `WireMessage` / `Usage` / 配对规则）与 `createClient` | atree, roles |
 | `@meristem/terminal` | 交互与展示（业务）+ **部署的事实**（`.env` 怎么解释、怎么分给各包） | 一屏界面 + 入口 + 装配 | atree, roles, harness, tui |
